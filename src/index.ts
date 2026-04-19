@@ -44,6 +44,13 @@ export { Series } from "./core/Series.js";
 export type { SeriesQueryContext, SeriesRenderContext } from "./core/Series.js";
 export { CandlestickSeries } from "./core/CandlestickSeries.js";
 export { LineSeries } from "./core/LineSeries.js";
+export { AreaSeries } from "./core/AreaSeries.js";
+export { HistogramSeries } from "./core/HistogramSeries.js";
+export {
+  BaselineSeries,
+  splitAtBaseline,
+} from "./core/BaselineSeries.js";
+export type { BaselinePoint } from "./core/BaselineSeries.js";
 export {
   generatePriceTicks,
   niceNumber,

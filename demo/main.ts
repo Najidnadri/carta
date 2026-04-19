@@ -2,9 +2,13 @@ import * as CartaExports from "../src/index.js";
 import {
   asPrice,
   asTime,
+  AreaSeries,
+  BaselineSeries,
   CandlestickSeries,
+  HistogramSeries,
   LineSeries,
   TimeSeriesChart,
+  type BaselineMode,
   type CacheStats,
   type CartaEventMap,
   type Channel,
@@ -188,10 +192,61 @@ function generateSyntheticOhlc(
   return out;
 }
 
+const VOLUME_OVERLAY_BAND_FRACTION = 0.15;
+// Bright palette so up/down bars exceed criterion-1 luminance delta (> 40/255)
+// and stay distinguishable in sunlight and greyscale.
+const VOLUME_UP_COLOR = 0x00e676;
+const VOLUME_DOWN_COLOR = 0xff1744;
+
+/**
+ * Map raw volume values into a visual band at the bottom of the candle's
+ * price range so the histogram overlays the candles without dragging the
+ * auto-scale domain outside the candle extents. Pre-colors bars by
+ * close ≥ open so HistogramSeries' per-record color override is exercised.
+ */
+function scaleVolumeForOverlay(bars: readonly SyntheticBar[]): PointRecord[] {
+  if (bars.length === 0) {
+    return [];
+  }
+  let priceMin = Number.POSITIVE_INFINITY;
+  let priceMax = Number.NEGATIVE_INFINITY;
+  let volumeMax = 0;
+  for (const b of bars) {
+    const low = Number(b.low);
+    const high = Number(b.high);
+    if (Number.isFinite(low) && low < priceMin) {
+      priceMin = low;
+    }
+    if (Number.isFinite(high) && high > priceMax) {
+      priceMax = high;
+    }
+    if (b.volume > volumeMax) {
+      volumeMax = b.volume;
+    }
+  }
+  if (!Number.isFinite(priceMin) || !Number.isFinite(priceMax) || priceMin >= priceMax || volumeMax <= 0) {
+    return [];
+  }
+  const band = (priceMax - priceMin) * VOLUME_OVERLAY_BAND_FRACTION;
+  const out: PointRecord[] = [];
+  for (const b of bars) {
+    const normalized = b.volume / volumeMax;
+    const value = priceMin + normalized * band;
+    const isUp = Number(b.close) >= Number(b.open);
+    out.push({
+      time: b.time,
+      value: asPrice(value),
+      color: isUp ? VOLUME_UP_COLOR : VOLUME_DOWN_COLOR,
+    });
+  }
+  return out;
+}
+
 interface MountResult {
   readonly chart: TimeSeriesChart;
   readonly candles: CandlestickSeries;
   readonly sma: LineSeries;
+  readonly volume: HistogramSeries;
 }
 
 function computeSma(
@@ -245,9 +300,19 @@ async function mount(): Promise<MountResult> {
   const chart = await TimeSeriesChart.create(opts);
   chart.priceScale().setDomain(win.priceMin, win.priceMax);
   chart.priceScale().setAutoScale(true);
+  chart.defineChannel({ id: DEMO_VOLUME_CHANNEL, kind: "point" });
   const candles = chart.addSeries(new CandlestickSeries({ channel: DEMO_OHLC_CHANNEL }));
   const sma = chart.addSeries(new LineSeries({ channel: DEMO_SMA_CHANNEL }));
-  return { chart, candles, sma };
+  const volume = chart.addSeries(
+    new HistogramSeries({
+      channel: DEMO_VOLUME_CHANNEL,
+      // Volume is pre-scaled host-side into the bottom 15% of the candle
+      // range; opt out of auto-scale so the series doesn't drag the domain
+      // down to `base` and crush the candle band.
+      participatesInAutoScale: false,
+    }),
+  );
+  return { chart, candles, sma, volume };
 }
 
 function formatDurationMs(ms: number): string {
@@ -358,9 +423,11 @@ async function main(): Promise<void> {
       return;
     }
     if (req.channelId === DEMO_VOLUME_CHANNEL) {
+      // Pull the same synthetic bars the candles use, then host-scale
+      // the volume into the bottom 15% of the candle range and pre-color
+      // by up/down sentiment so HistogramSeries gets per-bar colors.
       const bars = generateSyntheticOhlc(start, end, iv, 100);
-      const points: PointRecord[] = bars.map((b) => ({ time: b.time, value: asPrice(b.volume) }));
-      chart.supplyData(req.channelId, iv, points);
+      chart.supplyData(req.channelId, iv, scaleVolumeForOverlay(bars));
     }
   };
 
@@ -380,12 +447,16 @@ async function main(): Promise<void> {
 
   let candles: CandlestickSeries | null = null;
   let sma: LineSeries | null = null;
+  let volume: HistogramSeries | null = null;
+  let areaExtra: AreaSeries | null = null;
+  let baselineExtra: BaselineSeries | null = null;
 
   {
     const first = await mount();
     chart = first.chart;
     candles = first.candles;
     sma = first.sma;
+    volume = first.volume;
     wireEvents(chart);
   }
 
@@ -395,6 +466,9 @@ async function main(): Promise<void> {
     chart = null;
     candles = null;
     sma = null;
+    volume = null;
+    areaExtra = null;
+    baselineExtra = null;
     resetEventCounts();
     const next = await mount();
     if (gen !== generation) {
@@ -404,6 +478,7 @@ async function main(): Promise<void> {
     chart = next.chart;
     candles = next.candles;
     sma = next.sma;
+    volume = next.volume;
     wireEvents(chart);
   };
 
@@ -476,10 +551,11 @@ async function main(): Promise<void> {
     const windowPad = SMA_PERIOD * ivNum;
     const bars = generateSyntheticOhlc(s - windowPad, e, ivNum, mid);
     chart.supplyData(DEMO_OHLC_CHANNEL, ivNum, bars);
-    const points: PointRecord[] = bars
-      .filter((b) => Number(b.time) >= s)
-      .map((b) => ({ time: b.time, value: asPrice(b.volume) }));
-    chart.supplyData(DEMO_VOLUME_CHANNEL, ivNum, points);
+    const visibleBars = bars.filter((b) => Number(b.time) >= s);
+    const volumePoints = scaleVolumeForOverlay(visibleBars);
+    if (volumePoints.length > 0) {
+      chart.supplyData(DEMO_VOLUME_CHANNEL, ivNum, volumePoints);
+    }
     const closes = bars.map((b) => ({ time: b.time, close: Number(b.close) }));
     const sma = computeSma(closes, SMA_PERIOD).filter(
       (p) => Number(p.time) >= s && Number(p.time) <= e,
@@ -555,6 +631,43 @@ async function main(): Promise<void> {
     candlePoolTotal: (): number => candles?.totalPoolSize() ?? 0,
     getCandles: (): CandlestickSeries | null => candles,
     getSma: (): LineSeries | null => sma,
+    getVolume: (): HistogramSeries | null => volume,
+    volumePoolActive: (): number => volume?.activePoolSize() ?? 0,
+    volumePoolTotal: (): number => volume?.totalPoolSize() ?? 0,
+    addAreaSeries: (channel = DEMO_SMA_CHANNEL): boolean => {
+      if (chart === null || areaExtra !== null) {
+        return false;
+      }
+      areaExtra = chart.addSeries(new AreaSeries({ channel }));
+      return true;
+    },
+    removeAreaSeries: (): boolean => {
+      if (chart === null || areaExtra === null) {
+        return false;
+      }
+      const removed = chart.removeSeries(areaExtra);
+      if (removed) {
+        areaExtra = null;
+      }
+      return removed;
+    },
+    addBaselineSeries: (baseline: BaselineMode = 100, channel = DEMO_SMA_CHANNEL): boolean => {
+      if (chart === null || baselineExtra !== null) {
+        return false;
+      }
+      baselineExtra = chart.addSeries(new BaselineSeries({ channel, baseline }));
+      return true;
+    },
+    removeBaselineSeries: (): boolean => {
+      if (chart === null || baselineExtra === null) {
+        return false;
+      }
+      const removed = chart.removeSeries(baselineExtra);
+      if (removed) {
+        baselineExtra = null;
+      }
+      return removed;
+    },
     removeCandles: (): boolean => {
       if (chart === null || candles === null) {
         return false;

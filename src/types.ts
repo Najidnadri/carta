@@ -151,6 +151,14 @@ export interface Theme {
   readonly up: number;
   readonly down: number;
   readonly line: number;
+  readonly areaTop: number;
+  readonly areaBottom: number;
+  readonly histogramUp: number;
+  readonly histogramDown: number;
+  readonly baselinePositiveTop: number;
+  readonly baselinePositiveBottom: number;
+  readonly baselineNegativeTop: number;
+  readonly baselineNegativeBottom: number;
 }
 
 export const DEFAULT_THEME: Theme = {
@@ -162,6 +170,14 @@ export const DEFAULT_THEME: Theme = {
   up: 0x26a69a,
   down: 0xef5350,
   line: 0x58a6ff,
+  areaTop: 0x58a6ff,
+  areaBottom: 0x58a6ff,
+  histogramUp: 0x26a69a,
+  histogramDown: 0xef5350,
+  baselinePositiveTop: 0x26a69a,
+  baselinePositiveBottom: 0x26a69a,
+  baselineNegativeTop: 0xef5350,
+  baselineNegativeBottom: 0xef5350,
 };
 
 // ─── Logger ────────────────────────────────────────────────────────────────
@@ -256,5 +272,58 @@ export interface CandlestickSeriesOptions {
 export interface LineSeriesOptions {
   readonly channel: string;
   readonly color?: number;
+  readonly lineWidth?: number;
+}
+
+export interface AreaSeriesOptions {
+  readonly channel: string;
+  /** Gradient-top color (near the polyline). Defaults to `theme.areaTop`. */
+  readonly topColor?: number;
+  /** Gradient-bottom color (at the baseline). Defaults to `theme.areaBottom`. */
+  readonly bottomColor?: number;
+  /** Gradient-top alpha in [0, 1]. Defaults to 0.45. */
+  readonly topAlpha?: number;
+  /** Gradient-bottom alpha in [0, 1]. Defaults to 0. */
+  readonly bottomAlpha?: number;
+  /** Stroke color for the polyline on top of the fill. Defaults to `topColor`. */
+  readonly lineColor?: number;
+  readonly lineWidth?: number;
+  /**
+   * Price value that the fill extends to at the bottom. Defaults to the
+   * effective price-scale minimum for the visible window (visible bottom).
+   */
+  readonly baseline?: number;
+}
+
+export interface HistogramSeriesOptions {
+  readonly channel: string;
+  /** Default color for bars without a per-record `color` override. Defaults to `theme.line`. */
+  readonly color?: number;
+  /** Price value the bars grow from. Defaults to 0. */
+  readonly base?: number;
+  /**
+   * Whether this series' data influences the chart's auto-scale domain via
+   * `priceRangeInWindow`. Volume overlays on a shared price scale should set
+   * this to `false` so the base + value range doesn't widen the domain.
+   * Defaults to `true`.
+   */
+  readonly participatesInAutoScale?: boolean;
+}
+
+export type BaselineMode = number | "first" | "average";
+
+export interface BaselineSeriesOptions {
+  readonly channel: string;
+  /** Baseline price. Numeric, or `'first'` / `'average'` of visible finite values. Defaults to 0. */
+  readonly baseline?: BaselineMode;
+  readonly positiveTopColor?: number;
+  readonly positiveBottomColor?: number;
+  readonly negativeTopColor?: number;
+  readonly negativeBottomColor?: number;
+  /** Alpha for the top color stop in each fill. Defaults to 0.45. */
+  readonly fillTopAlpha?: number;
+  /** Alpha for the bottom color stop in each fill. Defaults to 0.05. */
+  readonly fillBottomAlpha?: number;
+  readonly lineColor?: number;
   readonly lineWidth?: number;
 }
