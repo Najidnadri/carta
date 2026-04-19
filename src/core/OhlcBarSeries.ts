@@ -1,19 +1,17 @@
-import { drawCandleGlyph } from "./candleGlyph.js";
 import type { PriceRange } from "./PriceRangeProvider.js";
 import { Series, type SeriesRenderContext } from "./Series.js";
 import { ShapePool } from "./ShapePool.js";
 import {
   asPrice,
-  type CandlestickSeriesOptions,
   type DataRecord,
+  type OhlcBarSeriesOptions,
   type OhlcRecord,
   type Time,
 } from "../types.js";
 
-const DEFAULT_WICK_WIDTH = 1;
-const DEFAULT_BODY_GAP_PX = 1;
+const DEFAULT_TICK_WIDTH = 1;
 const MIN_HALF_WIDTH_PX = 1;
-const BODY_FILL_FRACTION = 0.7;
+const BAR_FILL_FRACTION = 0.7;
 
 function isFiniteOhlc(r: DataRecord): r is OhlcRecord {
   if (!("open" in r) || !("high" in r) || !("low" in r) || !("close" in r)) {
@@ -29,20 +27,24 @@ function isFiniteOhlc(r: DataRecord): r is OhlcRecord {
 }
 
 /**
- * Pool-backed candlestick series. Body = rect from min(open,close) to
- * max(open,close), wick = line from low to high. Bar color picks from the
- * theme by default (`theme.up` / `theme.down`) — override per-instance via
- * `upColor` / `downColor`. Non-finite OHLC records are silently skipped.
+ * Pool-backed OHLC-bar series: vertical low→high line with a left tick for
+ * `open` and a right tick for `close`. Same data as `CandlestickSeries`,
+ * different glyph — traders who prefer the classic bar chart over candles.
+ * Colour picks from the theme (`theme.up` / `theme.down`) by default.
  *
- * Renders bars in the window ±1 interval so partial bars at the viewport
- * edge keep their wicks. `plotClip` on the renderer handles overpaint.
+ * `thinBars: true` collapses every stroke to 1 pixel with `pixelLine: true`
+ * regardless of `tickWidth` — useful in dense windows. Non-finite OHLC
+ * records are silently skipped.
+ *
+ * Renders bars in the window ±1 interval so edge ticks stay visible during
+ * a pan; `plotClip` on the renderer contains overpaint.
  */
-export class CandlestickSeries extends Series {
+export class OhlcBarSeries extends Series {
   private readonly pool: ShapePool;
-  private readonly opts: CandlestickSeriesOptions;
+  private readonly opts: OhlcBarSeriesOptions;
 
-  constructor(options: CandlestickSeriesOptions) {
-    super(options.channel, "ohlc", `CandlestickSeries(${options.channel})`);
+  constructor(options: OhlcBarSeriesOptions) {
+    super(options.channel, "ohlc", `OhlcBarSeries(${options.channel})`);
     this.opts = options;
     this.pool = new ShapePool(this.container);
   }
@@ -96,25 +98,24 @@ export class CandlestickSeries extends Series {
     if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) {
       return;
     }
-    const queryStart = start - iv;
-    const queryEnd = end + iv;
     const records = ctx.dataStore.recordsInRange(
       this.channel,
       iv,
-      queryStart,
-      queryEnd,
+      start - iv,
+      end + iv,
     );
     if (records.length === 0) {
       return;
     }
     const upColor = this.opts.upColor ?? ctx.theme.up;
     const downColor = this.opts.downColor ?? ctx.theme.down;
-    const wickWidth = this.opts.wickWidth ?? DEFAULT_WICK_WIDTH;
-    const bodyGap = this.opts.bodyGapPx ?? DEFAULT_BODY_GAP_PX;
+    const thinBars = this.opts.thinBars === true;
+    const width = thinBars ? 1 : this.opts.tickWidth ?? DEFAULT_TICK_WIDTH;
+    const pixelLine = thinBars || width === 1;
     const spacing = ctx.timeScale.barSpacingPx;
     const half = Math.max(
       MIN_HALF_WIDTH_PX,
-      Math.floor((spacing * BODY_FILL_FRACTION - bodyGap) / 2),
+      Math.floor((spacing * BAR_FILL_FRACTION) / 2),
     );
     for (const r of records) {
       if (!isFiniteOhlc(r)) {
@@ -136,18 +137,12 @@ export class CandlestickSeries extends Series {
         continue;
       }
       const color = close >= open ? upColor : downColor;
+      const style = { color, width, pixelLine };
       const g = this.pool.acquire();
       g.clear();
-      drawCandleGlyph(g, {
-        x,
-        yOpen,
-        yClose,
-        yHigh,
-        yLow,
-        color,
-        wickWidth,
-        half,
-      });
+      g.moveTo(x, yHigh).lineTo(x, yLow).stroke(style);
+      g.moveTo(x - half, yOpen).lineTo(x, yOpen).stroke(style);
+      g.moveTo(x, yClose).lineTo(x + half, yClose).stroke(style);
     }
   }
 

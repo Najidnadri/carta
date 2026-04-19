@@ -5,8 +5,10 @@ import {
   AreaSeries,
   BaselineSeries,
   CandlestickSeries,
+  HeikinAshiSeries,
   HistogramSeries,
   LineSeries,
+  OhlcBarSeries,
   TimeSeriesChart,
   type BaselineMode,
   type CacheStats,
@@ -242,9 +244,24 @@ function scaleVolumeForOverlay(bars: readonly SyntheticBar[]): PointRecord[] {
   return out;
 }
 
+type PrimarySeriesType = "candle" | "ohlc-bar" | "heikin-ashi";
+
+type PrimarySeries = CandlestickSeries | OhlcBarSeries | HeikinAshiSeries;
+
+function createPrimarySeries(type: PrimarySeriesType, channel: string): PrimarySeries {
+  switch (type) {
+    case "candle":
+      return new CandlestickSeries({ channel });
+    case "ohlc-bar":
+      return new OhlcBarSeries({ channel });
+    case "heikin-ashi":
+      return new HeikinAshiSeries({ channel });
+  }
+}
+
 interface MountResult {
   readonly chart: TimeSeriesChart;
-  readonly candles: CandlestickSeries;
+  readonly primary: PrimarySeries;
   readonly sma: LineSeries;
   readonly volume: HistogramSeries;
 }
@@ -282,7 +299,7 @@ function computeSma(
   return out;
 }
 
-async function mount(): Promise<MountResult> {
+async function mount(primaryType: PrimarySeriesType): Promise<MountResult> {
   const container = document.getElementById("chart");
   if (container === null) {
     throw new Error("Missing #chart element");
@@ -301,7 +318,7 @@ async function mount(): Promise<MountResult> {
   chart.priceScale().setDomain(win.priceMin, win.priceMax);
   chart.priceScale().setAutoScale(true);
   chart.defineChannel({ id: DEMO_VOLUME_CHANNEL, kind: "point" });
-  const candles = chart.addSeries(new CandlestickSeries({ channel: DEMO_OHLC_CHANNEL }));
+  const primary = chart.addSeries(createPrimarySeries(primaryType, DEMO_OHLC_CHANNEL));
   const sma = chart.addSeries(new LineSeries({ channel: DEMO_SMA_CHANNEL }));
   const volume = chart.addSeries(
     new HistogramSeries({
@@ -312,7 +329,7 @@ async function mount(): Promise<MountResult> {
       participatesInAutoScale: false,
     }),
   );
-  return { chart, candles, sma, volume };
+  return { chart, primary, sma, volume };
 }
 
 function formatDurationMs(ms: number): string {
@@ -445,16 +462,17 @@ async function main(): Promise<void> {
     eventCounts.resize = 0;
   };
 
-  let candles: CandlestickSeries | null = null;
+  let primary: PrimarySeries | null = null;
+  let primaryType: PrimarySeriesType = "candle";
   let sma: LineSeries | null = null;
   let volume: HistogramSeries | null = null;
   let areaExtra: AreaSeries | null = null;
   let baselineExtra: BaselineSeries | null = null;
 
   {
-    const first = await mount();
+    const first = await mount(primaryType);
     chart = first.chart;
-    candles = first.candles;
+    primary = first.primary;
     sma = first.sma;
     volume = first.volume;
     wireEvents(chart);
@@ -464,22 +482,37 @@ async function main(): Promise<void> {
     const gen = ++generation;
     chart?.destroy();
     chart = null;
-    candles = null;
+    primary = null;
     sma = null;
     volume = null;
     areaExtra = null;
     baselineExtra = null;
     resetEventCounts();
-    const next = await mount();
+    const next = await mount(primaryType);
     if (gen !== generation) {
       next.chart.destroy();
       return;
     }
     chart = next.chart;
-    candles = next.candles;
+    primary = next.primary;
     sma = next.sma;
     volume = next.volume;
     wireEvents(chart);
+  };
+
+  const setPrimaryType = (next: PrimarySeriesType): void => {
+    if (chart === null || next === primaryType) {
+      return;
+    }
+    if (primary !== null) {
+      chart.removeSeries(primary);
+    }
+    primaryType = next;
+    primary = chart.addSeries(createPrimarySeries(next, DEMO_OHLC_CHANNEL));
+    const sel = document.getElementById("primary-series-type") as HTMLSelectElement | null;
+    if (sel !== null && sel.value !== next) {
+      sel.value = next;
+    }
   };
 
   const readoutStart = document.getElementById("readout-start");
@@ -604,6 +637,19 @@ async function main(): Promise<void> {
   };
   requestAnimationFrame(priceReadoutRaf);
 
+  const primaryTypeSelect = document.getElementById(
+    "primary-series-type",
+  ) as HTMLSelectElement | null;
+  if (primaryTypeSelect !== null) {
+    primaryTypeSelect.value = primaryType;
+    primaryTypeSelect.addEventListener("change", () => {
+      const raw = primaryTypeSelect.value;
+      if (raw === "candle" || raw === "ohlc-bar" || raw === "heikin-ashi") {
+        setPrimaryType(raw);
+      }
+    });
+  }
+
   // Test hooks (dev only) — used by Playwright for adversarial scenarios.
   const testHook = {
     TimeSeriesChart,
@@ -627,9 +673,42 @@ async function main(): Promise<void> {
       }));
     },
     axisPoolSize: (): number => chart?.axisPoolSize() ?? 0,
-    candlePoolActive: (): number => candles?.activePoolSize() ?? 0,
-    candlePoolTotal: (): number => candles?.totalPoolSize() ?? 0,
-    getCandles: (): CandlestickSeries | null => candles,
+    candlePoolActive: (): number => primary?.activePoolSize() ?? 0,
+    candlePoolTotal: (): number => primary?.totalPoolSize() ?? 0,
+    primaryPoolActive: (): number => primary?.activePoolSize() ?? 0,
+    primaryPoolTotal: (): number => primary?.totalPoolSize() ?? 0,
+    getPrimary: (): PrimarySeries | null => primary,
+    getPrimaryType: (): PrimarySeriesType => primaryType,
+    setPrimaryType: (next: PrimarySeriesType): void => { setPrimaryType(next); },
+    getCandles: (): CandlestickSeries | null =>
+      primary instanceof CandlestickSeries ? primary : null,
+    getOhlcBars: (): OhlcBarSeries | null =>
+      primary instanceof OhlcBarSeries ? primary : null,
+    getHeikinAshi: (): HeikinAshiSeries | null =>
+      primary instanceof HeikinAshiSeries ? primary : null,
+    heikinAshiCacheSize: (): number =>
+      primary instanceof HeikinAshiSeries ? primary.cacheSize() : 0,
+    setOhlcBarThinBars: (thin: boolean, tickWidth = 1): boolean => {
+      if (chart === null) {
+        return false;
+      }
+      if (primary !== null) {
+        chart.removeSeries(primary);
+      }
+      primaryType = "ohlc-bar";
+      primary = chart.addSeries(
+        new OhlcBarSeries({
+          channel: DEMO_OHLC_CHANNEL,
+          thinBars: thin,
+          tickWidth,
+        }),
+      );
+      const sel = document.getElementById("primary-series-type") as HTMLSelectElement | null;
+      if (sel !== null) {
+        sel.value = "ohlc-bar";
+      }
+      return true;
+    },
     getSma: (): LineSeries | null => sma,
     getVolume: (): HistogramSeries | null => volume,
     volumePoolActive: (): number => volume?.activePoolSize() ?? 0,
@@ -669,12 +748,12 @@ async function main(): Promise<void> {
       return removed;
     },
     removeCandles: (): boolean => {
-      if (chart === null || candles === null) {
+      if (chart === null || primary === null) {
         return false;
       }
-      const removed = chart.removeSeries(candles);
+      const removed = chart.removeSeries(primary);
       if (removed) {
-        candles = null;
+        primary = null;
       }
       return removed;
     },

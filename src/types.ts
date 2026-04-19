@@ -269,6 +269,30 @@ export interface CandlestickSeriesOptions {
   readonly bodyGapPx?: number;
 }
 
+export interface OhlcBarSeriesOptions {
+  readonly channel: string;
+  /** Colour for bars where `close >= open`. Defaults to `theme.up`. */
+  readonly upColor?: number;
+  /** Colour for bars where `close < open`. Defaults to `theme.down`. */
+  readonly downColor?: number;
+  /** Stroke width for the vertical and tick lines in pixels. Defaults to 1. */
+  readonly tickWidth?: number;
+  /**
+   * Collapse every stroke to 1 pixel with `pixelLine: true`. When enabled
+   * overrides `tickWidth`. Useful in very dense windows where tick glyphs
+   * would otherwise render thicker than the wick. Defaults to `false`.
+   */
+  readonly thinBars?: boolean;
+}
+
+export interface HeikinAshiSeriesOptions {
+  readonly channel: string;
+  readonly upColor?: number;
+  readonly downColor?: number;
+  readonly wickWidth?: number;
+  readonly bodyGapPx?: number;
+}
+
 export interface LineSeriesOptions {
   readonly channel: string;
   readonly color?: number;

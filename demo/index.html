@@ -81,6 +81,14 @@
         <button id="load-data">Load synthetic data</button>
         <button id="clear-cache">Clear cache</button>
         <button id="auto-supply" aria-pressed="false">Auto-supply: OFF</button>
+        <label for="primary-series-type" style="font-size: 12px; color: #8b949e;">
+          Primary
+          <select id="primary-series-type" style="background:#1f2630;color:#c9d1d9;border:1px solid #2d333b;border-radius:4px;padding:3px 6px;font-size:12px;margin-left:4px;">
+            <option value="candle">Candles</option>
+            <option value="ohlc-bar">OHLC bars</option>
+            <option value="heikin-ashi">Heikin-Ashi</option>
+          </select>
+        </label>
         <div id="readout">
           <span>start <b id="readout-start">—</b></span>
           <span>end <b id="readout-end">—</b></span>
