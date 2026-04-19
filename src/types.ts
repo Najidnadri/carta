@@ -81,6 +81,7 @@ export interface Theme {
   readonly grid: number;
   readonly frame: number;
   readonly text: number;
+  readonly textMuted: number;
   readonly up: number;
   readonly down: number;
   readonly line: number;
@@ -91,6 +92,7 @@ export const DEFAULT_THEME: Theme = {
   grid: 0x1f2630,
   frame: 0x2d333b,
   text: 0xc9d1d9,
+  textMuted: 0x8b949e,
   up: 0x26a69a,
   down: 0xef5350,
   line: 0x58a6ff,

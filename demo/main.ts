@@ -1,12 +1,21 @@
-import { TimeSeriesChart } from "../src/index.js";
+import {
+  TimeSeriesChart,
+  type Logger,
+  type TimeSeriesChartConstructionOptions,
+} from "../src/index.js";
+import { __internals__ as timeFormatInternals } from "../src/core/timeFormat.js";
 
-const HOUR = 60 * 60 * 1000;
-const DEFAULT_INTERVAL = 60_000;
+const MIN = 60_000;
+const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
+const DEFAULT_INTERVAL = MIN;
 
 interface DemoWindow {
   readonly startTime: number;
   readonly endTime: number;
   readonly intervalDuration: number;
+  readonly timeZone: string;
+  readonly locale: string;
 }
 
 function parseSearch(): DemoWindow {
@@ -14,13 +23,44 @@ function parseSearch(): DemoWindow {
   const start = Number(params.get("start"));
   const end = Number(params.get("end"));
   const interval = Number(params.get("interval"));
-  const now = Date.now();
+  const tz = params.get("tz") ?? "UTC";
+  const locale = params.get("locale") ?? "en-US";
+  // Anchor the demo window to a fixed moment so Playwright screenshots stay
+  // deterministic across runs. Hosts pick their own windows in real usage.
+  const anchor = Date.UTC(2026, 3, 19, 12, 0, 0);
   return {
-    startTime: Number.isFinite(start) && start !== 0 ? start : now - 24 * HOUR,
-    endTime: Number.isFinite(end) && end !== 0 ? end : now,
+    startTime: Number.isFinite(start) && start !== 0 ? start : anchor - DAY,
+    endTime: Number.isFinite(end) && end !== 0 ? end : anchor,
     intervalDuration: Number.isFinite(interval) && interval > 0 ? interval : DEFAULT_INTERVAL,
+    timeZone: tz,
+    locale,
   };
 }
+
+interface CapturingLogger extends Logger {
+  readonly warnings: string[];
+  readonly errors: string[];
+}
+
+function createCapturingLogger(): CapturingLogger {
+  const warnings: string[] = [];
+  const errors: string[] = [];
+  const logger: CapturingLogger = {
+    warnings,
+    errors,
+    debug: (): void => {},
+    info: (): void => {},
+    warn: (msg, ...rest): void => {
+      warnings.push([msg, ...rest.map((r) => String(r))].join(" "));
+    },
+    error: (msg, ...rest): void => {
+      errors.push([msg, ...rest.map((r) => String(r))].join(" "));
+    },
+  };
+  return logger;
+}
+
+let activeLogger: CapturingLogger = createCapturingLogger();
 
 async function mount(): Promise<TimeSeriesChart> {
   const container = document.getElementById("chart");
@@ -28,12 +68,16 @@ async function mount(): Promise<TimeSeriesChart> {
     throw new Error("Missing #chart element");
   }
   const win = parseSearch();
-  return TimeSeriesChart.create({
+  activeLogger = createCapturingLogger();
+  const opts: TimeSeriesChartConstructionOptions = {
     container,
     startTime: win.startTime,
     endTime: win.endTime,
     intervalDuration: win.intervalDuration,
-  });
+    logger: activeLogger,
+    timeAxis: { formatContext: { locale: win.locale, timeZone: win.timeZone } },
+  };
+  return TimeSeriesChart.create(opts);
 }
 
 async function main(): Promise<void> {
@@ -56,11 +100,34 @@ async function main(): Promise<void> {
     void remount();
   });
 
-  // Test hook (dev only) — lets Playwright drive direct-API scenarios.
+  // Test hooks (dev only) — used by Playwright for adversarial scenarios.
   const testHook = {
     TimeSeriesChart,
     canvasCount: (): number => document.querySelectorAll("canvas").length,
     getChart: (): TimeSeriesChart | null => chart,
+    resize: (w: number, h: number): void => {
+      chart?.resize(w, h);
+    },
+    barsInWindow: (): readonly number[] => {
+      const bars = chart?.barsInWindow() ?? [];
+      return bars.map((t) => Number(t));
+    },
+    visibleTickCount: (): number => chart?.visibleTicks().length ?? 0,
+    visibleTicks: (): readonly { time: number; x: number; label: string; isDayBoundary: boolean }[] => {
+      const ticks = chart?.visibleTicks() ?? [];
+      return ticks.map((t) => ({
+        time: Number(t.time),
+        x: t.x,
+        label: t.label,
+        isDayBoundary: t.isDayBoundary,
+      }));
+    },
+    axisPoolSize: (): number => chart?.axisPoolSize() ?? 0,
+    labelCacheSize: (): number => timeFormatInternals.labelCacheSize(),
+    lastWarnings: (): readonly string[] => [...activeLogger.warnings],
+    lastErrors: (): readonly string[] => [...activeLogger.errors],
+    resetCaches: (): void => timeFormatInternals.resetCaches(),
+    remount: (): Promise<void> => remount(),
   };
   (globalThis as unknown as { __cartaTest?: typeof testHook }).__cartaTest = testHook;
 }

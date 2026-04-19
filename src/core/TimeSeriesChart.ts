@@ -3,6 +3,9 @@ import { ConfigState } from "./ConfigState.js";
 import { InvalidationQueue, type DirtyReason } from "./InvalidationQueue.js";
 import { noopLogger } from "./Logger.js";
 import { Renderer, type PlotRect } from "./Renderer.js";
+import { TimeAxis, type TimeAxisOptions } from "./TimeAxis.js";
+import type { TickInfo } from "./TimeAxis.js";
+import { TimeScale } from "./TimeScale.js";
 import {
   asInterval,
   asTime,
@@ -25,28 +28,25 @@ interface ResolvedOptions {
   readonly devicePixelRatio: number;
   readonly theme: Theme;
   readonly logger: Logger;
+  readonly timeAxis: TimeAxisOptions | undefined;
+}
+
+export interface TimeSeriesChartConstructionOptions extends TimeSeriesChartOptions {
+  readonly timeAxis?: TimeAxisOptions;
 }
 
 /**
- * Top-level chart class. Phase 01 surface: create / resize / destroy.
- *
- * React Strict Mode (double-mount) pattern:
- * ```
- * let cancelled = false;
- * let chart: TimeSeriesChart | null = null;
- * (async () => {
- *   const c = await TimeSeriesChart.create({ ... });
- *   if (cancelled) { c.destroy(); return; }
- *   chart = c;
- * })();
- * return () => { cancelled = true; chart?.destroy(); };
- * ```
+ * Top-level chart class. Phase 02 surface: create / resize / destroy /
+ * barsInWindow. Invalid `startTime` / `endTime` / `intervalDuration` are
+ * accepted (the chart degrades gracefully) but `logger.warn` is emitted so
+ * hosts can notice bad input during development.
  */
 export class TimeSeriesChart {
   private readonly opts: ResolvedOptions;
   private readonly renderer: Renderer;
   private readonly invalidator: InvalidationQueue;
   private readonly sharedContexts: GraphicsContext[] = [];
+  private readonly timeAxis: TimeAxis;
   private resizeObserver: ResizeObserver | null = null;
   private config: ConfigState;
   private disposed = false;
@@ -56,9 +56,11 @@ export class TimeSeriesChart {
     this.renderer = renderer;
     this.config = config;
     this.invalidator = new InvalidationQueue((reasons) => this.flush(reasons));
+    this.timeAxis = new TimeAxis(renderer.gridLayer, renderer.axesLayer, opts.timeAxis);
   }
 
-  static async create(options: TimeSeriesChartOptions): Promise<TimeSeriesChart> {
+  static async create(options: TimeSeriesChartConstructionOptions): Promise<TimeSeriesChart> {
+    const logger = options.logger ?? noopLogger;
     const theme: Theme = {
       ...DEFAULT_THEME,
       ...(options.theme ?? {}),
@@ -75,7 +77,8 @@ export class TimeSeriesChart {
         options.devicePixelRatio ??
         (typeof globalThis.window === "undefined" ? 1 : globalThis.window.devicePixelRatio || 1),
       theme,
-      logger: options.logger ?? noopLogger,
+      logger,
+      timeAxis: options.timeAxis,
     };
 
     const renderer = await Renderer.create({
@@ -86,10 +89,11 @@ export class TimeSeriesChart {
       devicePixelRatio: resolved.devicePixelRatio,
     });
 
+    const window = resolveWindow(options, logger);
     const config = new ConfigState({
-      startTime: toBrandedTime(options.startTime),
-      endTime: toBrandedTime(options.endTime),
-      intervalDuration: toBrandedInterval(options.intervalDuration),
+      startTime: window.startTime,
+      endTime: window.endTime,
+      intervalDuration: window.intervalDuration,
       width: resolved.width,
       height: resolved.height,
       theme,
@@ -123,6 +127,27 @@ export class TimeSeriesChart {
     this.invalidator.invalidate("size");
   }
 
+  /**
+   * Returns the timestamps of every bar slot the chart's current window
+   * covers, inclusive-inclusive: `[alignDown(startTime, interval),
+   * alignDown(endTime, interval)]` stepping by `intervalDuration`. Empty
+   * array when the config is degenerate.
+   */
+  barsInWindow(): readonly Time[] {
+    const scale = this.currentTimeScale();
+    return scale.visibleBarSlots();
+  }
+
+  /** Visible tick list from the most-recent render. Dev/test introspection. */
+  visibleTicks(): readonly TickInfo[] {
+    return this.timeAxis.ticks();
+  }
+
+  /** Label-pool capacity (constant after first render). Dev/test introspection. */
+  axisPoolSize(): number {
+    return this.timeAxis.poolSize();
+  }
+
   destroy(): void {
     if (this.disposed) {
       return;
@@ -131,6 +156,7 @@ export class TimeSeriesChart {
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.invalidator.dispose();
+    this.timeAxis.destroy();
     for (const ctx of this.sharedContexts) {
       ctx.destroy();
     }
@@ -150,7 +176,23 @@ export class TimeSeriesChart {
       this.config.snapshot.height,
       plotRect,
     );
+    const scale = this.currentTimeScaleForRect(plotRect);
+    this.timeAxis.render(scale, plotRect, this.config.snapshot.theme);
     this.renderer.render();
+  }
+
+  private currentTimeScale(): TimeScale {
+    return this.currentTimeScaleForRect(this.computePlotRect());
+  }
+
+  private currentTimeScaleForRect(plotRect: PlotRect): TimeScale {
+    const snap = this.config.snapshot;
+    return new TimeScale({
+      startTime: snap.startTime,
+      endTime: snap.endTime,
+      intervalDuration: snap.intervalDuration,
+      pixelWidth: plotRect.w,
+    });
   }
 
   private computePlotRect(): PlotRect {
@@ -176,10 +218,43 @@ export class TimeSeriesChart {
   }
 }
 
-function toBrandedTime(value: Time | number): Time {
-  return asTime(typeof value === "number" ? value : (value as unknown as number));
+interface ResolvedWindow {
+  readonly startTime: Time;
+  readonly endTime: Time;
+  readonly intervalDuration: Interval;
 }
 
-function toBrandedInterval(value: Interval | number): Interval {
-  return asInterval(typeof value === "number" ? value : (value as unknown as number));
+function resolveWindow(
+  options: TimeSeriesChartOptions,
+  logger: Logger,
+): ResolvedWindow {
+  const rawStart = Number(options.startTime);
+  const rawEnd = Number(options.endTime);
+  const rawInterval = Number(options.intervalDuration);
+
+  const startOk = Number.isFinite(rawStart);
+  const endOk = Number.isFinite(rawEnd);
+  const intervalOk = Number.isFinite(rawInterval) && rawInterval > 0;
+
+  if (!startOk || !endOk) {
+    logger.warn(
+      "[carta] non-finite startTime/endTime — axis will hide until setWindow() is called with finite values",
+    );
+  }
+  if (!intervalOk) {
+    logger.warn(
+      `[carta] invalid intervalDuration (${String(options.intervalDuration)}) — axis will hide until setInterval() is called with a positive value`,
+    );
+  }
+  if (startOk && endOk && rawStart > rawEnd) {
+    logger.warn(
+      "[carta] startTime > endTime — axis will hide until the window is corrected",
+    );
+  }
+
+  return {
+    startTime: asTime(startOk ? rawStart : Number.NaN),
+    endTime: asTime(endOk ? rawEnd : Number.NaN),
+    intervalDuration: asInterval(intervalOk ? rawInterval : Number.NaN),
+  };
 }
