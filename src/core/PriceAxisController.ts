@@ -259,8 +259,8 @@ export class PriceAxisController {
   }
 
   private stageOrNull(): Container | null {
-    let cursor: Container | null = this.axesLayer;
-    while (cursor?.parent !== null && cursor?.parent !== undefined) {
+    let cursor: Container = this.axesLayer;
+    while (cursor.parent !== null) {
       cursor = cursor.parent;
     }
     return cursor;

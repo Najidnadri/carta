@@ -153,7 +153,7 @@ export function formatAxisLabel(
       : baseTier;
   const localeKey = ctx?.locale ?? "default";
   const tzKey = ctx?.timeZone ?? "default";
-  const key = `${effectiveTier}|${localeKey}|${tzKey}|${Number(time)}`;
+  const key = `${effectiveTier}|${localeKey}|${tzKey}|${String(Number(time))}`;
   const hit = labelCache.get(key);
   if (hit !== undefined) {
     return hit;

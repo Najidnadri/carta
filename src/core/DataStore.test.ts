@@ -15,12 +15,12 @@ const FIVE_MIN = 5 * MINUTE;
 function mockLogger(): Logger & { warnings: unknown[][] } {
   const warnings: unknown[][] = [];
   return {
-    debug: () => {},
-    info: () => {},
-    warn: (...args: readonly unknown[]) => {
+    debug: (): void => undefined,
+    info: (): void => undefined,
+    warn: (...args: readonly unknown[]): void => {
       warnings.push([...args]);
     },
-    error: () => {},
+    error: (): void => undefined,
     warnings,
   } as Logger & { warnings: unknown[][] };
 }
@@ -55,8 +55,8 @@ describe("DataStore — channel registration", () => {
   it("throws on kind collision with a descriptive message", () => {
     const store = new DataStore();
     store.defineChannel({ id: "primary", kind: "ohlc" });
-    expect(() => store.defineChannel({ id: "primary", kind: "point" })).toThrow(/ohlc/);
-    expect(() => store.defineChannel({ id: "primary", kind: "point" })).toThrow(/point/);
+    expect(() => { store.defineChannel({ id: "primary", kind: "point" }); }).toThrow(/ohlc/);
+    expect(() => { store.defineChannel({ id: "primary", kind: "point" }); }).toThrow(/point/);
   });
 
   it("throws on insert for unregistered channel", () => {
@@ -99,7 +99,7 @@ describe("DataStore — round-trip across record kinds", () => {
     store.defineChannel({ id: "primary", kind: "ohlc" });
     const records = Array.from({ length: 5 }, (_, i) => ohlc((i + 1) * MINUTE, 100 + i));
     store.insertMany("primary", MINUTE, records);
-    const slice = store.recordsInRange<OhlcRecord>("primary", MINUTE, MINUTE, 5 * MINUTE);
+    const slice = store.recordsInRange("primary", MINUTE, MINUTE, 5 * MINUTE) as readonly OhlcRecord[];
     expect(slice.map((r) => Number(r.time))).toEqual(records.map((r) => Number(r.time)));
     expect(slice.map((r) => Number(r.open))).toEqual(records.map((r) => Number(r.open)));
   });
@@ -109,7 +109,7 @@ describe("DataStore — round-trip across record kinds", () => {
     store.defineChannel({ id: "sma", kind: "point" });
     const records = Array.from({ length: 4 }, (_, i) => point((i + 1) * MINUTE, i * 10));
     store.insertMany("sma", MINUTE, records);
-    const slice = store.recordsInRange<PointRecord>("sma", MINUTE, MINUTE, 4 * MINUTE);
+    const slice = store.recordsInRange("sma", MINUTE, MINUTE, 4 * MINUTE) as readonly PointRecord[];
     expect(slice.map((r) => Number(r.value))).toEqual([0, 10, 20, 30]);
   });
 
@@ -117,7 +117,7 @@ describe("DataStore — round-trip across record kinds", () => {
     const store = new DataStore();
     store.defineChannel({ id: "events", kind: "marker" });
     store.insertMany("events", MINUTE, [marker(12_345), marker(67_890)]);
-    const slice = store.recordsInRange<MarkerRecord>("events", MINUTE, 0, 100_000);
+    const slice = store.recordsInRange("events", MINUTE, 0, 100_000) as readonly MarkerRecord[];
     expect(slice).toHaveLength(2);
   });
 });
@@ -296,10 +296,10 @@ describe("DataStore — adversarial", () => {
       value: asPrice(9),
     } as unknown as OhlcRecord & PointRecord;
 
-    store.insert<OhlcRecord>("ohlcChan", MINUTE, ambiguous);
+    store.insert("ohlcChan", MINUTE, ambiguous);
     expect(store.size("ohlcChan", MINUTE)).toBe(1);
 
-    store.insert<PointRecord>("pointChan", MINUTE, ambiguous);
+    store.insert("pointChan", MINUTE, ambiguous);
     expect(store.size("pointChan", MINUTE)).toBe(1);
   });
 
@@ -316,7 +316,7 @@ describe("DataStore — adversarial", () => {
   it("channel ids are case-sensitive", () => {
     const store = new DataStore();
     store.defineChannel({ id: "Close", kind: "point" });
-    expect(() => store.defineChannel({ id: "close", kind: "ohlc" })).not.toThrow();
+    expect(() => { store.defineChannel({ id: "close", kind: "ohlc" }); }).not.toThrow();
     expect(store.getChannel("Close")?.kind).toBe("point");
     expect(store.getChannel("close")?.kind).toBe("ohlc");
   });
@@ -337,7 +337,7 @@ describe("DataStore — adversarial", () => {
     const store = new DataStore({ logger: log });
     store.defineChannel({ id: "primary", kind: "ohlc" });
     const incomplete = { time: asTime(MINUTE), open: asPrice(1) } as unknown as OhlcRecord;
-    const accepted = store.insert<OhlcRecord>("primary", MINUTE, incomplete);
+    const accepted = store.insert("primary", MINUTE, incomplete);
     expect(accepted).toBe(false);
     expect(store.size("primary", MINUTE)).toBe(0);
     expect(log.warnings.length).toBe(1);

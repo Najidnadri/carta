@@ -115,7 +115,7 @@ export class TimeSeriesChart {
       opts.data === undefined
         ? new DataStore({ logger: opts.logger })
         : new DataStore({ logger: opts.logger, options: opts.data });
-    this.invalidator = new InvalidationQueue((reasons) => this.flush(reasons));
+    this.invalidator = new InvalidationQueue((reasons) => { this.flush(reasons); });
     this.timeAxis = new TimeAxis(renderer.gridLayer, renderer.axesLayer, opts.timeAxis);
     this.priceAxis = new PriceAxis(renderer.gridLayer, renderer.axesLayer, opts.priceAxis);
     const initialDomain: PriceDomain = Object.freeze({
@@ -126,10 +126,10 @@ export class TimeSeriesChart {
     this.lastRenderedDomain = initialDomain;
     this.priceFormatter = opts.priceFormatter;
     this.priceScaleFacade = {
-      setDomain: (min, max): void => this.setPriceDomain(min, max),
+      setDomain: (min, max): void => { this.setPriceDomain(min, max); },
       getDomain: (): PriceDomain => this.lastRenderedDomain,
       isAutoScale: (): boolean => this.autoScaleEnabled,
-      setAutoScale: (on: boolean): void => this.setAutoScaleInternal(on),
+      setAutoScale: (on: boolean): void => { this.setAutoScaleInternal(on); },
     };
     this.viewport = new ViewportController({
       stage: renderer.app.stage,
@@ -146,7 +146,7 @@ export class TimeSeriesChart {
           intervalDuration: s.intervalDuration,
         };
       },
-      applyWindow: (win: ChartWindow): void => this.applyWindowInternal(win),
+      applyWindow: (win: ChartWindow): void => { this.applyWindowInternal(win); },
       plotRect: (): PlotRect => this.computePlotRect(),
       options: opts.viewport,
     });
@@ -154,9 +154,9 @@ export class TimeSeriesChart {
       axesLayer: renderer.axesLayer,
       plotRect: (): PlotRect => this.computePlotRect(),
       getRenderedDomain: (): PriceDomain => this.lastRenderedDomain,
-      setManualDomain: (min, max): void => this.applyManualDomain(min, max),
-      setAutoScale: (on): void => this.setAutoScaleInternal(on),
-      onGestureStart: (): void => this.viewport.stopKinetic(),
+      setManualDomain: (min, max): void => { this.applyManualDomain(min, max); },
+      setAutoScale: (on): void => { this.setAutoScaleInternal(on); },
+      onGestureStart: (): void => { this.viewport.stopKinetic(); },
       options: opts.priceAxisDrag,
     });
   }
@@ -210,7 +210,7 @@ export class TimeSeriesChart {
     const chart = new TimeSeriesChart(resolved, renderer, config);
 
     if (resolved.autoResize && typeof ResizeObserver !== "undefined") {
-      chart.resizeObserver = new ResizeObserver(() => chart.onAutoResize());
+      chart.resizeObserver = new ResizeObserver(() => { chart.onAutoResize(); });
       chart.resizeObserver.observe(resolved.container);
     }
 
@@ -309,22 +309,22 @@ export class TimeSeriesChart {
    * declared kind — mismatched records are dropped with `logger.warn`.
    * Throws synchronously if the channel was never `defineChannel`'d.
    */
-  supplyData<R extends DataRecord>(
+  supplyData(
     channelId: string,
     intervalDuration: Interval | number,
-    records: readonly R[],
+    records: readonly DataRecord[],
   ): void {
     if (this.disposed) {
       return;
     }
-    const raw = Number(intervalDuration);
+    const raw = intervalDuration;
     if (!Number.isFinite(raw) || raw <= 0 || !Number.isInteger(raw)) {
       this.opts.logger.warn(
         `[carta] supplyData received invalid intervalDuration (${String(intervalDuration)}) — must be a positive integer; ignored`,
       );
       return;
     }
-    this.dataStore.insertMany<R>(channelId, raw, records);
+    this.dataStore.insertMany(channelId, raw, records);
     this.invalidator.invalidate("data");
   }
 
@@ -332,23 +332,22 @@ export class TimeSeriesChart {
    * Single-record live update. Defaults `intervalDuration` to the chart's
    * current interval. Validation + kind enforcement match `supplyData`.
    */
-  supplyTick<R extends DataRecord>(
+  supplyTick(
     channelId: string,
-    record: R,
+    record: DataRecord,
     intervalDuration?: Interval | number,
   ): void {
     if (this.disposed) {
       return;
     }
-    const resolved = intervalDuration ?? this.config.snapshot.intervalDuration;
-    const raw = Number(resolved);
+    const raw = intervalDuration ?? this.config.snapshot.intervalDuration;
     if (!Number.isFinite(raw) || raw <= 0 || !Number.isInteger(raw)) {
       this.opts.logger.warn(
-        `[carta] supplyTick received invalid intervalDuration (${String(resolved)}) — must be a positive integer; ignored`,
+        `[carta] supplyTick received invalid intervalDuration (${String(raw)}) — must be a positive integer; ignored`,
       );
       return;
     }
-    this.dataStore.insert<R>(channelId, raw, record);
+    this.dataStore.insert(channelId, raw, record);
     this.invalidator.invalidate("data");
   }
 
@@ -366,17 +365,17 @@ export class TimeSeriesChart {
   }
 
   /** Inclusive slice of cached records on a channel. */
-  recordsInRange<R extends DataRecord>(
+  recordsInRange(
     channelId: string,
     intervalDuration: Interval | number,
     startTime: Time | number,
     endTime: Time | number,
-  ): readonly R[] {
-    return this.dataStore.recordsInRange<R>(
+  ): readonly DataRecord[] {
+    return this.dataStore.recordsInRange(
       channelId,
-      Number(intervalDuration),
-      Number(startTime),
-      Number(endTime),
+      intervalDuration,
+      startTime,
+      endTime,
     );
   }
 
@@ -387,9 +386,9 @@ export class TimeSeriesChart {
    */
   missingRanges(channelId: string, query?: MissingRangesQuery): readonly Range[] {
     const snap = this.config.snapshot;
-    const startRaw = Number(query?.startTime ?? snap.startTime);
-    const endRaw = Number(query?.endTime ?? snap.endTime);
-    const ivRaw = Number(query?.intervalDuration ?? snap.intervalDuration);
+    const startRaw = query?.startTime ?? snap.startTime;
+    const endRaw = query?.endTime ?? snap.endTime;
+    const ivRaw = query?.intervalDuration ?? snap.intervalDuration;
     if (
       !Number.isFinite(startRaw) ||
       !Number.isFinite(endRaw) ||

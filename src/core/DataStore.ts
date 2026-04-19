@@ -135,7 +135,7 @@ export class DataStore {
     return this.channels.get(id)?.channel;
   }
 
-  insert<R extends DataRecord>(channelId: string, intervalDuration: number, record: R): boolean {
+  insert(channelId: string, intervalDuration: number, record: DataRecord): boolean {
     const store = this.channels.get(channelId);
     if (store === undefined) {
       throw new Error(
@@ -149,14 +149,13 @@ export class DataStore {
       );
       return false;
     }
-    const cache = this.cacheFor(store, intervalDuration) as IntervalCache<R>;
-    return cache.insert(record);
+    return this.cacheFor(store, intervalDuration).insert(record);
   }
 
-  insertMany<R extends DataRecord>(
+  insertMany(
     channelId: string,
     intervalDuration: number,
-    records: readonly R[],
+    records: readonly DataRecord[],
   ): number {
     const store = this.channels.get(channelId);
     if (store === undefined) {
@@ -167,7 +166,7 @@ export class DataStore {
     if (records.length === 0) {
       return 0;
     }
-    const matching: R[] = [];
+    const matching: DataRecord[] = [];
     let dropped = 0;
     for (const r of records) {
       if (recordMatchesKind(r, store.channel.kind)) {
@@ -184,15 +183,14 @@ export class DataStore {
     if (matching.length === 0) {
       return 0;
     }
-    const cache = this.cacheFor(store, intervalDuration) as IntervalCache<R>;
-    return cache.insertMany(matching);
+    return this.cacheFor(store, intervalDuration).insertMany(matching);
   }
 
-  getAt<R extends DataRecord>(
+  getAt(
     channelId: string,
     intervalDuration: number,
     time: number,
-  ): R | undefined {
+  ): DataRecord | undefined {
     const store = this.channels.get(channelId);
     if (store === undefined) {
       return undefined;
@@ -201,15 +199,15 @@ export class DataStore {
     if (cache === undefined) {
       return undefined;
     }
-    return cache.getAt(time) as R | undefined;
+    return cache.getAt(time);
   }
 
-  recordsInRange<R extends DataRecord>(
+  recordsInRange(
     channelId: string,
     intervalDuration: number,
     start: number,
     end: number,
-  ): readonly R[] {
+  ): readonly DataRecord[] {
     const store = this.channels.get(channelId);
     if (store === undefined) {
       return [];
@@ -218,7 +216,7 @@ export class DataStore {
     if (cache === undefined) {
       return [];
     }
-    return cache.recordsInRange(start, end) as readonly R[];
+    return cache.recordsInRange(start, end);
   }
 
   missingRanges(
@@ -337,12 +335,14 @@ export class DataStore {
       this.clearChannel(channelId);
       return;
     }
-    // intervalDuration only
+    if (intervalDuration === undefined) {
+      return;
+    }
     for (const store of this.channels.values()) {
-      const cache = store.byInterval.get(intervalDuration as number);
+      const cache = store.byInterval.get(intervalDuration);
       if (cache !== undefined) {
         cache.clear();
-        store.byInterval.delete(intervalDuration as number);
+        store.byInterval.delete(intervalDuration);
       }
     }
   }

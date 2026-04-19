@@ -51,7 +51,7 @@ export class PriceScale {
   constructor(input: PriceScaleInput) {
     const rawMin = Number(input.domainMin);
     const rawMax = Number(input.domainMax);
-    const pixelHeight = Number(input.pixelHeight);
+    const pixelHeight = input.pixelHeight;
     const margins = resolveMargins(input.margins);
 
     this.domainMin = input.domainMin;

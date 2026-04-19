@@ -3,9 +3,7 @@ import type { Container } from "pixi.js";
 import { ViewportController } from "./ViewportController.js";
 import { asInterval, asTime, type ChartWindow } from "../types.js";
 
-interface FakeStageHandlers {
-  [event: string]: ((e: unknown) => void)[];
-}
+type FakeStageHandlers = Record<string, ((e: unknown) => void)[]>;
 
 interface FakeStage {
   eventMode?: string;
@@ -93,7 +91,7 @@ function createFakeCanvas(width = 800, height = 400): HTMLCanvasElement {
   return canvas as unknown as HTMLCanvasElement;
 }
 
-type ApplyWindowMock = ReturnType<typeof vi.fn<[w: ChartWindow], void>>;
+type ApplyWindowMock = ReturnType<typeof vi.fn<(w: ChartWindow) => void>>;
 
 function makeDeps(): {
   stage: FakeStage;
@@ -121,7 +119,7 @@ function makeDeps(): {
     plotRect: (): { x: number; y: number; w: number; h: number } => ({ x: 0, y: 0, w: 936, h: 372 }),
     rafFns: {
       request: (): number => 0,
-      cancel: (): void => {},
+      cancel: (): void => undefined,
       now: (): number => 0,
     },
   });
@@ -172,7 +170,7 @@ describe("ViewportController — destroy", () => {
   it("is idempotent", () => {
     const { controller } = makeDeps();
     controller.destroy();
-    expect(() => controller.destroy()).not.toThrow();
+    expect(() => { controller.destroy(); }).not.toThrow();
   });
 
   it("removes all listeners", () => {
@@ -194,7 +192,7 @@ describe("ViewportController — wheel", () => {
     Object.defineProperty(evt, "clientX", { value: 500 });
     Object.defineProperty(evt, "clientY", { value: 100 });
     Object.defineProperty(evt, "shiftKey", { value: false });
-    Object.defineProperty(evt, "preventDefault", { value: (): void => {} });
+    Object.defineProperty(evt, "preventDefault", { value: ((): void => undefined) });
     canvas.dispatchEvent(evt);
     expect(applyWindow).toHaveBeenCalled();
     const arg = applyWindow.mock.calls[0]?.[0] as ChartWindow;
@@ -208,7 +206,7 @@ describe("ViewportController — wheel", () => {
     Object.defineProperty(evt, "deltaY", { value: -1 });
     Object.defineProperty(evt, "clientX", { value: 500 });
     Object.defineProperty(evt, "shiftKey", { value: false });
-    Object.defineProperty(evt, "preventDefault", { value: (): void => {} });
+    Object.defineProperty(evt, "preventDefault", { value: ((): void => undefined) });
     canvas.dispatchEvent(evt);
     const arg = applyWindow.mock.calls[0]?.[0] as ChartWindow;
     expect(Number(arg.endTime) - Number(arg.startTime)).toBeLessThan(1_000_000);
@@ -221,7 +219,7 @@ describe("ViewportController — wheel", () => {
     Object.defineProperty(evt, "deltaY", { value: 1 });
     Object.defineProperty(evt, "clientX", { value: 500 });
     Object.defineProperty(evt, "shiftKey", { value: true });
-    Object.defineProperty(evt, "preventDefault", { value: (): void => {} });
+    Object.defineProperty(evt, "preventDefault", { value: ((): void => undefined) });
     canvas.dispatchEvent(evt);
     const arg = applyWindow.mock.calls[0]?.[0] as ChartWindow;
     expect(Number(arg.endTime) - Number(arg.startTime)).toBeCloseTo(1_000_000, 3);
@@ -325,7 +323,7 @@ describe("ViewportController — kinetic", () => {
 
   it("stopKinetic is safe to call when no kinetic active", () => {
     const deps = makeDeps();
-    expect(() => deps.controller.stopKinetic()).not.toThrow();
+    expect(() => { deps.controller.stopKinetic(); }).not.toThrow();
     deps.controller.destroy();
   });
 });

@@ -148,7 +148,7 @@ export class ViewportController {
     this.plotRect = deps.plotRect;
     this.options = resolveOptions(deps.options);
     this.raf = deps.rafFns?.request ?? ((cb): number => requestAnimationFrame(cb));
-    this.caf = deps.rafFns?.cancel ?? ((id): void => cancelAnimationFrame(id));
+    this.caf = deps.rafFns?.cancel ?? ((id): void => { cancelAnimationFrame(id); });
     this.now = deps.rafFns?.now ?? ((): number => performance.now());
 
     this.stage.eventMode = "static";
@@ -220,7 +220,7 @@ export class ViewportController {
       return;
     }
     this.cancelKineticRaf();
-    const type = (e.pointerType as PointerType) ?? "mouse";
+    const type = e.pointerType as PointerType;
     const sampleT = this.eventTime(e);
     const state: PointerState = {
       id: e.pointerId,
@@ -329,7 +329,7 @@ export class ViewportController {
   };
 
   private readonly onVisibilityChange = (): void => {
-    if (globalThis.document?.hidden === true) {
+    if (globalThis.document.hidden) {
       this.endAllDrags();
       this.cancelKineticRaf();
     }

@@ -45,10 +45,10 @@ export class TimeScale {
     this.intervalDuration = input.intervalDuration;
     this.pixelWidth = input.pixelWidth;
 
-    const start = Number(input.startTime);
-    const end = Number(input.endTime);
-    const interval = Number(input.intervalDuration);
-    const width = Number(input.pixelWidth);
+    const start = input.startTime;
+    const end = input.endTime;
+    const interval = input.intervalDuration;
+    const width = input.pixelWidth;
 
     const validInputs =
       Number.isFinite(start) &&

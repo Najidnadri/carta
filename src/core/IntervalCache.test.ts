@@ -15,12 +15,12 @@ const MINUTE = 60_000;
 function mockLogger(): Logger & { warnings: unknown[][] } {
   const warnings: unknown[][] = [];
   return {
-    debug: () => {},
-    info: () => {},
-    warn: (...args: readonly unknown[]) => {
+    debug: (): void => undefined,
+    info: (): void => undefined,
+    warn: (...args: readonly unknown[]): void => {
       warnings.push([...args]);
     },
-    error: () => {},
+    error: (): void => undefined,
     warnings,
   } as Logger & { warnings: unknown[][] };
 }
@@ -443,7 +443,7 @@ describe("IntervalCache — perf spot-check (logged, not asserted)", () => {
     const dt = performance.now() - t0;
     // Log, don't assert — environment varies. Fail only if >10× budget.
     if (dt > 500) {
-      // eslint-disable-next-line no-console
+       
       console.warn(`[carta perf] insertMany 100k took ${dt.toFixed(2)}ms (>> 50ms budget)`);
     }
     expect(cache.size()).toBe(100_000);

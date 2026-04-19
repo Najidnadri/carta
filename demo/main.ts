@@ -74,8 +74,8 @@ function createCapturingLogger(): CapturingLogger {
   const logger: CapturingLogger = {
     warnings,
     errors,
-    debug: (): void => {},
-    info: (): void => {},
+    debug: (): void => undefined,
+    info: (): void => undefined,
     warn: (msg, ...rest): void => {
       warnings.push([msg, ...rest.map((r) => String(r))].join(" "));
     },
@@ -210,7 +210,7 @@ function formatDurationMs(ms: number): string {
   }
   const abs = Math.abs(ms);
   if (abs < 1_000) {
-    return `${Math.round(ms)} ms`;
+    return `${String(Math.round(ms))} ms`;
   }
   if (abs < 60_000) {
     return `${(ms / 1_000).toFixed(2)} s`;
@@ -321,12 +321,12 @@ async function main(): Promise<void> {
     chart.defineChannel(ohlc);
     chart.defineChannel(volume);
     const bars = generateSyntheticOhlc(s, e, ivNum, mid);
-    chart.supplyData<OhlcRecord>(DEMO_OHLC_CHANNEL, ivNum, bars);
+    chart.supplyData(DEMO_OHLC_CHANNEL, ivNum, bars);
     const points: PointRecord[] = bars.map((b) => ({
       time: b.time,
       value: asPrice(b.volume),
     }));
-    chart.supplyData<PointRecord>(DEMO_VOLUME_CHANNEL, ivNum, points);
+    chart.supplyData(DEMO_VOLUME_CHANNEL, ivNum, points);
   };
   document.getElementById("load-data")?.addEventListener("click", loadSyntheticData);
   document.getElementById("clear-cache")?.addEventListener("click", () => {
@@ -454,7 +454,7 @@ async function main(): Promise<void> {
     labelCacheSize: (): number => timeFormatInternals.labelCacheSize(),
     lastWarnings: (): readonly string[] => [...activeLogger.warnings],
     lastErrors: (): readonly string[] => [...activeLogger.errors],
-    resetCaches: (): void => timeFormatInternals.resetCaches(),
+    resetCaches: (): void => { timeFormatInternals.resetCaches(); },
     remount: (): Promise<void> => remount(),
     getWindow: (): { startTime: number; endTime: number } => {
       const w = chart?.getWindow();
@@ -506,12 +506,12 @@ async function main(): Promise<void> {
       startTime: number,
       endTime: number,
     ): readonly (OhlcRecord | PointRecord)[] =>
-      chart?.recordsInRange<OhlcRecord | PointRecord>(
+      (chart?.recordsInRange(
         channelId,
         intervalDuration,
         startTime,
         endTime,
-      ) ?? [],
+      ) as readonly (OhlcRecord | PointRecord)[] | undefined) ?? [],
     missingRanges: (
       channelId: string,
       query?: { startTime?: number; endTime?: number; intervalDuration?: number },
