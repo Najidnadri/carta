@@ -23,6 +23,15 @@ export {
 export type { FormatContext, StepTier } from "./core/timeFormat.js";
 export { TimeAxis } from "./core/TimeAxis.js";
 export type { TickInfo, TimeAxisOptions } from "./core/TimeAxis.js";
+export { PriceScale, DEFAULT_PRICE_MARGINS } from "./core/PriceScale.js";
+export type { PriceScaleInput } from "./core/PriceScale.js";
+export { PriceAxis, defaultPriceFormatter } from "./core/PriceAxis.js";
+export type { PriceTickInfo } from "./core/PriceAxis.js";
+export {
+  generatePriceTicks,
+  niceNumber,
+  targetTickCountForHeight,
+} from "./core/priceNaturalStep.js";
 export { ViewportController } from "./core/ViewportController.js";
 export type { ViewportControllerDeps } from "./core/ViewportController.js";
 export {

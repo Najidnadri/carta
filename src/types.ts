@@ -106,6 +106,39 @@ export interface Logger {
   error(msg: string, ...args: readonly unknown[]): void;
 }
 
+// ─── Price axis / scale options ────────────────────────────────────────────
+export interface PriceScaleMargins {
+  readonly top: number;
+  readonly bottom: number;
+}
+
+export type PriceScaleMode = "linear";
+
+export interface PriceScaleOptions {
+  readonly margins?: PriceScaleMargins;
+  readonly mode?: PriceScaleMode;
+}
+
+export interface PriceAxisOptions {
+  readonly minLabelPx?: number;
+  readonly labelPaddingX?: number;
+  readonly fontSize?: number;
+  readonly fontFamily?: string;
+}
+
+export type PriceFormatter = (value: number) => string;
+
+export interface PriceDomain {
+  readonly min: Price;
+  readonly max: Price;
+}
+
+export interface PriceScaleFacade {
+  setDomain(min: Price | number, max: Price | number): void;
+  getDomain(): PriceDomain;
+  isAutoScale(): boolean;
+}
+
 // ─── Viewport options ──────────────────────────────────────────────────────
 export interface KineticOptions {
   readonly decayPerSec?: number;
@@ -133,4 +166,12 @@ export interface TimeSeriesChartOptions {
   readonly theme?: Partial<Theme>;
   readonly logger?: Logger;
   readonly viewport?: ViewportOptions;
+  readonly priceScale?: PriceScaleOptions;
+  readonly priceAxis?: PriceAxisOptions;
+  readonly priceFormatter?: PriceFormatter;
+}
+
+export interface ApplyOptions {
+  readonly theme?: Partial<Theme>;
+  readonly priceFormatter?: PriceFormatter;
 }

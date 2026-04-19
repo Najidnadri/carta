@@ -2,6 +2,12 @@ import type { GraphicsContext } from "pixi.js";
 import { ConfigState } from "./ConfigState.js";
 import { InvalidationQueue, type DirtyReason } from "./InvalidationQueue.js";
 import { noopLogger } from "./Logger.js";
+import {
+  defaultPriceFormatter,
+  PriceAxis,
+} from "./PriceAxis.js";
+import type { PriceTickInfo } from "./PriceAxis.js";
+import { PriceScale } from "./PriceScale.js";
 import { Renderer, type PlotRect } from "./Renderer.js";
 import { TimeAxis, type TimeAxisOptions } from "./TimeAxis.js";
 import type { TickInfo } from "./TimeAxis.js";
@@ -9,11 +15,20 @@ import { TimeScale } from "./TimeScale.js";
 import { ViewportController } from "./ViewportController.js";
 import {
   asInterval,
+  asPrice,
   asTime,
   DEFAULT_THEME,
+  type ApplyOptions,
   type ChartWindow,
   type Interval,
   type Logger,
+  type Price,
+  type PriceAxisOptions,
+  type PriceDomain,
+  type PriceFormatter,
+  type PriceScaleFacade,
+  type PriceScaleMargins,
+  type PriceScaleOptions,
   type Theme,
   type Time,
   type TimeSeriesChartOptions,
@@ -33,11 +48,17 @@ interface ResolvedOptions {
   readonly logger: Logger;
   readonly timeAxis: TimeAxisOptions | undefined;
   readonly viewport: ViewportOptions | undefined;
+  readonly priceScale: PriceScaleOptions | undefined;
+  readonly priceAxis: PriceAxisOptions | undefined;
+  readonly priceFormatter: PriceFormatter;
 }
 
 export interface TimeSeriesChartConstructionOptions extends TimeSeriesChartOptions {
   readonly timeAxis?: TimeAxisOptions;
 }
+
+const DEFAULT_DOMAIN_MIN = 0;
+const DEFAULT_DOMAIN_MAX = 1;
 
 /**
  * Top-level chart class. Phase 02 surface: create / resize / destroy /
@@ -51,10 +72,15 @@ export class TimeSeriesChart {
   private readonly invalidator: InvalidationQueue;
   private readonly sharedContexts: GraphicsContext[] = [];
   private readonly timeAxis: TimeAxis;
+  private readonly priceAxis: PriceAxis;
   private readonly viewport: ViewportController;
   private resizeObserver: ResizeObserver | null = null;
   private config: ConfigState;
   private disposed = false;
+
+  private priceDomain: PriceDomain;
+  private priceFormatter: PriceFormatter;
+  private readonly priceScaleFacade: PriceScaleFacade;
 
   private constructor(opts: ResolvedOptions, renderer: Renderer, config: ConfigState) {
     this.opts = opts;
@@ -62,6 +88,17 @@ export class TimeSeriesChart {
     this.config = config;
     this.invalidator = new InvalidationQueue((reasons) => this.flush(reasons));
     this.timeAxis = new TimeAxis(renderer.gridLayer, renderer.axesLayer, opts.timeAxis);
+    this.priceAxis = new PriceAxis(renderer.gridLayer, renderer.axesLayer, opts.priceAxis);
+    this.priceDomain = Object.freeze({
+      min: asPrice(DEFAULT_DOMAIN_MIN),
+      max: asPrice(DEFAULT_DOMAIN_MAX),
+    });
+    this.priceFormatter = opts.priceFormatter;
+    this.priceScaleFacade = {
+      setDomain: (min, max): void => this.setPriceDomain(min, max),
+      getDomain: (): PriceDomain => this.priceDomain,
+      isAutoScale: (): boolean => false,
+    };
     this.viewport = new ViewportController({
       stage: renderer.app.stage,
       canvas: renderer.app.canvas,
@@ -104,6 +141,9 @@ export class TimeSeriesChart {
       logger,
       timeAxis: options.timeAxis,
       viewport: options.viewport,
+      priceScale: options.priceScale,
+      priceAxis: options.priceAxis,
+      priceFormatter: options.priceFormatter ?? defaultPriceFormatter,
     };
 
     const renderer = await Renderer.create({
@@ -188,6 +228,73 @@ export class TimeSeriesChart {
     this.viewport.stopKinetic();
   }
 
+  /** Facade for price-scale control. 04a: manual domain only; 04b adds autoScale. */
+  priceScale(): PriceScaleFacade {
+    return this.priceScaleFacade;
+  }
+
+  /** Apply a subset of chart options at runtime. */
+  applyOptions(options: ApplyOptions): void {
+    if (this.disposed) {
+      return;
+    }
+    let changed = false;
+    if (options.priceFormatter !== undefined) {
+      this.priceFormatter = options.priceFormatter;
+      changed = true;
+    }
+    if (options.theme !== undefined) {
+      const nextTheme: Theme = { ...this.config.snapshot.theme, ...options.theme };
+      const nextConfig = this.config.withTheme(nextTheme);
+      if (nextConfig !== this.config) {
+        this.config = nextConfig;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.invalidator.invalidate("theme");
+    }
+  }
+
+  /** Visible price ticks from the most-recent render. Dev/test introspection. */
+  visiblePriceTicks(): readonly PriceTickInfo[] {
+    return this.priceAxis.ticks();
+  }
+
+  /** Price-label pool capacity (constant after first render). Dev/test introspection. */
+  priceAxisPoolSize(): number {
+    return this.priceAxis.poolSize();
+  }
+
+  private setPriceDomain(min: Price | number, max: Price | number): void {
+    const rawMin = Number(min);
+    const rawMax = Number(max);
+    if (!Number.isFinite(rawMin) || !Number.isFinite(rawMax)) {
+      this.opts.logger.warn(
+        "[carta] priceScale.setDomain received non-finite min/max — price axis will hide until valid values are supplied",
+      );
+    } else if (rawMin > rawMax) {
+      this.opts.logger.warn(
+        "[carta] priceScale.setDomain min > max — price axis will hide until corrected",
+      );
+    }
+    const next: PriceDomain = Object.freeze({ min: asPrice(rawMin), max: asPrice(rawMax) });
+    const prevMin = Number(this.priceDomain.min);
+    const prevMax = Number(this.priceDomain.max);
+    const unchanged =
+      ((Number.isNaN(prevMin) && Number.isNaN(rawMin)) || prevMin === rawMin) &&
+      ((Number.isNaN(prevMax) && Number.isNaN(rawMax)) || prevMax === rawMax);
+    if (unchanged) {
+      return;
+    }
+    this.priceDomain = next;
+    this.invalidator.invalidate("viewport");
+  }
+
+  private resolvePriceMargins(): PriceScaleMargins | undefined {
+    return this.opts.priceScale?.margins;
+  }
+
   private applyWindowInternal(win: ChartWindow): void {
     const next = this.config.withWindow(win.startTime, win.endTime);
     if (next === this.config) {
@@ -228,6 +335,7 @@ export class TimeSeriesChart {
     this.viewport.destroy();
     this.invalidator.dispose();
     this.timeAxis.destroy();
+    this.priceAxis.destroy();
     for (const ctx of this.sharedContexts) {
       ctx.destroy();
     }
@@ -249,7 +357,24 @@ export class TimeSeriesChart {
     );
     const scale = this.currentTimeScaleForRect(plotRect);
     this.timeAxis.render(scale, plotRect, this.config.snapshot.theme);
+    const priceScale = this.currentPriceScaleForRect(plotRect);
+    this.priceAxis.render(
+      priceScale,
+      plotRect,
+      this.config.snapshot.theme,
+      this.priceFormatter,
+      this.opts.logger,
+    );
     this.renderer.render();
+  }
+
+  private currentPriceScaleForRect(plotRect: PlotRect): PriceScale {
+    return new PriceScale({
+      domainMin: this.priceDomain.min,
+      domainMax: this.priceDomain.max,
+      pixelHeight: plotRect.h,
+      margins: this.resolvePriceMargins(),
+    });
   }
 
   private currentTimeScale(): TimeScale {

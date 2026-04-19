@@ -3,6 +3,8 @@ import {
   TimeSeriesChart,
   type ChartWindow,
   type Logger,
+  type PriceFormatter,
+  type PriceTickInfo,
   type TimeSeriesChartConstructionOptions,
 } from "../src/index.js";
 import { __internals__ as timeFormatInternals } from "../src/core/timeFormat.js";
@@ -18,7 +20,12 @@ interface DemoWindow {
   readonly intervalDuration: number;
   readonly timeZone: string;
   readonly locale: string;
+  readonly priceMin: number;
+  readonly priceMax: number;
 }
+
+const DEFAULT_PRICE_MIN = 98;
+const DEFAULT_PRICE_MAX = 105;
 
 function parseSearch(): DemoWindow {
   const params = new URLSearchParams(globalThis.location.search);
@@ -27,6 +34,10 @@ function parseSearch(): DemoWindow {
   const interval = Number(params.get("interval"));
   const tz = params.get("tz") ?? "UTC";
   const locale = params.get("locale") ?? "en-US";
+  const pMinRaw = params.get("priceMin");
+  const pMaxRaw = params.get("priceMax");
+  const priceMin = pMinRaw !== null && Number.isFinite(Number(pMinRaw)) ? Number(pMinRaw) : DEFAULT_PRICE_MIN;
+  const priceMax = pMaxRaw !== null && Number.isFinite(Number(pMaxRaw)) ? Number(pMaxRaw) : DEFAULT_PRICE_MAX;
   // Anchor the demo window to a fixed moment so Playwright screenshots stay
   // deterministic across runs. Hosts pick their own windows in real usage.
   const anchor = Date.UTC(2026, 3, 19, 12, 0, 0);
@@ -36,6 +47,8 @@ function parseSearch(): DemoWindow {
     intervalDuration: Number.isFinite(interval) && interval > 0 ? interval : DEFAULT_INTERVAL,
     timeZone: tz,
     locale,
+    priceMin,
+    priceMax,
   };
 }
 
@@ -79,7 +92,9 @@ async function mount(): Promise<TimeSeriesChart> {
     logger: activeLogger,
     timeAxis: { formatContext: { locale: win.locale, timeZone: win.timeZone } },
   };
-  return TimeSeriesChart.create(opts);
+  const chart = await TimeSeriesChart.create(opts);
+  chart.priceScale().setDomain(win.priceMin, win.priceMax);
+  return chart;
 }
 
 function formatDurationMs(ms: number): string {
@@ -137,6 +152,7 @@ async function main(): Promise<void> {
   const readoutStart = document.getElementById("readout-start");
   const readoutEnd = document.getElementById("readout-end");
   const readoutWidth = document.getElementById("readout-width");
+  const readoutDomain = document.getElementById("readout-domain");
   const updateReadout = (): void => {
     if (chart === null) {
       return;
@@ -152,6 +168,10 @@ async function main(): Promise<void> {
     }
     if (readoutWidth !== null) {
       readoutWidth.textContent = formatDurationMs(e - s);
+    }
+    if (readoutDomain !== null) {
+      const d = chart.priceScale().getDomain();
+      readoutDomain.textContent = `${Number(d.min).toFixed(2)} – ${Number(d.max).toFixed(2)}`;
     }
     requestAnimationFrame(updateReadout);
   };
@@ -187,6 +207,29 @@ async function main(): Promise<void> {
       }));
     },
     axisPoolSize: (): number => chart?.axisPoolSize() ?? 0,
+    priceTicks: (): readonly { value: number; y: number; label: string }[] => {
+      const ticks: readonly PriceTickInfo[] = chart?.visiblePriceTicks() ?? [];
+      return ticks.map((t) => ({ value: t.value, y: t.y, label: t.label }));
+    },
+    priceTickCount: (): number => chart?.visiblePriceTicks().length ?? 0,
+    priceAxisPoolSize: (): number => chart?.priceAxisPoolSize() ?? 0,
+    getPriceDomain: (): { min: number; max: number } => {
+      const d = chart?.priceScale().getDomain();
+      return {
+        min: d !== undefined ? Number(d.min) : Number.NaN,
+        max: d !== undefined ? Number(d.max) : Number.NaN,
+      };
+    },
+    setPriceDomain: (min: number, max: number): void => {
+      chart?.priceScale().setDomain(min, max);
+    },
+    isPriceAutoScale: (): boolean => chart?.priceScale().isAutoScale() ?? false,
+    setPriceFormatter: (formatter: PriceFormatter): void => {
+      chart?.applyOptions({ priceFormatter: formatter });
+    },
+    resetPriceFormatter: (): void => {
+      chart?.applyOptions({ priceFormatter: (v) => v.toFixed(2) });
+    },
     labelCacheSize: (): number => timeFormatInternals.labelCacheSize(),
     lastWarnings: (): readonly string[] => [...activeLogger.warnings],
     lastErrors: (): readonly string[] => [...activeLogger.errors],
