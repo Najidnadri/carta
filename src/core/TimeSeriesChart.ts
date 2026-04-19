@@ -4,9 +4,19 @@ import { InvalidationQueue, type DirtyReason } from "./InvalidationQueue.js";
 import { noopLogger } from "./Logger.js";
 import {
   defaultPriceFormatter,
+  PRICE_AXIS_STRIP_WIDTH,
   PriceAxis,
 } from "./PriceAxis.js";
 import type { PriceTickInfo } from "./PriceAxis.js";
+import {
+  PriceAxisController,
+  type PriceAxisDragOptions,
+} from "./PriceAxisController.js";
+import {
+  reducePriceRanges,
+  type PriceRange,
+  type PriceRangeProvider,
+} from "./PriceRangeProvider.js";
 import { PriceScale } from "./PriceScale.js";
 import { Renderer, type PlotRect } from "./Renderer.js";
 import { TimeAxis, type TimeAxisOptions } from "./TimeAxis.js";
@@ -35,7 +45,6 @@ import {
   type ViewportOptions,
 } from "../types.js";
 
-const RIGHT_MARGIN = 64;
 const BOTTOM_MARGIN = 28;
 
 interface ResolvedOptions {
@@ -50,11 +59,13 @@ interface ResolvedOptions {
   readonly viewport: ViewportOptions | undefined;
   readonly priceScale: PriceScaleOptions | undefined;
   readonly priceAxis: PriceAxisOptions | undefined;
+  readonly priceAxisDrag: PriceAxisDragOptions | undefined;
   readonly priceFormatter: PriceFormatter;
 }
 
 export interface TimeSeriesChartConstructionOptions extends TimeSeriesChartOptions {
   readonly timeAxis?: TimeAxisOptions;
+  readonly priceAxisDrag?: PriceAxisDragOptions;
 }
 
 const DEFAULT_DOMAIN_MIN = 0;
@@ -74,11 +85,15 @@ export class TimeSeriesChart {
   private readonly timeAxis: TimeAxis;
   private readonly priceAxis: PriceAxis;
   private readonly viewport: ViewportController;
+  private readonly priceAxisController: PriceAxisController;
   private resizeObserver: ResizeObserver | null = null;
   private config: ConfigState;
   private disposed = false;
 
   private priceDomain: PriceDomain;
+  private autoScaleEnabled = false;
+  private lastRenderedDomain: PriceDomain;
+  private readonly priceRangeProviders = new Set<PriceRangeProvider>();
   private priceFormatter: PriceFormatter;
   private readonly priceScaleFacade: PriceScaleFacade;
 
@@ -89,15 +104,18 @@ export class TimeSeriesChart {
     this.invalidator = new InvalidationQueue((reasons) => this.flush(reasons));
     this.timeAxis = new TimeAxis(renderer.gridLayer, renderer.axesLayer, opts.timeAxis);
     this.priceAxis = new PriceAxis(renderer.gridLayer, renderer.axesLayer, opts.priceAxis);
-    this.priceDomain = Object.freeze({
+    const initialDomain: PriceDomain = Object.freeze({
       min: asPrice(DEFAULT_DOMAIN_MIN),
       max: asPrice(DEFAULT_DOMAIN_MAX),
     });
+    this.priceDomain = initialDomain;
+    this.lastRenderedDomain = initialDomain;
     this.priceFormatter = opts.priceFormatter;
     this.priceScaleFacade = {
       setDomain: (min, max): void => this.setPriceDomain(min, max),
-      getDomain: (): PriceDomain => this.priceDomain,
-      isAutoScale: (): boolean => false,
+      getDomain: (): PriceDomain => this.lastRenderedDomain,
+      isAutoScale: (): boolean => this.autoScaleEnabled,
+      setAutoScale: (on: boolean): void => this.setAutoScaleInternal(on),
     };
     this.viewport = new ViewportController({
       stage: renderer.app.stage,
@@ -117,6 +135,15 @@ export class TimeSeriesChart {
       applyWindow: (win: ChartWindow): void => this.applyWindowInternal(win),
       plotRect: (): PlotRect => this.computePlotRect(),
       options: opts.viewport,
+    });
+    this.priceAxisController = new PriceAxisController({
+      axesLayer: renderer.axesLayer,
+      plotRect: (): PlotRect => this.computePlotRect(),
+      getRenderedDomain: (): PriceDomain => this.lastRenderedDomain,
+      setManualDomain: (min, max): void => this.applyManualDomain(min, max),
+      setAutoScale: (on): void => this.setAutoScaleInternal(on),
+      onGestureStart: (): void => this.viewport.stopKinetic(),
+      options: opts.priceAxisDrag,
     });
   }
 
@@ -143,6 +170,7 @@ export class TimeSeriesChart {
       viewport: options.viewport,
       priceScale: options.priceScale,
       priceAxis: options.priceAxis,
+      priceAxisDrag: options.priceAxisDrag,
       priceFormatter: options.priceFormatter ?? defaultPriceFormatter,
     };
 
@@ -190,6 +218,7 @@ export class TimeSeriesChart {
     this.config = next;
     this.renderer.resize(safeW, safeH);
     this.viewport.syncHitArea();
+    this.priceAxisController.syncHitArea();
     this.invalidator.invalidate("size");
   }
 
@@ -266,6 +295,33 @@ export class TimeSeriesChart {
     return this.priceAxis.poolSize();
   }
 
+  /** Register a provider for auto-scale reconciliation. Providers are polled
+   *  once per flush while `autoScale` is on. No-op if already registered. */
+  addPriceRangeProvider(provider: PriceRangeProvider): void {
+    if (this.disposed) {
+      return;
+    }
+    if (this.priceRangeProviders.has(provider)) {
+      return;
+    }
+    this.priceRangeProviders.add(provider);
+    if (this.autoScaleEnabled) {
+      this.invalidator.invalidate("viewport");
+    }
+  }
+
+  removePriceRangeProvider(provider: PriceRangeProvider): void {
+    if (this.disposed) {
+      return;
+    }
+    if (!this.priceRangeProviders.delete(provider)) {
+      return;
+    }
+    if (this.autoScaleEnabled) {
+      this.invalidator.invalidate("viewport");
+    }
+  }
+
   private setPriceDomain(min: Price | number, max: Price | number): void {
     const rawMin = Number(min);
     const rawMax = Number(max);
@@ -284,10 +340,29 @@ export class TimeSeriesChart {
     const unchanged =
       ((Number.isNaN(prevMin) && Number.isNaN(rawMin)) || prevMin === rawMin) &&
       ((Number.isNaN(prevMax) && Number.isNaN(rawMax)) || prevMax === rawMax);
-    if (unchanged) {
+    const autoWasOn = this.autoScaleEnabled;
+    this.autoScaleEnabled = false;
+    if (unchanged && !autoWasOn) {
       return;
     }
     this.priceDomain = next;
+    this.invalidator.invalidate("viewport");
+  }
+
+  private applyManualDomain(min: Price, max: Price): void {
+    const next: PriceDomain = Object.freeze({ min, max });
+    this.priceDomain = next;
+    this.invalidator.invalidate("viewport");
+  }
+
+  private setAutoScaleInternal(on: boolean): void {
+    if (this.disposed) {
+      return;
+    }
+    if (this.autoScaleEnabled === on) {
+      return;
+    }
+    this.autoScaleEnabled = on;
     this.invalidator.invalidate("viewport");
   }
 
@@ -332,10 +407,12 @@ export class TimeSeriesChart {
     this.disposed = true;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    this.priceAxisController.destroy();
     this.viewport.destroy();
     this.invalidator.dispose();
     this.timeAxis.destroy();
     this.priceAxis.destroy();
+    this.priceRangeProviders.clear();
     for (const ctx of this.sharedContexts) {
       ctx.destroy();
     }
@@ -355,6 +432,8 @@ export class TimeSeriesChart {
       this.config.snapshot.height,
       plotRect,
     );
+    this.reconcileRenderedDomain();
+    this.priceAxisController.syncHitArea();
     const scale = this.currentTimeScaleForRect(plotRect);
     this.timeAxis.render(scale, plotRect, this.config.snapshot.theme);
     const priceScale = this.currentPriceScaleForRect(plotRect);
@@ -368,10 +447,30 @@ export class TimeSeriesChart {
     this.renderer.render();
   }
 
+  /** Pull-based reconciliation of the rendered price domain. Runs once per
+   *  flush, writes `lastRenderedDomain` only. Never calls `invalidate`. */
+  private reconcileRenderedDomain(): void {
+    if (!this.autoScaleEnabled) {
+      this.lastRenderedDomain = this.priceDomain;
+      return;
+    }
+    const snap = this.config.snapshot;
+    const reduced: PriceRange | null = reducePriceRanges(
+      this.priceRangeProviders,
+      snap.startTime,
+      snap.endTime,
+    );
+    if (reduced === null) {
+      // Retain the prior rendered domain — don't collapse to [0, 1].
+      return;
+    }
+    this.lastRenderedDomain = Object.freeze({ min: reduced.min, max: reduced.max });
+  }
+
   private currentPriceScaleForRect(plotRect: PlotRect): PriceScale {
     return new PriceScale({
-      domainMin: this.priceDomain.min,
-      domainMax: this.priceDomain.max,
+      domainMin: this.lastRenderedDomain.min,
+      domainMax: this.lastRenderedDomain.max,
       pixelHeight: plotRect.h,
       margins: this.resolvePriceMargins(),
     });
@@ -396,7 +495,7 @@ export class TimeSeriesChart {
     return {
       x: 0,
       y: 0,
-      w: Math.max(0, width - RIGHT_MARGIN),
+      w: Math.max(0, width - PRICE_AXIS_STRIP_WIDTH),
       h: Math.max(0, height - BOTTOM_MARGIN),
     };
   }

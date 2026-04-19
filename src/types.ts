@@ -137,6 +137,7 @@ export interface PriceScaleFacade {
   setDomain(min: Price | number, max: Price | number): void;
   getDomain(): PriceDomain;
   isAutoScale(): boolean;
+  setAutoScale(on: boolean): void;
 }
 
 // ─── Viewport options ──────────────────────────────────────────────────────

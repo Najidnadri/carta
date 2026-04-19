@@ -12,6 +12,10 @@ export interface PriceAxisOptions {
   readonly fontFamily?: string;
 }
 
+/** CSS-pixel width of the right-hand price-axis strip, used by the chart's
+ *  plot-rect math and by `PriceAxisController`'s hit-area. */
+export const PRICE_AXIS_STRIP_WIDTH = 64;
+
 export type PriceFormatter = (value: number) => string;
 
 export interface PriceTickInfo {
@@ -20,7 +24,7 @@ export interface PriceTickInfo {
   readonly label: string;
 }
 
-const DEFAULT_MIN_LABEL_PX = 40;
+const DEFAULT_MIN_LABEL_PX = 80;
 const DEFAULT_LABEL_PADDING_X = 6;
 const DEFAULT_FONT_SIZE = 11;
 const DEFAULT_FONT_FAMILY = "system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif";

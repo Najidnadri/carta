@@ -25,8 +25,20 @@ export { TimeAxis } from "./core/TimeAxis.js";
 export type { TickInfo, TimeAxisOptions } from "./core/TimeAxis.js";
 export { PriceScale, DEFAULT_PRICE_MARGINS } from "./core/PriceScale.js";
 export type { PriceScaleInput } from "./core/PriceScale.js";
-export { PriceAxis, defaultPriceFormatter } from "./core/PriceAxis.js";
+export { PriceAxis, PRICE_AXIS_STRIP_WIDTH, defaultPriceFormatter } from "./core/PriceAxis.js";
 export type { PriceTickInfo } from "./core/PriceAxis.js";
+export {
+  PriceAxisController,
+  PRICE_AXIS_STRIP_HIT_LABEL,
+  computeStretchedDomain,
+  recognizeDoubleTap,
+} from "./core/PriceAxisController.js";
+export type {
+  PriceAxisControllerDeps,
+  PriceAxisDragOptions,
+} from "./core/PriceAxisController.js";
+export { reducePriceRanges } from "./core/PriceRangeProvider.js";
+export type { PriceRange, PriceRangeProvider } from "./core/PriceRangeProvider.js";
 export {
   generatePriceTicks,
   niceNumber,

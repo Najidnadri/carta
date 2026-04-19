@@ -207,6 +207,7 @@ export class TimeAxis {
     const labelY = plotRect.y + plotRect.h + this.options.labelPaddingY;
     const pool = this.labelPool;
     const count = Math.min(ticks.length, pool.length);
+    const plotRight = plotRect.x + plotRect.w;
 
     for (let i = 0; i < count; i++) {
       const tick = ticks[i];
@@ -221,9 +222,16 @@ export class TimeAxis {
         slot.lastValue = tick.label;
       }
       text.style.fill = tick.isDayBoundary ? theme.text : theme.textMuted;
-      text.position.set(plotRect.x + tick.x, labelY);
-      if (!text.visible) {
-        text.visible = true;
+      const x = plotRect.x + tick.x;
+      text.position.set(x, labelY);
+      // Anchor is (0.5, 0) — hide labels whose centered bounding box would
+      // spill into the right-hand price-axis strip (the corner square).
+      const halfWidth = text.width / 2;
+      const overflowsRight = x + halfWidth > plotRight;
+      const overflowsLeft = x - halfWidth < plotRect.x;
+      const shouldShow = !overflowsRight && !overflowsLeft;
+      if (text.visible !== shouldShow) {
+        text.visible = shouldShow;
       }
     }
 

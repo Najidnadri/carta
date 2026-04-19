@@ -1,10 +1,14 @@
 import {
+  asPrice,
   asTime,
   TimeSeriesChart,
   type ChartWindow,
   type Logger,
   type PriceFormatter,
+  type PriceRange,
+  type PriceRangeProvider,
   type PriceTickInfo,
+  type Time,
   type TimeSeriesChartConstructionOptions,
 } from "../src/index.js";
 import { __internals__ as timeFormatInternals } from "../src/core/timeFormat.js";
@@ -77,6 +81,40 @@ function createCapturingLogger(): CapturingLogger {
 
 let activeLogger: CapturingLogger = createCapturingLogger();
 
+/**
+ * Deterministic synthetic provider used to drive auto-scale from the demo
+ * until phase 07's real series arrive. Emits a seeded sine + noise range
+ * derived from the visible window boundaries so pans visibly shift the
+ * domain without any real data.
+ */
+function createSyntheticProvider(priceMid: number, priceAmp: number): PriceRangeProvider {
+  const hashWindow = (start: Time, end: Time): number => {
+    const s = Math.floor(Number(start) / 60_000);
+    const e = Math.floor(Number(end) / 60_000);
+    let h = (s ^ (e << 1)) >>> 0;
+    h = Math.imul(h ^ (h >>> 16), 0x85ebca6b) >>> 0;
+    h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+    return ((h ^ (h >>> 16)) >>> 0) / 0xffffffff;
+  };
+  return {
+    priceRangeInWindow: (startTime: Time, endTime: Time): PriceRange | null => {
+      const s = Number(startTime);
+      const e = Number(endTime);
+      if (!Number.isFinite(s) || !Number.isFinite(e) || s >= e) {
+        return null;
+      }
+      const phase = (s / HOUR) % (Math.PI * 2);
+      const wiggle = Math.sin(phase) * priceAmp * 0.35;
+      const jitter = (hashWindow(startTime, endTime) - 0.5) * priceAmp * 0.25;
+      const center = priceMid + wiggle + jitter;
+      const half = priceAmp * (0.8 + hashWindow(endTime, startTime) * 0.4);
+      return { min: asPrice(center - half), max: asPrice(center + half) };
+    },
+  };
+}
+
+let activeSyntheticProvider: PriceRangeProvider | null = null;
+
 async function mount(): Promise<TimeSeriesChart> {
   const container = document.getElementById("chart");
   if (container === null) {
@@ -94,6 +132,10 @@ async function mount(): Promise<TimeSeriesChart> {
   };
   const chart = await TimeSeriesChart.create(opts);
   chart.priceScale().setDomain(win.priceMin, win.priceMax);
+  const mid = (win.priceMin + win.priceMax) / 2;
+  const amp = Math.max(0.5, (win.priceMax - win.priceMin) / 2);
+  activeSyntheticProvider = createSyntheticProvider(mid, amp);
+  chart.addPriceRangeProvider(activeSyntheticProvider);
   return chart;
 }
 
@@ -183,6 +225,28 @@ async function main(): Promise<void> {
   document.getElementById("reset-view")?.addEventListener("click", () => {
     chart?.setWindow(initialChartWindow);
   });
+  const autoScaleBtn = document.getElementById("auto-scale");
+  const updateAutoBtn = (): void => {
+    if (autoScaleBtn === null) {
+      return;
+    }
+    const on = chart?.priceScale().isAutoScale() ?? false;
+    autoScaleBtn.textContent = `Auto-scale: ${on ? "ON" : "OFF"}`;
+    autoScaleBtn.setAttribute("aria-pressed", String(on));
+  };
+  autoScaleBtn?.addEventListener("click", () => {
+    if (chart === null) {
+      return;
+    }
+    const current = chart.priceScale().isAutoScale();
+    chart.priceScale().setAutoScale(!current);
+    updateAutoBtn();
+  });
+  const priceReadoutRaf = (): void => {
+    updateAutoBtn();
+    requestAnimationFrame(priceReadoutRaf);
+  };
+  requestAnimationFrame(priceReadoutRaf);
 
   // Test hooks (dev only) — used by Playwright for adversarial scenarios.
   const testHook = {
@@ -224,6 +288,56 @@ async function main(): Promise<void> {
       chart?.priceScale().setDomain(min, max);
     },
     isPriceAutoScale: (): boolean => chart?.priceScale().isAutoScale() ?? false,
+    setPriceAutoScale: (on: boolean): void => {
+      chart?.priceScale().setAutoScale(on);
+      updateAutoBtn();
+    },
+    addSyntheticProvider: (mid: number, amp: number): void => {
+      if (chart === null) {
+        return;
+      }
+      if (activeSyntheticProvider !== null) {
+        chart.removePriceRangeProvider(activeSyntheticProvider);
+      }
+      activeSyntheticProvider = createSyntheticProvider(mid, amp);
+      chart.addPriceRangeProvider(activeSyntheticProvider);
+    },
+    removeSyntheticProvider: (): void => {
+      if (chart === null || activeSyntheticProvider === null) {
+        return;
+      }
+      chart.removePriceRangeProvider(activeSyntheticProvider);
+      activeSyntheticProvider = null;
+    },
+    addThrowingProvider: (): PriceRangeProvider => {
+      const p: PriceRangeProvider = {
+        priceRangeInWindow: (): PriceRange | null => {
+          throw new Error("provider failure (test hook)");
+        },
+      };
+      chart?.addPriceRangeProvider(p);
+      return p;
+    },
+    addFixedRangeProvider: (min: number, max: number): PriceRangeProvider => {
+      const p: PriceRangeProvider = {
+        priceRangeInWindow: (): PriceRange | null => ({
+          min: asPrice(min),
+          max: asPrice(max),
+        }),
+      };
+      chart?.addPriceRangeProvider(p);
+      return p;
+    },
+    addNullProvider: (): PriceRangeProvider => {
+      const p: PriceRangeProvider = {
+        priceRangeInWindow: (): PriceRange | null => null,
+      };
+      chart?.addPriceRangeProvider(p);
+      return p;
+    },
+    removeProvider: (p: PriceRangeProvider): void => {
+      chart?.removePriceRangeProvider(p);
+    },
     setPriceFormatter: (formatter: PriceFormatter): void => {
       chart?.applyOptions({ priceFormatter: formatter });
     },
@@ -310,6 +424,70 @@ async function main(): Promise<void> {
         await new Promise((r) => setTimeout(r, duration / steps));
       }
       send("pointerup", opts.endX);
+    },
+    synthVerticalDrag: async (opts: {
+      x: number;
+      startY: number;
+      endY: number;
+      durationMs?: number;
+      pointerType?: "mouse" | "pen" | "touch";
+      steps?: number;
+    }): Promise<void> => {
+      const canvas = document.querySelector("canvas");
+      if (canvas === null) {
+        return;
+      }
+      const duration = opts.durationMs ?? 200;
+      const steps = opts.steps ?? 12;
+      const pointerType = opts.pointerType ?? "mouse";
+      const send = (type: string, y: number, extra: Record<string, unknown> = {}): void => {
+        const pe = new PointerEvent(type, {
+          clientX: opts.x,
+          clientY: y,
+          pointerId: 1,
+          pointerType,
+          bubbles: true,
+          cancelable: true,
+          ...extra,
+        });
+        canvas.dispatchEvent(pe);
+      };
+      send("pointerdown", opts.startY);
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const y = opts.startY + (opts.endY - opts.startY) * t;
+        send("pointermove", y);
+        await new Promise((r) => setTimeout(r, duration / steps));
+      }
+      send("pointerup", opts.endY);
+    },
+    synthPointer: (
+      type: "pointerdown" | "pointermove" | "pointerup",
+      x: number,
+      y: number,
+      pointerId = 1,
+    ): void => {
+      const canvas = document.querySelector("canvas");
+      if (canvas === null) {
+        return;
+      }
+      canvas.dispatchEvent(
+        new PointerEvent(type, {
+          clientX: x,
+          clientY: y,
+          pointerId,
+          pointerType: "mouse",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    },
+    stripX: (): number => {
+      const canvas = document.querySelector("canvas");
+      if (canvas === null) {
+        return 0;
+      }
+      return canvas.clientWidth - 32;
     },
   };
   (globalThis as unknown as { __cartaTest?: typeof testHook }).__cartaTest = testHook;
