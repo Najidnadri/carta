@@ -71,6 +71,19 @@ export interface Range {
   readonly end: number;
 }
 
+export interface CacheStats {
+  readonly channelId: string;
+  readonly kind: ChannelKind;
+  readonly intervalsLoaded: readonly number[];
+  readonly totalRecords: number;
+}
+
+export interface MissingRangesQuery {
+  readonly startTime?: Time | number;
+  readonly endTime?: Time | number;
+  readonly intervalDuration?: Interval | number;
+}
+
 // ─── Window & event payloads ───────────────────────────────────────────────
 export interface ChartWindow {
   readonly startTime: Time;
@@ -192,6 +205,7 @@ export interface TimeSeriesChartOptions {
   readonly priceScale?: PriceScaleOptions;
   readonly priceAxis?: PriceAxisOptions;
   readonly priceFormatter?: PriceFormatter;
+  readonly data?: DataOptions;
 }
 
 export interface ApplyOptions {

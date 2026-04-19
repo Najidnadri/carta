@@ -41,7 +41,6 @@ Before spawning anything, decide four things and state them back to the user in 
 2. **Feature under test** — if `feature`, name it explicitly (e.g., "time axis tick placement" or "pinch zoom on mobile"). Pull this from the user's prompt or, if invoked by a parent workflow, from the parent's context (the phase being implemented).
 3. **Viewports** — default is `mobile, tablet, laptop`. `full` mode additionally adds landscape-mobile, ultra-wide, and very-short. The user or parent may override.
 4. **Height sweep** — the chart is expected to be embedded inside containers of varying height (dashboard tiles, collapsible drawers, modals, sidebars). Always test at multiple heights, not just the viewport default. Default height sweep per viewport:
-   - **Tiny** — 180 px (a compressed dashboard tile).
    - **Small** — 300 px.
    - **Medium** — 480 px.
    - **Large** — 720 px or the full viewport height, whichever is smaller.

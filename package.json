@@ -1,7 +1,7 @@
 {
   "name": "carta",
   "version": "0.0.0",
-  "description": "Technical charting library built on PixiJS",
+  "description": "GPU-accelerated technical charting library built on PixiJS v8 — event-driven, mobile-first, interval-aligned TimeSeriesChart.",
   "license": "MIT",
   "author": {
     "name": "Najid Nadri",

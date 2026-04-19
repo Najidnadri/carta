@@ -3,8 +3,12 @@ import {
   asPrice,
   asTime,
   TimeSeriesChart,
+  type CacheStats,
   type ChartWindow,
+  type Channel,
   type Logger,
+  type OhlcRecord,
+  type PointRecord,
   type PriceFormatter,
   type PriceRange,
   type PriceRangeProvider,
@@ -118,6 +122,64 @@ function createSyntheticProvider(priceMid: number, priceAmp: number): PriceRange
 
 let activeSyntheticProvider: PriceRangeProvider | null = null;
 
+const DEMO_OHLC_CHANNEL = "demo-ohlc";
+const DEMO_VOLUME_CHANNEL = "demo-volume";
+
+interface SyntheticBar extends OhlcRecord {
+  readonly volume: number;
+}
+
+/**
+ * Deterministic seeded synthetic OHLC + volume generator. Used by the demo's
+ * "Load synthetic data" button to exercise the cache wiring before Phase 07
+ * series exist to render it. Inputs are bar-aligned; output is sorted asc.
+ */
+function generateSyntheticOhlc(
+  startTime: number,
+  endTime: number,
+  intervalDuration: number,
+  basePrice: number,
+): SyntheticBar[] {
+  if (
+    !Number.isFinite(startTime) ||
+    !Number.isFinite(endTime) ||
+    !Number.isFinite(intervalDuration) ||
+    intervalDuration <= 0 ||
+    !Number.isInteger(intervalDuration) ||
+    startTime > endTime
+  ) {
+    return [];
+  }
+  const start = Math.floor(startTime / intervalDuration) * intervalDuration;
+  const end = Math.floor(endTime / intervalDuration) * intervalDuration;
+  const out: SyntheticBar[] = [];
+  let prev = basePrice;
+  let seed = 0x9e3779b1 ^ start;
+  const next = (): number => {
+    seed = Math.imul(seed ^ (seed >>> 15), 0x85ebca6b) >>> 0;
+    seed = Math.imul(seed ^ (seed >>> 13), 0xc2b2ae35) >>> 0;
+    return ((seed ^ (seed >>> 16)) >>> 0) / 0xffffffff;
+  };
+  for (let t = start; t <= end; t += intervalDuration) {
+    const drift = (next() - 0.5) * basePrice * 0.01;
+    const open = prev;
+    const close = Math.max(0.01, open + drift);
+    const high = Math.max(open, close) + next() * basePrice * 0.005;
+    const low = Math.min(open, close) - next() * basePrice * 0.005;
+    const volume = Math.floor(next() * 5000) + 100;
+    out.push({
+      time: asTime(t),
+      open: asPrice(open),
+      high: asPrice(high),
+      low: asPrice(Math.max(0.0001, low)),
+      close: asPrice(close),
+      volume,
+    });
+    prev = close;
+  }
+  return out;
+}
+
 async function mount(): Promise<TimeSeriesChart> {
   const container = document.getElementById("chart");
   if (container === null) {
@@ -198,7 +260,17 @@ async function main(): Promise<void> {
   const readoutEnd = document.getElementById("readout-end");
   const readoutWidth = document.getElementById("readout-width");
   const readoutDomain = document.getElementById("readout-domain");
+  const readoutCache = document.getElementById("readout-cache");
+  const formatCacheStats = (stats: readonly CacheStats[]): string => {
+    if (stats.length === 0) {
+      return "—";
+    }
+    return stats
+      .map((s) => `${s.channelId}(${s.kind}):${String(s.totalRecords)}`)
+      .join(" · ");
+  };
   const updateReadout = (): void => {
+    requestAnimationFrame(updateReadout);
     if (chart === null) {
       return;
     }
@@ -218,7 +290,9 @@ async function main(): Promise<void> {
       const d = chart.priceScale().getDomain();
       readoutDomain.textContent = `${Number(d.min).toFixed(2)} – ${Number(d.max).toFixed(2)}`;
     }
-    requestAnimationFrame(updateReadout);
+    if (readoutCache !== null) {
+      readoutCache.textContent = formatCacheStats(chart.cacheStats());
+    }
   };
   requestAnimationFrame(updateReadout);
 
@@ -227,6 +301,36 @@ async function main(): Promise<void> {
   });
   document.getElementById("reset-view")?.addEventListener("click", () => {
     chart?.setWindow(initialChartWindow);
+  });
+  const loadSyntheticData = (): void => {
+    if (chart === null) {
+      return;
+    }
+    const win = chart.getWindow();
+    const iv = chart.getInterval();
+    const ivNum = Number(iv);
+    const s = Number(win.startTime);
+    const e = Number(win.endTime);
+    if (!Number.isFinite(ivNum) || ivNum <= 0 || !Number.isFinite(s) || !Number.isFinite(e)) {
+      return;
+    }
+    const domain = chart.priceScale().getDomain();
+    const mid = (Number(domain.min) + Number(domain.max)) / 2 || 100;
+    const ohlc: Channel = { id: DEMO_OHLC_CHANNEL, kind: "ohlc" };
+    const volume: Channel = { id: DEMO_VOLUME_CHANNEL, kind: "point" };
+    chart.defineChannel(ohlc);
+    chart.defineChannel(volume);
+    const bars = generateSyntheticOhlc(s, e, ivNum, mid);
+    chart.supplyData<OhlcRecord>(DEMO_OHLC_CHANNEL, ivNum, bars);
+    const points: PointRecord[] = bars.map((b) => ({
+      time: b.time,
+      value: asPrice(b.volume),
+    }));
+    chart.supplyData<PointRecord>(DEMO_VOLUME_CHANNEL, ivNum, points);
+  };
+  document.getElementById("load-data")?.addEventListener("click", loadSyntheticData);
+  document.getElementById("clear-cache")?.addEventListener("click", () => {
+    chart?.clearCache();
   });
   const autoScaleBtn = document.getElementById("auto-scale");
   const updateAutoBtn = (): void => {
@@ -369,6 +473,58 @@ async function main(): Promise<void> {
     stopKinetic: (): void => {
       chart?.stopKinetic();
     },
+    // ── Phase 05 cycle 2 wiring hooks ────────────────────────────────────
+    defineChannel: (channel: Channel): void => {
+      chart?.defineChannel(channel);
+    },
+    supplyData: (
+      channelId: string,
+      intervalDuration: number,
+      records: readonly (OhlcRecord | PointRecord)[],
+    ): void => {
+      chart?.supplyData(channelId, intervalDuration, records);
+    },
+    supplyTick: (
+      channelId: string,
+      record: OhlcRecord | PointRecord,
+      intervalDuration?: number,
+    ): void => {
+      chart?.supplyTick(channelId, record, intervalDuration);
+    },
+    chartSetInterval: (intervalDuration: number): void => {
+      chart?.setInterval(intervalDuration);
+    },
+    chartGetInterval: (): number =>
+      chart === null ? Number.NaN : Number(chart.getInterval()),
+    chartClearCache: (opts?: { channelId?: string; intervalDuration?: number }): void => {
+      chart?.clearCache(opts);
+    },
+    cacheStats: (): readonly CacheStats[] => chart?.cacheStats() ?? [],
+    recordsInRange: (
+      channelId: string,
+      intervalDuration: number,
+      startTime: number,
+      endTime: number,
+    ): readonly (OhlcRecord | PointRecord)[] =>
+      chart?.recordsInRange<OhlcRecord | PointRecord>(
+        channelId,
+        intervalDuration,
+        startTime,
+        endTime,
+      ) ?? [],
+    missingRanges: (
+      channelId: string,
+      query?: { startTime?: number; endTime?: number; intervalDuration?: number },
+    ): readonly { start: number; end: number }[] =>
+      chart?.missingRanges(channelId, query) ?? [],
+    loadDemoData: loadSyntheticData,
+    generateOhlc: (
+      startTime: number,
+      endTime: number,
+      intervalDuration: number,
+      basePrice: number,
+    ): readonly OhlcRecord[] =>
+      generateSyntheticOhlc(startTime, endTime, intervalDuration, basePrice),
     synthWheel: (opts: {
       x: number;
       y: number;

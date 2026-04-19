@@ -1,6 +1,7 @@
 import { IntervalCache } from "./IntervalCache.js";
 import { noopLogger } from "./Logger.js";
 import type {
+  CacheStats,
   Channel,
   ChannelKind,
   ClearCacheOptions,
@@ -260,6 +261,32 @@ export class DataStore {
       return 0;
     }
     return store.byInterval.get(intervalDuration)?.size() ?? 0;
+  }
+
+  /**
+   * Per-channel snapshot of intervals loaded and total record counts.
+   * Channels with no buckets yet (`defineChannel`-only) are still listed
+   * with `intervalsLoaded: []` and `totalRecords: 0`. Order matches
+   * channel-registration order.
+   */
+  snapshot(): readonly CacheStats[] {
+    const out: CacheStats[] = [];
+    for (const store of this.channels.values()) {
+      const intervals: number[] = [];
+      let total = 0;
+      for (const [iv, cache] of store.byInterval) {
+        intervals.push(iv);
+        total += cache.size();
+      }
+      intervals.sort((a, b) => a - b);
+      out.push({
+        channelId: store.channel.id,
+        kind: store.channel.kind,
+        intervalsLoaded: intervals,
+        totalRecords: total,
+      });
+    }
+    return out;
   }
 
   revision(channelId: string, intervalDuration: number): number {

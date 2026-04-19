@@ -26,7 +26,8 @@
         padding: 12px 16px;
         border-bottom: 1px solid #1f2630;
         display: flex;
-        gap: 12px;
+        flex-wrap: wrap;
+        gap: 8px 12px;
         align-items: center;
       }
       header h1 {
@@ -54,7 +55,8 @@
         font-size: 11px;
         color: #8b949e;
         display: flex;
-        gap: 14px;
+        flex-wrap: wrap;
+        gap: 6px 14px;
       }
       #readout span b {
         color: #c9d1d9;
@@ -76,11 +78,14 @@
         <button id="remount">Remount chart</button>
         <button id="reset-view">Reset view</button>
         <button id="auto-scale" aria-pressed="false">Auto-scale: OFF</button>
+        <button id="load-data">Load synthetic data</button>
+        <button id="clear-cache">Clear cache</button>
         <div id="readout">
           <span>start <b id="readout-start">—</b></span>
           <span>end <b id="readout-end">—</b></span>
           <span>width <b id="readout-width">—</b></span>
           <span>domain <b id="readout-domain">—</b></span>
+          <span>cache <b id="readout-cache">—</b></span>
         </div>
       </header>
       <div id="chart"></div>

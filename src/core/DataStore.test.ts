@@ -356,3 +356,77 @@ describe("DataStore — adversarial", () => {
     expect(dt).toBeLessThan(10);
   });
 });
+
+describe("DataStore — snapshot()", () => {
+  it("returns [] when no channels are registered", () => {
+    const store = new DataStore();
+    expect(store.snapshot()).toEqual([]);
+  });
+
+  it("lists a defineChannel-only channel with empty intervals and zero records", () => {
+    const store = new DataStore();
+    store.defineChannel({ id: "primary", kind: "ohlc" });
+    const snap = store.snapshot();
+    expect(snap.length).toBe(1);
+    expect(snap[0]).toEqual({
+      channelId: "primary",
+      kind: "ohlc",
+      intervalsLoaded: [],
+      totalRecords: 0,
+    });
+  });
+
+  it("aggregates per-interval record counts across a multi-channel store", () => {
+    const store = new DataStore();
+    store.defineChannel({ id: "primary", kind: "ohlc" });
+    store.defineChannel({ id: "volume", kind: "point" });
+    store.defineChannel({ id: "events", kind: "marker" });
+
+    store.insertMany("primary", MINUTE, [ohlc(MINUTE), ohlc(2 * MINUTE)]);
+    store.insertMany("primary", FIVE_MIN, [ohlc(FIVE_MIN), ohlc(2 * FIVE_MIN), ohlc(3 * FIVE_MIN)]);
+    store.insertMany("volume", MINUTE, [point(MINUTE), point(2 * MINUTE), point(3 * MINUTE)]);
+    store.insert("events", MINUTE, marker(MINUTE));
+
+    const snap = store.snapshot();
+    expect(snap.length).toBe(3);
+    const byId = new Map(snap.map((s) => [s.channelId, s]));
+    expect(byId.get("primary")).toEqual({
+      channelId: "primary",
+      kind: "ohlc",
+      intervalsLoaded: [MINUTE, FIVE_MIN],
+      totalRecords: 5,
+    });
+    expect(byId.get("volume")).toEqual({
+      channelId: "volume",
+      kind: "point",
+      intervalsLoaded: [MINUTE],
+      totalRecords: 3,
+    });
+    expect(byId.get("events")).toEqual({
+      channelId: "events",
+      kind: "marker",
+      intervalsLoaded: [MINUTE],
+      totalRecords: 1,
+    });
+  });
+
+  it("intervals are sorted ascending regardless of insertion order", () => {
+    const store = new DataStore();
+    store.defineChannel({ id: "primary", kind: "ohlc" });
+    store.insert("primary", FIVE_MIN, ohlc(FIVE_MIN));
+    store.insert("primary", MINUTE, ohlc(MINUTE));
+    const snap = store.snapshot();
+    expect(snap[0]?.intervalsLoaded).toEqual([MINUTE, FIVE_MIN]);
+  });
+
+  it("tracks bucket removal after setInterval", () => {
+    const store = new DataStore();
+    store.defineChannel({ id: "primary", kind: "ohlc" });
+    store.insert("primary", MINUTE, ohlc(MINUTE));
+    store.insert("primary", FIVE_MIN, ohlc(FIVE_MIN));
+    store.setInterval(FIVE_MIN, MINUTE);
+    const snap = store.snapshot();
+    expect(snap[0]?.intervalsLoaded).toEqual([FIVE_MIN]);
+    expect(snap[0]?.totalRecords).toBe(1);
+  });
+});

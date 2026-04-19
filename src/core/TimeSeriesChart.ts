@@ -1,5 +1,6 @@
 import type { GraphicsContext } from "pixi.js";
 import { ConfigState } from "./ConfigState.js";
+import { DataStore } from "./DataStore.js";
 import { InvalidationQueue, type DirtyReason } from "./InvalidationQueue.js";
 import { noopLogger } from "./Logger.js";
 import {
@@ -29,9 +30,15 @@ import {
   asTime,
   DEFAULT_THEME,
   type ApplyOptions,
+  type CacheStats,
+  type Channel,
   type ChartWindow,
+  type ClearCacheOptions,
+  type DataOptions,
+  type DataRecord,
   type Interval,
   type Logger,
+  type MissingRangesQuery,
   type Price,
   type PriceAxisOptions,
   type PriceDomain,
@@ -39,6 +46,7 @@ import {
   type PriceScaleFacade,
   type PriceScaleMargins,
   type PriceScaleOptions,
+  type Range,
   type Theme,
   type Time,
   type TimeSeriesChartOptions,
@@ -61,6 +69,7 @@ interface ResolvedOptions {
   readonly priceAxis: PriceAxisOptions | undefined;
   readonly priceAxisDrag: PriceAxisDragOptions | undefined;
   readonly priceFormatter: PriceFormatter;
+  readonly data: DataOptions | undefined;
 }
 
 export interface TimeSeriesChartConstructionOptions extends TimeSeriesChartOptions {
@@ -86,6 +95,7 @@ export class TimeSeriesChart {
   private readonly priceAxis: PriceAxis;
   private readonly viewport: ViewportController;
   private readonly priceAxisController: PriceAxisController;
+  private readonly dataStore: DataStore;
   private resizeObserver: ResizeObserver | null = null;
   private config: ConfigState;
   private disposed = false;
@@ -101,6 +111,10 @@ export class TimeSeriesChart {
     this.opts = opts;
     this.renderer = renderer;
     this.config = config;
+    this.dataStore =
+      opts.data === undefined
+        ? new DataStore({ logger: opts.logger })
+        : new DataStore({ logger: opts.logger, options: opts.data });
     this.invalidator = new InvalidationQueue((reasons) => this.flush(reasons));
     this.timeAxis = new TimeAxis(renderer.gridLayer, renderer.axesLayer, opts.timeAxis);
     this.priceAxis = new PriceAxis(renderer.gridLayer, renderer.axesLayer, opts.priceAxis);
@@ -172,6 +186,7 @@ export class TimeSeriesChart {
       priceAxis: options.priceAxis,
       priceAxisDrag: options.priceAxisDrag,
       priceFormatter: options.priceFormatter ?? defaultPriceFormatter,
+      data: options.data,
     };
 
     const renderer = await Renderer.create({
@@ -245,6 +260,146 @@ export class TimeSeriesChart {
   getWindow(): ChartWindow {
     const { startTime, endTime } = this.config.snapshot;
     return Object.freeze({ startTime, endTime });
+  }
+
+  getInterval(): Interval {
+    return this.config.snapshot.intervalDuration;
+  }
+
+  /**
+   * Switch the chart's bar resolution. Wipes the previous-interval bucket
+   * across every channel; other intervals are retained. Invalidates
+   * `viewport` (axis recomputes) + `data` (series, future). Non-finite,
+   * non-positive, or non-integer values are warned and ignored.
+   */
+  setInterval(intervalDuration: Interval | number): void {
+    if (this.disposed) {
+      return;
+    }
+    const raw = Number(intervalDuration);
+    if (!Number.isFinite(raw) || raw <= 0 || !Number.isInteger(raw)) {
+      this.opts.logger.warn(
+        `[carta] setInterval received invalid intervalDuration (${String(intervalDuration)}) — must be a positive integer; ignored`,
+      );
+      return;
+    }
+    const next = asInterval(raw);
+    const prevSnap = this.config.snapshot.intervalDuration;
+    const nextConfig = this.config.withInterval(next);
+    if (nextConfig === this.config) {
+      return;
+    }
+    this.config = nextConfig;
+    const prevIv = Number.isFinite(Number(prevSnap)) ? Number(prevSnap) : null;
+    this.dataStore.setInterval(raw, prevIv);
+    this.invalidator.invalidate("viewport");
+    this.invalidator.invalidate("data");
+  }
+
+  /** Register a channel. Idempotent on same-kind redefines; throws on kind collision. */
+  defineChannel(channel: Channel): void {
+    if (this.disposed) {
+      return;
+    }
+    this.dataStore.defineChannel(channel);
+  }
+
+  /**
+   * Bulk-load records into a channel. Records must match the channel's
+   * declared kind — mismatched records are dropped with `logger.warn`.
+   * Throws synchronously if the channel was never `defineChannel`'d.
+   */
+  supplyData<R extends DataRecord>(
+    channelId: string,
+    intervalDuration: Interval | number,
+    records: readonly R[],
+  ): void {
+    if (this.disposed) {
+      return;
+    }
+    const raw = Number(intervalDuration);
+    if (!Number.isFinite(raw) || raw <= 0 || !Number.isInteger(raw)) {
+      this.opts.logger.warn(
+        `[carta] supplyData received invalid intervalDuration (${String(intervalDuration)}) — must be a positive integer; ignored`,
+      );
+      return;
+    }
+    this.dataStore.insertMany<R>(channelId, raw, records);
+    this.invalidator.invalidate("data");
+  }
+
+  /**
+   * Single-record live update. Defaults `intervalDuration` to the chart's
+   * current interval. Validation + kind enforcement match `supplyData`.
+   */
+  supplyTick<R extends DataRecord>(
+    channelId: string,
+    record: R,
+    intervalDuration?: Interval | number,
+  ): void {
+    if (this.disposed) {
+      return;
+    }
+    const resolved = intervalDuration ?? this.config.snapshot.intervalDuration;
+    const raw = Number(resolved);
+    if (!Number.isFinite(raw) || raw <= 0 || !Number.isInteger(raw)) {
+      this.opts.logger.warn(
+        `[carta] supplyTick received invalid intervalDuration (${String(resolved)}) — must be a positive integer; ignored`,
+      );
+      return;
+    }
+    this.dataStore.insert<R>(channelId, raw, record);
+    this.invalidator.invalidate("data");
+  }
+
+  clearCache(opts?: ClearCacheOptions): void {
+    if (this.disposed) {
+      return;
+    }
+    this.dataStore.clearCache(opts);
+    this.invalidator.invalidate("data");
+  }
+
+  /** Per-channel snapshot of intervals loaded and total record counts. */
+  cacheStats(): readonly CacheStats[] {
+    return this.dataStore.snapshot();
+  }
+
+  /** Inclusive slice of cached records on a channel. */
+  recordsInRange<R extends DataRecord>(
+    channelId: string,
+    intervalDuration: Interval | number,
+    startTime: Time | number,
+    endTime: Time | number,
+  ): readonly R[] {
+    return this.dataStore.recordsInRange<R>(
+      channelId,
+      Number(intervalDuration),
+      Number(startTime),
+      Number(endTime),
+    );
+  }
+
+  /**
+   * Sub-windows of `[startTime, endTime]` that have no cached records on
+   * this channel. Defaults to the chart's current window + interval. Marker
+   * channels always return `[]`.
+   */
+  missingRanges(channelId: string, query?: MissingRangesQuery): readonly Range[] {
+    const snap = this.config.snapshot;
+    const startRaw = Number(query?.startTime ?? snap.startTime);
+    const endRaw = Number(query?.endTime ?? snap.endTime);
+    const ivRaw = Number(query?.intervalDuration ?? snap.intervalDuration);
+    if (
+      !Number.isFinite(startRaw) ||
+      !Number.isFinite(endRaw) ||
+      !Number.isFinite(ivRaw) ||
+      ivRaw <= 0 ||
+      !Number.isInteger(ivRaw)
+    ) {
+      return [];
+    }
+    return this.dataStore.missingRanges(channelId, ivRaw, startRaw, endRaw);
   }
 
   /** Dev/test hook: whether the kinetic-scroll RAF is currently running. */
@@ -413,6 +568,7 @@ export class TimeSeriesChart {
     this.timeAxis.destroy();
     this.priceAxis.destroy();
     this.priceRangeProviders.clear();
+    this.dataStore.clearAll();
     for (const ctx of this.sharedContexts) {
       ctx.destroy();
     }
