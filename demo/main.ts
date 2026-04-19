@@ -1,3 +1,4 @@
+import * as CartaExports from "../src/index.js";
 import {
   asPrice,
   asTime,
@@ -12,6 +13,8 @@ import {
   type TimeSeriesChartConstructionOptions,
 } from "../src/index.js";
 import { __internals__ as timeFormatInternals } from "../src/core/timeFormat.js";
+
+(globalThis as unknown as { Carta?: typeof CartaExports }).Carta = CartaExports;
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;

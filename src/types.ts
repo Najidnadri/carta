@@ -49,6 +49,28 @@ export interface Channel {
   readonly kind: ChannelKind;
 }
 
+// ─── Data store options ────────────────────────────────────────────────────
+export interface DataCaps {
+  readonly ohlc?: number;
+  readonly point?: number;
+  readonly marker?: number;
+}
+
+export interface DataOptions {
+  readonly caps?: DataCaps;
+  readonly requestThresholdBars?: number;
+}
+
+export interface ClearCacheOptions {
+  readonly channelId?: string;
+  readonly intervalDuration?: number;
+}
+
+export interface Range {
+  readonly start: number;
+  readonly end: number;
+}
+
 // ─── Window & event payloads ───────────────────────────────────────────────
 export interface ChartWindow {
   readonly startTime: Time;

@@ -46,6 +46,10 @@ export {
 } from "./core/priceNaturalStep.js";
 export { ViewportController } from "./core/ViewportController.js";
 export type { ViewportControllerDeps } from "./core/ViewportController.js";
+export { IntervalCache } from "./core/IntervalCache.js";
+export type { IntervalCacheOptions } from "./core/IntervalCache.js";
+export { DataStore, isOhlcRecord, isPointRecord, isMarkerRecord } from "./core/DataStore.js";
+export { lowerBound, upperBound, isAscending } from "./core/sortedArray.js";
 export {
   computePannedWindow,
   computeShiftPannedWindow,
