@@ -1,0 +1,60 @@
+{
+  "name": "carta",
+  "version": "0.0.0",
+  "description": "Technical charting library built on PixiJS",
+  "license": "MIT",
+  "author": {
+    "name": "Najid Nadri",
+    "email": "muhd.najid.nadri@gmail.com",
+    "url": "https://github.com/najidnadri"
+  },
+  "type": "module",
+  "main": "./dist/carta.cjs",
+  "module": "./dist/carta.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/carta.js",
+      "require": "./dist/carta.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint \"src/**/*.ts\" \"demo/**/*.ts\"",
+    "lint:fix": "eslint \"src/**/*.ts\" \"demo/**/*.ts\" --fix"
+  },
+  "keywords": [
+    "chart",
+    "charting",
+    "technical-analysis",
+    "pixijs",
+    "webgl",
+    "finance",
+    "candlestick"
+  ],
+  "peerDependencies": {
+    "pixi.js": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@typescript-eslint/eslint-plugin": "^7.7.0",
+    "@typescript-eslint/parser": "^7.7.0",
+    "eslint": "^8.57.0",
+    "jsdom": "^24.0.0",
+    "pixi.js": "^8.1.0",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.10",
+    "vite-plugin-dts": "^3.9.0",
+    "vitest": "^1.5.0"
+  }
+}
