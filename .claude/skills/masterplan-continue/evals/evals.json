@@ -1,0 +1,27 @@
+{
+  "skill_name": "masterplan-continue",
+  "evals": [
+    {
+      "id": 0,
+      "name": "direct-trigger",
+      "prompt": "let's continue with the masterplan",
+      "expected_output": "Agent reads plans/master-plan.md, identifies the current phase (01 Foundation — all phases are ⬜ not started, so phase 01 is next), states which phase it will target, then spawns the implementation-researcher subagent AND asks the user to confirm scope in parallel. Does NOT start implementing or editing files before alignment and plan approval.",
+      "files": []
+    },
+    {
+      "id": 1,
+      "name": "soft-trigger",
+      "prompt": "pick up where we left off on carta",
+      "expected_output": "Same behavior as direct-trigger — the phrase is a valid trigger for the skill. Agent reads master-plan.md, identifies next phase, kicks off the align/research step before planning.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "next-phase-query",
+      "prompt": "time to move on to the next phase of carta — what do you recommend?",
+      "expected_output": "Agent reads master-plan.md, recommends the next phase based on the status table, and kicks off the align-before-plan loop. The 'what do you recommend' should NOT cause the agent to skip the research/alignment step and jump straight to a recommendation — the skill requires reading the miniplan and spawning the researcher before planning.",
+      "files": []
+    }
+  ],
+  "notes": "These evals test the early phases of the skill (steps 1-4: read plan, confirm scope, spawn researcher, enter plan mode, draft plan). Full interactive testing (approval loop, Playwright, implementation) requires live user interaction and can't be covered by subagent runs. Baseline runs (no skill) are expected to skip the align/research discipline and jump to implementation suggestions — that's the comparison."
+}
