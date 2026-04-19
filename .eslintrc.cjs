@@ -26,6 +26,7 @@ module.exports = {
       allowTypedFunctionExpressions: true,
       allowHigherOrderFunctions: true,
     }],
+    "@typescript-eslint/explicit-module-boundary-types": "error",
     "@typescript-eslint/no-floating-promises": "error",
     "@typescript-eslint/no-misused-promises": "error",
     "@typescript-eslint/strict-boolean-expressions": "error",

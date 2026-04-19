@@ -1,10 +1,9 @@
-export { Chart } from "./core/Chart.js";
+export { TimeSeriesChart } from "./core/TimeSeriesChart.js";
 export { Renderer } from "./core/Renderer.js";
-export { Series } from "./series/Series.js";
-export { CandlestickSeries } from "./series/CandlestickSeries.js";
-export { LineSeries } from "./series/LineSeries.js";
-export { PriceAxis } from "./axes/PriceAxis.js";
-export { TimeAxis } from "./axes/TimeAxis.js";
-export { LinearScale } from "./scales/LinearScale.js";
-export { TimeScale } from "./scales/TimeScale.js";
+export type { PlotRect, RendererOptions } from "./core/Renderer.js";
+export { ConfigState } from "./core/ConfigState.js";
+export type { ConfigStateSnapshot } from "./core/ConfigState.js";
+export { InvalidationQueue } from "./core/InvalidationQueue.js";
+export type { DirtyReason, FlushFn } from "./core/InvalidationQueue.js";
+export { noopLogger } from "./core/Logger.js";
 export * from "./types.js";
