@@ -1,6 +1,8 @@
 import type { GraphicsContext } from "pixi.js";
 import { ConfigState } from "./ConfigState.js";
 import { DataStore } from "./DataStore.js";
+import { DebouncedEmitter } from "./DebouncedEmitter.js";
+import { EventBus } from "./EventBus.js";
 import { InvalidationQueue, type DirtyReason } from "./InvalidationQueue.js";
 import { noopLogger } from "./Logger.js";
 import {
@@ -31,12 +33,17 @@ import {
   DEFAULT_THEME,
   type ApplyOptions,
   type CacheStats,
+  type CartaEventHandler,
+  type CartaEventMap,
   type Channel,
   type ChartWindow,
   type ClearCacheOptions,
   type DataOptions,
   type DataRecord,
+  type DataRequest,
+  type EventKey,
   type Interval,
+  type IntervalChange,
   type Logger,
   type MissingRangesQuery,
   type Price,
@@ -47,13 +54,16 @@ import {
   type PriceScaleMargins,
   type PriceScaleOptions,
   type Range,
+  type SizeInfo,
   type Theme,
   type Time,
   type TimeSeriesChartOptions,
   type ViewportOptions,
+  type WindowInput,
 } from "../types.js";
 
 const BOTTOM_MARGIN = 28;
+const DATA_REQUEST_DEBOUNCE_MS = 150;
 
 interface ResolvedOptions {
   readonly container: HTMLElement;
@@ -96,6 +106,9 @@ export class TimeSeriesChart {
   private readonly viewport: ViewportController;
   private readonly priceAxisController: PriceAxisController;
   private readonly dataStore: DataStore;
+  private readonly emitter: EventBus<CartaEventMap>;
+  private readonly dataRequestDebouncer: DebouncedEmitter<void>;
+  private lastEmittedWindow: ChartWindow | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private config: ConfigState;
   private disposed = false;
@@ -115,6 +128,11 @@ export class TimeSeriesChart {
       opts.data === undefined
         ? new DataStore({ logger: opts.logger })
         : new DataStore({ logger: opts.logger, options: opts.data });
+    this.emitter = new EventBus<CartaEventMap>({ logger: opts.logger });
+    this.dataRequestDebouncer = new DebouncedEmitter<void>(
+      DATA_REQUEST_DEBOUNCE_MS,
+      () => { this.emitDataRequests(); },
+    );
     this.invalidator = new InvalidationQueue((reasons) => { this.flush(reasons); });
     this.timeAxis = new TimeAxis(renderer.gridLayer, renderer.axesLayer, opts.timeAxis);
     this.priceAxis = new PriceAxis(renderer.gridLayer, renderer.axesLayer, opts.priceAxis);
@@ -146,7 +164,7 @@ export class TimeSeriesChart {
           intervalDuration: s.intervalDuration,
         };
       },
-      applyWindow: (win: ChartWindow): void => { this.applyWindowInternal(win); },
+      applyWindow: (win: WindowInput): void => { this.applyWindowInternal(win); },
       plotRect: (): PlotRect => this.computePlotRect(),
       options: opts.viewport,
     });
@@ -235,9 +253,11 @@ export class TimeSeriesChart {
     this.viewport.syncHitArea();
     this.priceAxisController.syncHitArea();
     this.invalidator.invalidate("size");
+    const payload: SizeInfo = Object.freeze({ width: safeW, height: safeH });
+    this.emitter.emit("resize", payload);
   }
 
-  setWindow(win: ChartWindow): void {
+  setWindow(win: WindowInput): void {
     if (this.disposed) {
       return;
     }
@@ -258,8 +278,8 @@ export class TimeSeriesChart {
   }
 
   getWindow(): ChartWindow {
-    const { startTime, endTime } = this.config.snapshot;
-    return Object.freeze({ startTime, endTime });
+    const { startTime, endTime, intervalDuration } = this.config.snapshot;
+    return Object.freeze({ startTime, endTime, intervalDuration });
   }
 
   getInterval(): Interval {
@@ -292,6 +312,11 @@ export class TimeSeriesChart {
     this.config = nextConfig;
     const prevIv = Number.isFinite(Number(prevSnap)) ? Number(prevSnap) : null;
     this.dataStore.setInterval(raw, prevIv);
+    const intervalPayload: IntervalChange = Object.freeze({
+      previous: prevIv !== null ? asInterval(prevIv) : null,
+      current: next,
+    });
+    this.emitter.emit("interval:change", intervalPayload);
     this.invalidator.invalidate("viewport");
     this.invalidator.invalidate("data");
   }
@@ -524,7 +549,7 @@ export class TimeSeriesChart {
     return this.opts.priceScale?.margins;
   }
 
-  private applyWindowInternal(win: ChartWindow): void {
+  private applyWindowInternal(win: WindowInput): void {
     const next = this.config.withWindow(win.startTime, win.endTime);
     if (next === this.config) {
       return;
@@ -559,6 +584,7 @@ export class TimeSeriesChart {
       return;
     }
     this.disposed = true;
+    this.dataRequestDebouncer.cancel();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.priceAxisController.destroy();
@@ -568,6 +594,7 @@ export class TimeSeriesChart {
     this.priceAxis.destroy();
     this.priceRangeProviders.clear();
     this.dataStore.clearAll();
+    this.emitter.removeAllListeners();
     for (const ctx of this.sharedContexts) {
       ctx.destroy();
     }
@@ -575,7 +602,7 @@ export class TimeSeriesChart {
     this.renderer.destroy();
   }
 
-  private flush(_reasons: ReadonlySet<DirtyReason>): void {
+  private flush(reasons: ReadonlySet<DirtyReason>): void {
     if (this.disposed) {
       return;
     }
@@ -600,6 +627,100 @@ export class TimeSeriesChart {
       this.opts.logger,
     );
     this.renderer.render();
+    this.maybeEmitWindowChange(reasons);
+  }
+
+  /**
+   * Emit `window:change` once per flush when the window payload (start/end/
+   * intervalDuration) differs from the last emission. Gated on viewport reason
+   * so resize-only or theme-only flushes don't fire a spurious event.
+   * Scheduling a debounced `data:request` emission piggybacks the same path.
+   */
+  private maybeEmitWindowChange(reasons: ReadonlySet<DirtyReason>): void {
+    if (!reasons.has("viewport")) {
+      return;
+    }
+    const current = this.getWindow();
+    const prev = this.lastEmittedWindow;
+    if (
+      prev !== null &&
+      prev.startTime === current.startTime &&
+      prev.endTime === current.endTime &&
+      prev.intervalDuration === current.intervalDuration
+    ) {
+      return;
+    }
+    this.lastEmittedWindow = current;
+    this.emitter.emit("window:change", current);
+    this.dataRequestDebouncer.push();
+  }
+
+  /**
+   * Debouncer trailing-edge callback. Iterates every registered channel
+   * (marker channels short-circuit to `[]` inside `DataStore.missingRanges`)
+   * and emits one `data:request` per contiguous gap. Fires against the
+   * chart's current window + interval at the moment of firing — not the
+   * window at the moment of the debouncer push.
+   */
+  private emitDataRequests(): void {
+    if (this.disposed) {
+      return;
+    }
+    const snap = this.config.snapshot;
+    const ivRaw = Number(snap.intervalDuration);
+    const start = Number(snap.startTime);
+    const end = Number(snap.endTime);
+    if (
+      !Number.isFinite(ivRaw) ||
+      ivRaw <= 0 ||
+      !Number.isInteger(ivRaw) ||
+      !Number.isFinite(start) ||
+      !Number.isFinite(end)
+    ) {
+      return;
+    }
+    const stats = this.dataStore.snapshot();
+    for (const s of stats) {
+      if (s.kind === "marker") {
+        continue;
+      }
+      const gaps = this.dataStore.missingRanges(s.channelId, ivRaw, start, end);
+      for (const g of gaps) {
+        const payload: DataRequest = Object.freeze({
+          channelId: s.channelId,
+          kind: s.kind,
+          intervalDuration: snap.intervalDuration,
+          startTime: asTime(g.start),
+          endTime: asTime(g.end),
+        });
+        this.emitter.emit("data:request", payload);
+      }
+    }
+  }
+
+  /** Subscribe to a typed chart event. See `CartaEventMap` for payloads. */
+  on<K extends EventKey>(event: K, handler: CartaEventHandler<K>): void {
+    this.emitter.on(event, handler);
+  }
+
+  /** Unsubscribe a specific handler. */
+  off<K extends EventKey>(event: K, handler: CartaEventHandler<K>): void {
+    this.emitter.off(event, handler);
+  }
+
+  /** Subscribe for exactly one emission. */
+  once<K extends EventKey>(event: K, handler: CartaEventHandler<K>): void {
+    this.emitter.once(event, handler);
+  }
+
+  /** Unsubscribe every handler for every event. Safe to call during shutdown. */
+  removeAllListeners(): void {
+    this.emitter.removeAllListeners();
+  }
+
+  /** Test-only: whether `data:request` is currently awaiting its trailing edge. */
+  hasPendingDataRequest(): boolean {
+    return this.dataRequestDebouncer.hasPending();
   }
 
   /** Pull-based reconciliation of the rendered price domain. Runs once per

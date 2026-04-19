@@ -4,8 +4,12 @@ import {
   asTime,
   TimeSeriesChart,
   type CacheStats,
-  type ChartWindow,
+  type CartaEventMap,
   type Channel,
+  type ChartWindow,
+  type DataRequest,
+  type IntervalChange,
+  type SizeInfo,
   type Logger,
   type OhlcRecord,
   type PointRecord,
@@ -235,25 +239,96 @@ function formatTime(ms: number): string {
   }
 }
 
+interface EventCounts {
+  window: number;
+  interval: number;
+  data: number;
+  resize: number;
+}
+
 async function main(): Promise<void> {
-  let chart: TimeSeriesChart | null = await mount();
+  let chart: TimeSeriesChart | null = null;
   let generation = 0;
   const initialWindow = parseSearch();
-  const initialChartWindow: ChartWindow = Object.freeze({
+  const initialWindowInput: { startTime: Time; endTime: Time } = Object.freeze({
     startTime: asTime(initialWindow.startTime),
     endTime: asTime(initialWindow.endTime),
   });
+
+  const eventCounts: EventCounts = { window: 0, interval: 0, data: 0, resize: 0 };
+  const lastEvents: {
+    window?: ChartWindow;
+    interval?: IntervalChange;
+    data?: DataRequest;
+    resize?: SizeInfo;
+  } = {};
+  let autoSupply = false;
+
+  const onWindowChange = (win: ChartWindow): void => {
+    eventCounts.window++;
+    lastEvents.window = win;
+  };
+  const onIntervalChange = (change: IntervalChange): void => {
+    eventCounts.interval++;
+    lastEvents.interval = change;
+  };
+  const onResize = (size: SizeInfo): void => {
+    eventCounts.resize++;
+    lastEvents.resize = size;
+  };
+  const onDataRequest = (req: DataRequest): void => {
+    eventCounts.data++;
+    lastEvents.data = req;
+    if (!autoSupply || chart === null) {
+      return;
+    }
+    if (req.kind !== "ohlc" && req.kind !== "point") {
+      return;
+    }
+    const iv = Number(req.intervalDuration);
+    const start = Number(req.startTime);
+    const end = Number(req.endTime);
+    if (!Number.isFinite(iv) || iv <= 0 || !Number.isFinite(start) || !Number.isFinite(end)) {
+      return;
+    }
+    const bars = generateSyntheticOhlc(start, end, iv, 100);
+    if (req.kind === "ohlc") {
+      chart.supplyData(req.channelId, iv, bars);
+    } else {
+      const points: PointRecord[] = bars.map((b) => ({ time: b.time, value: asPrice(b.volume) }));
+      chart.supplyData(req.channelId, iv, points);
+    }
+  };
+
+  const wireEvents = (c: TimeSeriesChart): void => {
+    c.on("window:change", onWindowChange);
+    c.on("interval:change", onIntervalChange);
+    c.on("resize", onResize);
+    c.on("data:request", onDataRequest);
+  };
+
+  const resetEventCounts = (): void => {
+    eventCounts.window = 0;
+    eventCounts.interval = 0;
+    eventCounts.data = 0;
+    eventCounts.resize = 0;
+  };
+
+  chart = await mount();
+  wireEvents(chart);
 
   const remount = async (): Promise<void> => {
     const gen = ++generation;
     chart?.destroy();
     chart = null;
+    resetEventCounts();
     const next = await mount();
     if (gen !== generation) {
       next.destroy();
       return;
     }
     chart = next;
+    wireEvents(chart);
   };
 
   const readoutStart = document.getElementById("readout-start");
@@ -261,6 +336,7 @@ async function main(): Promise<void> {
   const readoutWidth = document.getElementById("readout-width");
   const readoutDomain = document.getElementById("readout-domain");
   const readoutCache = document.getElementById("readout-cache");
+  const readoutEvents = document.getElementById("readout-events");
   const formatCacheStats = (stats: readonly CacheStats[]): string => {
     if (stats.length === 0) {
       return "—";
@@ -293,6 +369,9 @@ async function main(): Promise<void> {
     if (readoutCache !== null) {
       readoutCache.textContent = formatCacheStats(chart.cacheStats());
     }
+    if (readoutEvents !== null) {
+      readoutEvents.textContent = `w:${String(eventCounts.window)} i:${String(eventCounts.interval)} d:${String(eventCounts.data)} r:${String(eventCounts.resize)}`;
+    }
   };
   requestAnimationFrame(updateReadout);
 
@@ -300,7 +379,7 @@ async function main(): Promise<void> {
     void remount();
   });
   document.getElementById("reset-view")?.addEventListener("click", () => {
-    chart?.setWindow(initialChartWindow);
+    chart?.setWindow(initialWindowInput);
   });
   const loadSyntheticData = (): void => {
     if (chart === null) {
@@ -332,6 +411,19 @@ async function main(): Promise<void> {
   document.getElementById("clear-cache")?.addEventListener("click", () => {
     chart?.clearCache();
   });
+  const autoSupplyBtn = document.getElementById("auto-supply");
+  const updateAutoSupplyBtn = (): void => {
+    if (autoSupplyBtn === null) {
+      return;
+    }
+    autoSupplyBtn.textContent = `Auto-supply: ${autoSupply ? "ON" : "OFF"}`;
+    autoSupplyBtn.setAttribute("aria-pressed", String(autoSupply));
+  };
+  autoSupplyBtn?.addEventListener("click", () => {
+    autoSupply = !autoSupply;
+    updateAutoSupplyBtn();
+  });
+  updateAutoSupplyBtn();
   const autoScaleBtn = document.getElementById("auto-scale");
   const updateAutoBtn = (): void => {
     if (autoScaleBtn === null) {
@@ -647,6 +739,36 @@ async function main(): Promise<void> {
         return 0;
       }
       return canvas.clientWidth - 32;
+    },
+    // ── Phase 06 event hooks ─────────────────────────────────────────────
+    eventCounts: (): Readonly<EventCounts> => ({ ...eventCounts }),
+    resetEventCounts,
+    getLastEvents: (): Readonly<{
+      window?: ChartWindow;
+      interval?: IntervalChange;
+      data?: DataRequest;
+      resize?: SizeInfo;
+    }> => ({ ...lastEvents }),
+    setAutoSupply: (on: boolean): void => {
+      autoSupply = on;
+      updateAutoSupplyBtn();
+    },
+    isAutoSupplyOn: (): boolean => autoSupply,
+    hasPendingDataRequest: (): boolean => chart?.hasPendingDataRequest() ?? false,
+    chartOn: <K extends keyof CartaEventMap>(
+      event: K,
+      handler: (payload: CartaEventMap[K]) => void,
+    ): void => {
+      chart?.on(event, handler);
+    },
+    chartOff: <K extends keyof CartaEventMap>(
+      event: K,
+      handler: (payload: CartaEventMap[K]) => void,
+    ): void => {
+      chart?.off(event, handler);
+    },
+    chartRemoveAllListeners: (): void => {
+      chart?.removeAllListeners();
     },
   };
   (globalThis as unknown as { __cartaTest?: typeof testHook }).__cartaTest = testHook;

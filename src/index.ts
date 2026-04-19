@@ -49,6 +49,10 @@ export type { ViewportControllerDeps } from "./core/ViewportController.js";
 export { IntervalCache } from "./core/IntervalCache.js";
 export type { IntervalCacheOptions } from "./core/IntervalCache.js";
 export { DataStore, isOhlcRecord, isPointRecord, isMarkerRecord } from "./core/DataStore.js";
+export { EventBus } from "./core/EventBus.js";
+export type { EventBusOptions, EventHandler } from "./core/EventBus.js";
+export { DebouncedEmitter } from "./core/DebouncedEmitter.js";
+export type { DebouncedEmitterClock } from "./core/DebouncedEmitter.js";
 export { lowerBound, upperBound, isAscending } from "./core/sortedArray.js";
 export {
   computePannedWindow,

@@ -52,7 +52,7 @@
       #readout {
         margin-left: auto;
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 11px;
+        font-size: 12px;
         color: #8b949e;
         display: flex;
         flex-wrap: wrap;
@@ -80,12 +80,14 @@
         <button id="auto-scale" aria-pressed="false">Auto-scale: OFF</button>
         <button id="load-data">Load synthetic data</button>
         <button id="clear-cache">Clear cache</button>
+        <button id="auto-supply" aria-pressed="false">Auto-supply: OFF</button>
         <div id="readout">
           <span>start <b id="readout-start">—</b></span>
           <span>end <b id="readout-end">—</b></span>
           <span>width <b id="readout-width">—</b></span>
           <span>domain <b id="readout-domain">—</b></span>
           <span>cache <b id="readout-cache">—</b></span>
+          <span>evt <b id="readout-events">—</b></span>
         </div>
       </header>
       <div id="chart"></div>

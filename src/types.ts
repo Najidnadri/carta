@@ -85,7 +85,18 @@ export interface MissingRangesQuery {
 }
 
 // ─── Window & event payloads ───────────────────────────────────────────────
+/**
+ * Read shape — payload of `window:change`, return of `getWindow()`.
+ * `intervalDuration` is denormalized so hosts have the full triple in one place.
+ */
 export interface ChartWindow {
+  readonly startTime: Time;
+  readonly endTime: Time;
+  readonly intervalDuration: Interval;
+}
+
+/** Write shape — input to `setWindow()` / `viewport.applyWindow`. */
+export interface WindowInput {
   readonly startTime: Time;
   readonly endTime: Time;
 }
@@ -96,6 +107,11 @@ export interface DataRequest {
   readonly intervalDuration: Interval;
   readonly startTime: Time;
   readonly endTime: Time;
+}
+
+export interface IntervalChange {
+  readonly previous: Interval | null;
+  readonly current: Interval;
 }
 
 export interface CrosshairInfo {
@@ -109,6 +125,21 @@ export interface SizeInfo {
   readonly width: number;
   readonly height: number;
 }
+
+/**
+ * Event map for `chart.on` / `off` / `once`. Keys are stable string literals,
+ * payload types propagate so handlers get full TS inference.
+ */
+export interface CartaEventMap extends Record<string, unknown> {
+  readonly "window:change": ChartWindow;
+  readonly "interval:change": IntervalChange;
+  readonly "data:request": DataRequest;
+  readonly resize: SizeInfo;
+}
+
+export type EventKey = keyof CartaEventMap;
+export type EventPayload<K extends EventKey> = CartaEventMap[K];
+export type CartaEventHandler<K extends EventKey> = (payload: EventPayload<K>) => void;
 
 // ─── Theme ─────────────────────────────────────────────────────────────────
 export interface Theme {

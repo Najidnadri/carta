@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Container } from "pixi.js";
 import { ViewportController } from "./ViewportController.js";
-import { asInterval, asTime, type ChartWindow } from "../types.js";
+import { asInterval, asTime, type WindowInput } from "../types.js";
 
 type FakeStageHandlers = Record<string, ((e: unknown) => void)[]>;
 
@@ -91,7 +91,7 @@ function createFakeCanvas(width = 800, height = 400): HTMLCanvasElement {
   return canvas as unknown as HTMLCanvasElement;
 }
 
-type ApplyWindowMock = ReturnType<typeof vi.fn<(w: ChartWindow) => void>>;
+type ApplyWindowMock = ReturnType<typeof vi.fn<(w: WindowInput) => void>>;
 
 function makeDeps(): {
   stage: FakeStage;
@@ -108,14 +108,14 @@ function makeDeps(): {
     endTime: asTime(1_000_000),
     intervalDuration: asInterval(1_000),
   };
-  const applyWindow = vi.fn((w: ChartWindow): void => {
+  const applyWindow = vi.fn((w: WindowInput): void => {
     snap = { ...snap, startTime: w.startTime, endTime: w.endTime };
   });
   const controller = new ViewportController({
     stage: stage as unknown as Container,
     canvas,
     snapshot: (): typeof snap => snap,
-    applyWindow: applyWindow as unknown as (w: ChartWindow) => void,
+    applyWindow: applyWindow as unknown as (w: WindowInput) => void,
     plotRect: (): { x: number; y: number; w: number; h: number } => ({ x: 0, y: 0, w: 936, h: 372 }),
     rafFns: {
       request: (): number => 0,
@@ -195,7 +195,7 @@ describe("ViewportController — wheel", () => {
     Object.defineProperty(evt, "preventDefault", { value: ((): void => undefined) });
     canvas.dispatchEvent(evt);
     expect(applyWindow).toHaveBeenCalled();
-    const arg = applyWindow.mock.calls[0]?.[0] as ChartWindow;
+    const arg = applyWindow.mock.calls[0]?.[0] as WindowInput;
     expect(Number(arg.endTime) - Number(arg.startTime)).toBeGreaterThan(1_000_000);
     controller.destroy();
   });
@@ -208,7 +208,7 @@ describe("ViewportController — wheel", () => {
     Object.defineProperty(evt, "shiftKey", { value: false });
     Object.defineProperty(evt, "preventDefault", { value: ((): void => undefined) });
     canvas.dispatchEvent(evt);
-    const arg = applyWindow.mock.calls[0]?.[0] as ChartWindow;
+    const arg = applyWindow.mock.calls[0]?.[0] as WindowInput;
     expect(Number(arg.endTime) - Number(arg.startTime)).toBeLessThan(1_000_000);
     controller.destroy();
   });
@@ -221,7 +221,7 @@ describe("ViewportController — wheel", () => {
     Object.defineProperty(evt, "shiftKey", { value: true });
     Object.defineProperty(evt, "preventDefault", { value: ((): void => undefined) });
     canvas.dispatchEvent(evt);
-    const arg = applyWindow.mock.calls[0]?.[0] as ChartWindow;
+    const arg = applyWindow.mock.calls[0]?.[0] as WindowInput;
     expect(Number(arg.endTime) - Number(arg.startTime)).toBeCloseTo(1_000_000, 3);
     expect(Number(arg.startTime)).toBeGreaterThan(0);
     controller.destroy();
@@ -255,7 +255,7 @@ describe("ViewportController — drag pan", () => {
       global: { x: 300, y: 200 },
     });
     expect(deps.applyWindow).toHaveBeenCalled();
-    const arg = deps.applyWindow.mock.calls.at(-1)?.[0] as ChartWindow;
+    const arg = deps.applyWindow.mock.calls.at(-1)?.[0] as WindowInput;
     expect(Number(arg.startTime)).toBeGreaterThan(0);
     deps.stage.emit("pointerup", {
       pointerId: 1,

@@ -6,7 +6,7 @@ import {
   type WindowSnapshot,
 } from "./ViewportMath.js";
 import type { PlotRect } from "./Renderer.js";
-import { asTime, type ChartWindow, type KineticOptions, type ViewportOptions } from "../types.js";
+import { asTime, type KineticOptions, type ViewportOptions, type WindowInput } from "../types.js";
 
 const DEFAULT_ZOOM_FACTOR = 0.88;
 const DEFAULT_SHIFT_PAN_FRACTION = 0.1;
@@ -52,7 +52,7 @@ export interface ViewportControllerDeps {
   readonly stage: Container;
   readonly canvas: HTMLCanvasElement;
   readonly snapshot: () => WindowSnapshot;
-  readonly applyWindow: (win: ChartWindow) => void;
+  readonly applyWindow: (win: WindowInput) => void;
   readonly plotRect: () => PlotRect;
   readonly options?: ViewportOptions | undefined;
   readonly rafFns?:
@@ -124,7 +124,7 @@ export class ViewportController {
   private readonly stage: Container;
   private readonly canvas: HTMLCanvasElement;
   private readonly snapshot: () => WindowSnapshot;
-  private readonly applyWindow: (win: ChartWindow) => void;
+  private readonly applyWindow: (win: WindowInput) => void;
   private readonly plotRect: () => PlotRect;
   private readonly options: ResolvedOptions;
   private readonly raf: (cb: FrameRequestCallback) => number;
