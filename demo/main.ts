@@ -2,6 +2,8 @@ import * as CartaExports from "../src/index.js";
 import {
   asPrice,
   asTime,
+  CandlestickSeries,
+  LineSeries,
   TimeSeriesChart,
   type CacheStats,
   type CartaEventMap,
@@ -128,6 +130,8 @@ let activeSyntheticProvider: PriceRangeProvider | null = null;
 
 const DEMO_OHLC_CHANNEL = "demo-ohlc";
 const DEMO_VOLUME_CHANNEL = "demo-volume";
+const DEMO_SMA_CHANNEL = "demo-sma";
+const SMA_PERIOD = 20;
 
 interface SyntheticBar extends OhlcRecord {
   readonly volume: number;
@@ -184,7 +188,46 @@ function generateSyntheticOhlc(
   return out;
 }
 
-async function mount(): Promise<TimeSeriesChart> {
+interface MountResult {
+  readonly chart: TimeSeriesChart;
+  readonly candles: CandlestickSeries;
+  readonly sma: LineSeries;
+}
+
+function computeSma(
+  closes: readonly { time: Time; close: number }[],
+  period: number,
+): PointRecord[] {
+  if (closes.length < period) {
+    return [];
+  }
+  const out: PointRecord[] = [];
+  let sum = 0;
+  for (let i = 0; i < period; i++) {
+    const entry = closes[i];
+    if (entry === undefined) {
+      return [];
+    }
+    sum += entry.close;
+  }
+  const seed = closes[period - 1];
+  if (seed === undefined) {
+    return [];
+  }
+  out.push({ time: seed.time, value: asPrice(sum / period) });
+  for (let i = period; i < closes.length; i++) {
+    const curr = closes[i];
+    const prev = closes[i - period];
+    if (curr === undefined || prev === undefined) {
+      continue;
+    }
+    sum += curr.close - prev.close;
+    out.push({ time: curr.time, value: asPrice(sum / period) });
+  }
+  return out;
+}
+
+async function mount(): Promise<MountResult> {
   const container = document.getElementById("chart");
   if (container === null) {
     throw new Error("Missing #chart element");
@@ -201,11 +244,10 @@ async function mount(): Promise<TimeSeriesChart> {
   };
   const chart = await TimeSeriesChart.create(opts);
   chart.priceScale().setDomain(win.priceMin, win.priceMax);
-  const mid = (win.priceMin + win.priceMax) / 2;
-  const amp = Math.max(0.5, (win.priceMax - win.priceMin) / 2);
-  activeSyntheticProvider = createSyntheticProvider(mid, amp);
-  chart.addPriceRangeProvider(activeSyntheticProvider);
-  return chart;
+  chart.priceScale().setAutoScale(true);
+  const candles = chart.addSeries(new CandlestickSeries({ channel: DEMO_OHLC_CHANNEL }));
+  const sma = chart.addSeries(new LineSeries({ channel: DEMO_SMA_CHANNEL }));
+  return { chart, candles, sma };
 }
 
 function formatDurationMs(ms: number): string {
@@ -262,7 +304,7 @@ async function main(): Promise<void> {
     data?: DataRequest;
     resize?: SizeInfo;
   } = {};
-  let autoSupply = false;
+  let autoSupply = true;
 
   const onWindowChange = (win: ChartWindow): void => {
     eventCounts.window++;
@@ -291,10 +333,32 @@ async function main(): Promise<void> {
     if (!Number.isFinite(iv) || iv <= 0 || !Number.isFinite(start) || !Number.isFinite(end)) {
       return;
     }
-    const bars = generateSyntheticOhlc(start, end, iv, 100);
-    if (req.kind === "ohlc") {
+    if (req.channelId === DEMO_OHLC_CHANNEL) {
+      const bars = generateSyntheticOhlc(start, end, iv, 100);
       chart.supplyData(req.channelId, iv, bars);
-    } else {
+      return;
+    }
+    if (req.channelId === DEMO_SMA_CHANNEL) {
+      // Pull all cached candles ±SMA_PERIOD bars so the SMA has enough
+      // lookback to cover the requested window.
+      const windowPad = SMA_PERIOD * iv;
+      const cached = chart.recordsInRange(
+        DEMO_OHLC_CHANNEL,
+        iv,
+        start - windowPad,
+        end,
+      ) as readonly OhlcRecord[];
+      const closes = cached.map((b) => ({ time: b.time, close: Number(b.close) }));
+      const sma = computeSma(closes, SMA_PERIOD).filter(
+        (p) => Number(p.time) >= start && Number(p.time) <= end,
+      );
+      if (sma.length > 0) {
+        chart.supplyData(req.channelId, iv, sma);
+      }
+      return;
+    }
+    if (req.channelId === DEMO_VOLUME_CHANNEL) {
+      const bars = generateSyntheticOhlc(start, end, iv, 100);
       const points: PointRecord[] = bars.map((b) => ({ time: b.time, value: asPrice(b.volume) }));
       chart.supplyData(req.channelId, iv, points);
     }
@@ -314,20 +378,32 @@ async function main(): Promise<void> {
     eventCounts.resize = 0;
   };
 
-  chart = await mount();
-  wireEvents(chart);
+  let candles: CandlestickSeries | null = null;
+  let sma: LineSeries | null = null;
+
+  {
+    const first = await mount();
+    chart = first.chart;
+    candles = first.candles;
+    sma = first.sma;
+    wireEvents(chart);
+  }
 
   const remount = async (): Promise<void> => {
     const gen = ++generation;
     chart?.destroy();
     chart = null;
+    candles = null;
+    sma = null;
     resetEventCounts();
     const next = await mount();
     if (gen !== generation) {
-      next.destroy();
+      next.chart.destroy();
       return;
     }
-    chart = next;
+    chart = next.chart;
+    candles = next.candles;
+    sma = next.sma;
     wireEvents(chart);
   };
 
@@ -395,17 +471,22 @@ async function main(): Promise<void> {
     }
     const domain = chart.priceScale().getDomain();
     const mid = (Number(domain.min) + Number(domain.max)) / 2 || 100;
-    const ohlc: Channel = { id: DEMO_OHLC_CHANNEL, kind: "ohlc" };
     const volume: Channel = { id: DEMO_VOLUME_CHANNEL, kind: "point" };
-    chart.defineChannel(ohlc);
     chart.defineChannel(volume);
-    const bars = generateSyntheticOhlc(s, e, ivNum, mid);
+    const windowPad = SMA_PERIOD * ivNum;
+    const bars = generateSyntheticOhlc(s - windowPad, e, ivNum, mid);
     chart.supplyData(DEMO_OHLC_CHANNEL, ivNum, bars);
-    const points: PointRecord[] = bars.map((b) => ({
-      time: b.time,
-      value: asPrice(b.volume),
-    }));
+    const points: PointRecord[] = bars
+      .filter((b) => Number(b.time) >= s)
+      .map((b) => ({ time: b.time, value: asPrice(b.volume) }));
     chart.supplyData(DEMO_VOLUME_CHANNEL, ivNum, points);
+    const closes = bars.map((b) => ({ time: b.time, close: Number(b.close) }));
+    const sma = computeSma(closes, SMA_PERIOD).filter(
+      (p) => Number(p.time) >= s && Number(p.time) <= e,
+    );
+    if (sma.length > 0) {
+      chart.supplyData(DEMO_SMA_CHANNEL, ivNum, sma);
+    }
   };
   document.getElementById("load-data")?.addEventListener("click", loadSyntheticData);
   document.getElementById("clear-cache")?.addEventListener("click", () => {
@@ -470,6 +551,35 @@ async function main(): Promise<void> {
       }));
     },
     axisPoolSize: (): number => chart?.axisPoolSize() ?? 0,
+    candlePoolActive: (): number => candles?.activePoolSize() ?? 0,
+    candlePoolTotal: (): number => candles?.totalPoolSize() ?? 0,
+    getCandles: (): CandlestickSeries | null => candles,
+    getSma: (): LineSeries | null => sma,
+    removeCandles: (): boolean => {
+      if (chart === null || candles === null) {
+        return false;
+      }
+      const removed = chart.removeSeries(candles);
+      if (removed) {
+        candles = null;
+      }
+      return removed;
+    },
+    addCandlesWithKind: (kind: "ohlc" | "point"): string => {
+      if (chart === null) {
+        return "no-chart";
+      }
+      try {
+        if (kind === "ohlc") {
+          chart.addSeries(new CandlestickSeries({ channel: "kind-clash" }));
+        } else {
+          chart.addSeries(new LineSeries({ channel: "kind-clash" }));
+        }
+        return "ok";
+      } catch (err) {
+        return err instanceof Error ? err.message : String(err);
+      }
+    },
     priceTicks: (): readonly { value: number; y: number; label: string }[] => {
       const ticks: readonly PriceTickInfo[] = chart?.visiblePriceTicks() ?? [];
       return ticks.map((t) => ({ value: t.value, y: t.y, label: t.label }));

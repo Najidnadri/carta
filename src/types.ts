@@ -243,3 +243,18 @@ export interface ApplyOptions {
   readonly theme?: Partial<Theme>;
   readonly priceFormatter?: PriceFormatter;
 }
+
+// ─── Series options ────────────────────────────────────────────────────────
+export interface CandlestickSeriesOptions {
+  readonly channel: string;
+  readonly upColor?: number;
+  readonly downColor?: number;
+  readonly wickWidth?: number;
+  readonly bodyGapPx?: number;
+}
+
+export interface LineSeriesOptions {
+  readonly channel: string;
+  readonly color?: number;
+  readonly lineWidth?: number;
+}

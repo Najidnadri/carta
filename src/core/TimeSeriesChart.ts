@@ -22,6 +22,7 @@ import {
 } from "./PriceRangeProvider.js";
 import { PriceScale } from "./PriceScale.js";
 import { Renderer, type PlotRect } from "./Renderer.js";
+import type { Series, SeriesRenderContext } from "./Series.js";
 import { TimeAxis, type TimeAxisOptions } from "./TimeAxis.js";
 import type { TickInfo } from "./TimeAxis.js";
 import { TimeScale } from "./TimeScale.js";
@@ -117,6 +118,7 @@ export class TimeSeriesChart {
   private autoScaleEnabled = false;
   private lastRenderedDomain: PriceDomain;
   private readonly priceRangeProviders = new Set<PriceRangeProvider>();
+  private readonly series: Series[] = [];
   private priceFormatter: PriceFormatter;
   private readonly priceScaleFacade: PriceScaleFacade;
 
@@ -474,6 +476,56 @@ export class TimeSeriesChart {
     return this.priceAxis.poolSize();
   }
 
+  /**
+   * Attach a series to the chart. Auto-registers the series' channel on
+   * the data store if not yet registered; throws on kind collision. The
+   * series becomes a `PriceRangeProvider` so it participates in auto-scale.
+   * Returns the series for TradingView-style chaining.
+   */
+  addSeries<S extends Series>(series: S): S {
+    if (this.disposed) {
+      return series;
+    }
+    const existing = this.dataStore.getChannel(series.channel);
+    if (existing !== undefined && existing.kind !== series.kind) {
+      throw new Error(
+        `[carta] addSeries: channel '${series.channel}' is registered with kind '${existing.kind}' but series requires kind '${series.kind}'`,
+      );
+    }
+    if (existing === undefined) {
+      this.dataStore.defineChannel({ id: series.channel, kind: series.kind });
+    }
+    series.setQueryContext({
+      dataStore: this.dataStore,
+      getInterval: () => Number(this.config.snapshot.intervalDuration),
+    });
+    series.attach(this.renderer.seriesLayer);
+    this.series.push(series);
+    this.priceRangeProviders.add(series);
+    this.invalidator.invalidate("data");
+    return series;
+  }
+
+  /**
+   * Detach and destroy a previously added series. The series' channel
+   * remains registered on the store — other series (or future indicator
+   * queries) may still consume it.
+   */
+  removeSeries(series: Series): boolean {
+    if (this.disposed) {
+      return false;
+    }
+    const idx = this.series.indexOf(series);
+    if (idx === -1) {
+      return false;
+    }
+    this.series.splice(idx, 1);
+    this.priceRangeProviders.delete(series);
+    series.destroy();
+    this.invalidator.invalidate("data");
+    return true;
+  }
+
   /** Register a provider for auto-scale reconciliation. Providers are polled
    *  once per flush while `autoScale` is on. No-op if already registered. */
   addPriceRangeProvider(provider: PriceRangeProvider): void {
@@ -592,6 +644,10 @@ export class TimeSeriesChart {
     this.invalidator.dispose();
     this.timeAxis.destroy();
     this.priceAxis.destroy();
+    for (const s of this.series) {
+      s.destroy();
+    }
+    this.series.length = 0;
     this.priceRangeProviders.clear();
     this.dataStore.clearAll();
     this.emitter.removeAllListeners();
@@ -617,8 +673,25 @@ export class TimeSeriesChart {
     this.reconcileRenderedDomain();
     this.priceAxisController.syncHitArea();
     const scale = this.currentTimeScaleForRect(plotRect);
-    this.timeAxis.render(scale, plotRect, this.config.snapshot.theme);
     const priceScale = this.currentPriceScaleForRect(plotRect);
+    if (this.series.length > 0 && (reasons.has("data") || reasons.has("viewport") || reasons.has("size") || reasons.has("layout") || reasons.has("theme"))) {
+      const snap = this.config.snapshot;
+      const ctx: SeriesRenderContext = {
+        startTime: snap.startTime,
+        endTime: snap.endTime,
+        intervalDuration: snap.intervalDuration,
+        plotWidth: plotRect.w,
+        plotHeight: plotRect.h,
+        timeScale: scale,
+        priceScale,
+        dataStore: this.dataStore,
+        theme: snap.theme,
+      };
+      for (const s of this.series) {
+        s.render(ctx);
+      }
+    }
+    this.timeAxis.render(scale, plotRect, this.config.snapshot.theme);
     this.priceAxis.render(
       priceScale,
       plotRect,

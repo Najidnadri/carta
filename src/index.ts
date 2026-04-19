@@ -39,6 +39,11 @@ export type {
 } from "./core/PriceAxisController.js";
 export { reducePriceRanges } from "./core/PriceRangeProvider.js";
 export type { PriceRange, PriceRangeProvider } from "./core/PriceRangeProvider.js";
+export { ShapePool } from "./core/ShapePool.js";
+export { Series } from "./core/Series.js";
+export type { SeriesQueryContext, SeriesRenderContext } from "./core/Series.js";
+export { CandlestickSeries } from "./core/CandlestickSeries.js";
+export { LineSeries } from "./core/LineSeries.js";
 export {
   generatePriceTicks,
   niceNumber,
