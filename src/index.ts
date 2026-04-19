@@ -23,4 +23,14 @@ export {
 export type { FormatContext, StepTier } from "./core/timeFormat.js";
 export { TimeAxis } from "./core/TimeAxis.js";
 export type { TickInfo, TimeAxisOptions } from "./core/TimeAxis.js";
+export { ViewportController } from "./core/ViewportController.js";
+export type { ViewportControllerDeps } from "./core/ViewportController.js";
+export {
+  computePannedWindow,
+  computeShiftPannedWindow,
+  computeZoomedWindow,
+  normalizeWheelDelta,
+  sanitizeWindow,
+} from "./core/ViewportMath.js";
+export type { ClampOptions, ResultWindow, WindowSnapshot } from "./core/ViewportMath.js";
 export * from "./types.js";

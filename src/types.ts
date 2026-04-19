@@ -106,6 +106,20 @@ export interface Logger {
   error(msg: string, ...args: readonly unknown[]): void;
 }
 
+// ─── Viewport options ──────────────────────────────────────────────────────
+export interface KineticOptions {
+  readonly decayPerSec?: number;
+  readonly minFlingVelocityPxPerMs?: number;
+}
+
+export interface ViewportOptions {
+  readonly minIntervalDuration?: number;
+  readonly maxWindowDuration?: number;
+  readonly zoomFactor?: number;
+  readonly shiftPanFraction?: number;
+  readonly kinetic?: KineticOptions;
+}
+
 // ─── Public options ────────────────────────────────────────────────────────
 export interface TimeSeriesChartOptions {
   readonly container: HTMLElement;
@@ -118,4 +132,5 @@ export interface TimeSeriesChartOptions {
   readonly devicePixelRatio?: number;
   readonly theme?: Partial<Theme>;
   readonly logger?: Logger;
+  readonly viewport?: ViewportOptions;
 }

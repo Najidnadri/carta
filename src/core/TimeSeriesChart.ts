@@ -6,15 +6,18 @@ import { Renderer, type PlotRect } from "./Renderer.js";
 import { TimeAxis, type TimeAxisOptions } from "./TimeAxis.js";
 import type { TickInfo } from "./TimeAxis.js";
 import { TimeScale } from "./TimeScale.js";
+import { ViewportController } from "./ViewportController.js";
 import {
   asInterval,
   asTime,
   DEFAULT_THEME,
+  type ChartWindow,
   type Interval,
   type Logger,
   type Theme,
   type Time,
   type TimeSeriesChartOptions,
+  type ViewportOptions,
 } from "../types.js";
 
 const RIGHT_MARGIN = 64;
@@ -29,6 +32,7 @@ interface ResolvedOptions {
   readonly theme: Theme;
   readonly logger: Logger;
   readonly timeAxis: TimeAxisOptions | undefined;
+  readonly viewport: ViewportOptions | undefined;
 }
 
 export interface TimeSeriesChartConstructionOptions extends TimeSeriesChartOptions {
@@ -47,6 +51,7 @@ export class TimeSeriesChart {
   private readonly invalidator: InvalidationQueue;
   private readonly sharedContexts: GraphicsContext[] = [];
   private readonly timeAxis: TimeAxis;
+  private readonly viewport: ViewportController;
   private resizeObserver: ResizeObserver | null = null;
   private config: ConfigState;
   private disposed = false;
@@ -57,6 +62,25 @@ export class TimeSeriesChart {
     this.config = config;
     this.invalidator = new InvalidationQueue((reasons) => this.flush(reasons));
     this.timeAxis = new TimeAxis(renderer.gridLayer, renderer.axesLayer, opts.timeAxis);
+    this.viewport = new ViewportController({
+      stage: renderer.app.stage,
+      canvas: renderer.app.canvas,
+      snapshot: (): {
+        startTime: Time;
+        endTime: Time;
+        intervalDuration: Interval;
+      } => {
+        const s = this.config.snapshot;
+        return {
+          startTime: s.startTime,
+          endTime: s.endTime,
+          intervalDuration: s.intervalDuration,
+        };
+      },
+      applyWindow: (win: ChartWindow): void => this.applyWindowInternal(win),
+      plotRect: (): PlotRect => this.computePlotRect(),
+      options: opts.viewport,
+    });
   }
 
   static async create(options: TimeSeriesChartConstructionOptions): Promise<TimeSeriesChart> {
@@ -79,6 +103,7 @@ export class TimeSeriesChart {
       theme,
       logger,
       timeAxis: options.timeAxis,
+      viewport: options.viewport,
     };
 
     const renderer = await Renderer.create({
@@ -124,7 +149,52 @@ export class TimeSeriesChart {
     }
     this.config = next;
     this.renderer.resize(safeW, safeH);
+    this.viewport.syncHitArea();
     this.invalidator.invalidate("size");
+  }
+
+  setWindow(win: ChartWindow): void {
+    if (this.disposed) {
+      return;
+    }
+    const start = Number(win.startTime);
+    const end = Number(win.endTime);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+      this.opts.logger.warn(
+        "[carta] setWindow received non-finite startTime/endTime — ignored",
+      );
+      return;
+    }
+    if (start > end) {
+      this.opts.logger.warn(
+        "[carta] setWindow startTime > endTime — accepting but chart will hide until corrected",
+      );
+    }
+    this.applyWindowInternal(win);
+  }
+
+  getWindow(): ChartWindow {
+    const { startTime, endTime } = this.config.snapshot;
+    return Object.freeze({ startTime, endTime });
+  }
+
+  /** Dev/test hook: whether the kinetic-scroll RAF is currently running. */
+  isKineticActive(): boolean {
+    return this.viewport.isKineticActive();
+  }
+
+  /** Dev/test hook: cancel any in-flight kinetic-scroll fling. */
+  stopKinetic(): void {
+    this.viewport.stopKinetic();
+  }
+
+  private applyWindowInternal(win: ChartWindow): void {
+    const next = this.config.withWindow(win.startTime, win.endTime);
+    if (next === this.config) {
+      return;
+    }
+    this.config = next;
+    this.invalidator.invalidate("viewport");
   }
 
   /**
@@ -155,6 +225,7 @@ export class TimeSeriesChart {
     this.disposed = true;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    this.viewport.destroy();
     this.invalidator.dispose();
     this.timeAxis.destroy();
     for (const ctx of this.sharedContexts) {

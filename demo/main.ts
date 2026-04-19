@@ -1,5 +1,7 @@
 import {
+  asTime,
   TimeSeriesChart,
+  type ChartWindow,
   type Logger,
   type TimeSeriesChartConstructionOptions,
 } from "../src/index.js";
@@ -80,9 +82,45 @@ async function mount(): Promise<TimeSeriesChart> {
   return TimeSeriesChart.create(opts);
 }
 
+function formatDurationMs(ms: number): string {
+  if (!Number.isFinite(ms)) {
+    return "—";
+  }
+  const abs = Math.abs(ms);
+  if (abs < 1_000) {
+    return `${Math.round(ms)} ms`;
+  }
+  if (abs < 60_000) {
+    return `${(ms / 1_000).toFixed(2)} s`;
+  }
+  if (abs < HOUR) {
+    return `${(ms / 60_000).toFixed(2)} m`;
+  }
+  if (abs < DAY) {
+    return `${(ms / HOUR).toFixed(2)} h`;
+  }
+  return `${(ms / DAY).toFixed(2)} d`;
+}
+
+function formatTime(ms: number): string {
+  if (!Number.isFinite(ms)) {
+    return "—";
+  }
+  try {
+    return new Date(ms).toISOString().replace("T", " ").replace(".000Z", "Z");
+  } catch {
+    return "—";
+  }
+}
+
 async function main(): Promise<void> {
   let chart: TimeSeriesChart | null = await mount();
   let generation = 0;
+  const initialWindow = parseSearch();
+  const initialChartWindow: ChartWindow = Object.freeze({
+    startTime: asTime(initialWindow.startTime),
+    endTime: asTime(initialWindow.endTime),
+  });
 
   const remount = async (): Promise<void> => {
     const gen = ++generation;
@@ -96,8 +134,34 @@ async function main(): Promise<void> {
     chart = next;
   };
 
+  const readoutStart = document.getElementById("readout-start");
+  const readoutEnd = document.getElementById("readout-end");
+  const readoutWidth = document.getElementById("readout-width");
+  const updateReadout = (): void => {
+    if (chart === null) {
+      return;
+    }
+    const win = chart.getWindow();
+    const s = Number(win.startTime);
+    const e = Number(win.endTime);
+    if (readoutStart !== null) {
+      readoutStart.textContent = formatTime(s);
+    }
+    if (readoutEnd !== null) {
+      readoutEnd.textContent = formatTime(e);
+    }
+    if (readoutWidth !== null) {
+      readoutWidth.textContent = formatDurationMs(e - s);
+    }
+    requestAnimationFrame(updateReadout);
+  };
+  requestAnimationFrame(updateReadout);
+
   document.getElementById("remount")?.addEventListener("click", () => {
     void remount();
+  });
+  document.getElementById("reset-view")?.addEventListener("click", () => {
+    chart?.setWindow(initialChartWindow);
   });
 
   // Test hooks (dev only) — used by Playwright for adversarial scenarios.
@@ -128,6 +192,82 @@ async function main(): Promise<void> {
     lastErrors: (): readonly string[] => [...activeLogger.errors],
     resetCaches: (): void => timeFormatInternals.resetCaches(),
     remount: (): Promise<void> => remount(),
+    getWindow: (): { startTime: number; endTime: number } => {
+      const w = chart?.getWindow();
+      return {
+        startTime: w !== undefined ? Number(w.startTime) : Number.NaN,
+        endTime: w !== undefined ? Number(w.endTime) : Number.NaN,
+      };
+    },
+    setWindow: (startTime: number, endTime: number): void => {
+      chart?.setWindow({
+        startTime: asTime(startTime),
+        endTime: asTime(endTime),
+      });
+    },
+    isKineticActive: (): boolean => chart?.isKineticActive() ?? false,
+    stopKinetic: (): void => {
+      chart?.stopKinetic();
+    },
+    synthWheel: (opts: {
+      x: number;
+      y: number;
+      deltaY: number;
+      shiftKey?: boolean;
+      deltaMode?: number;
+    }): void => {
+      const canvas = document.querySelector("canvas");
+      if (canvas === null) {
+        return;
+      }
+      const e = new WheelEvent("wheel", {
+        clientX: opts.x,
+        clientY: opts.y,
+        deltaY: opts.deltaY,
+        deltaMode: opts.deltaMode ?? 0,
+        shiftKey: opts.shiftKey ?? false,
+        bubbles: true,
+        cancelable: true,
+      });
+      canvas.dispatchEvent(e);
+    },
+    synthDrag: async (opts: {
+      startX: number;
+      endX: number;
+      y?: number;
+      durationMs?: number;
+      pointerType?: "mouse" | "pen" | "touch";
+      steps?: number;
+    }): Promise<void> => {
+      const canvas = document.querySelector("canvas");
+      if (canvas === null) {
+        return;
+      }
+      const y = opts.y ?? 100;
+      const duration = opts.durationMs ?? 200;
+      const steps = opts.steps ?? 12;
+      const pointerType = opts.pointerType ?? "mouse";
+      const send = (type: string, x: number, extra: Record<string, unknown> = {}): void => {
+        const pe = new PointerEvent(type, {
+          clientX: x,
+          clientY: y,
+          pointerId: 1,
+          pointerType,
+          bubbles: true,
+          cancelable: true,
+          ...extra,
+        });
+        canvas.dispatchEvent(pe);
+      };
+      send("pointerdown", opts.startX);
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const x = opts.startX + (opts.endX - opts.startX) * t;
+        send("pointermove", x);
+        await new Promise((r) => setTimeout(r, duration / steps));
+      }
+      send("pointerup", opts.endX);
+    },
   };
   (globalThis as unknown as { __cartaTest?: typeof testHook }).__cartaTest = testHook;
 }

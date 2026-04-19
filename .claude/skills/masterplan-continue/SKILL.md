@@ -112,25 +112,25 @@ Spawn the `chart-test-designer` subagent (see [agents/chart-test-designer.md](..
 
 The subagent's deliverable is a test plan document (plus optional fixture generators), not a finished test suite — you'll run the scenarios in step 9.
 
-### Step 9 — Playwright validation across viewports
+### Step 9 — Playwright validation via the `test-carta` skill
 
-Use Playwright MCP (`mcp__playwright__browser_*` tools) to drive the demo. For each viewport:
+Do **not** drive the Playwright MCP tools yourself here. Invoke the `test-carta` skill instead. It owns the UX-story → Playwright-plan → execute → benchmark → report pipeline, including both the `chart-ux-expert` and `playwright-test-engineer` subagents. Doing it yourself duplicates its work and loses the structured parent-facing report.
 
-| Viewport | Size | Interactions to exercise |
-|----------|------|--------------------------|
-| Mobile   | 390×844 (iPhone 14-ish) | touch pan, pinch zoom, long-press crosshair, orientation change |
-| Tablet   | 820×1180 (iPad-ish)     | touch pan, pinch zoom, mouse+touch hybrid if applicable |
-| Laptop   | 1440×900                | mouse drag pan, scroll-wheel zoom, hover crosshair, keyboard (if wired) |
+Invoke it with `Skill` (`test-carta`) and these parameters in the args / briefing:
 
-For each viewport:
-1. `mcp__playwright__browser_resize` to the target size.
-2. `mcp__playwright__browser_navigate` to the dev server (`pnpm dev` serves at the usual vite port — start it if not running).
-3. Feed each adversarial scenario from step 8 into the demo (either via URL params if the demo supports them, via the demo's dataset picker, or via `mcp__playwright__browser_evaluate` to call `chart.supplyData(...)` directly).
-4. Take a screenshot with `mcp__playwright__browser_take_screenshot`. Compare visually to expected behavior. Collect console errors via `mcp__playwright__browser_console_messages`.
-5. Exercise the interactions listed for that viewport. Record what broke.
-6. If a scenario crashes or hangs the tab, flag it — Carta's "weird data should degrade gracefully" tenet means no scenario should be able to take the browser down.
+- **Mode** — usually `feature` (just the slice you shipped this cycle). Use `full` only if the phase explicitly requires a library-wide regression.
+- **Feature under test** — the slice name + one-line summary of what changed. Include the file paths touched so the subagents can cite the right code.
+- **Acceptance criteria** — verbatim from the miniplan.
+- **Adversarial scenarios** — pass through the `chart-test-designer` output from step 8 untouched. The `test-carta` skill knows how to weave it into the playwright plan.
+- **Parent context** — tell it this is being invoked from `masterplan-continue` step 9, and specify the report sink path: `test-reports/<phase-slug>-<ISO-date>.md`.
 
-Report findings. If anything broke, loop back to step 6 to fix before declaring the cycle done.
+When `test-carta` returns, it will give you a structured `PARENT_NEXT_STEP` value in its Case B payload:
+
+- `continue` — all green (or only `manual-review` items that look fine on screenshots). Proceed to step 10.
+- `loop-to-fix` — real failures exist. Loop back to step 6 with the failure list in hand. Do not advance trackers. Re-run `test-carta` after the fix — always. Green the second time still counts as green.
+- `abort-cycle` — something structural is broken (dev server dead, chart crashes on init, hardware too degraded to measure). Stop the cycle, surface the issue to the user, regroup.
+
+Read the full report file before deciding trust — the payload is a TL;DR, not a replacement for the report. Screenshots at `test-reports/screenshots/` are worth eyeballing for any visual-regression-adjacent change.
 
 ### Step 10 — Update trackers
 

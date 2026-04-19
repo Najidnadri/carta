@@ -48,6 +48,18 @@
       header button:hover {
         background: #2d333b;
       }
+      #readout {
+        margin-left: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        color: #8b949e;
+        display: flex;
+        gap: 14px;
+      }
+      #readout span b {
+        color: #c9d1d9;
+        font-weight: 500;
+      }
       #app > *:nth-child(2) {
         min-height: 0;
       }
@@ -62,6 +74,12 @@
       <header>
         <h1>Carta</h1>
         <button id="remount">Remount chart</button>
+        <button id="reset-view">Reset view</button>
+        <div id="readout">
+          <span>start <b id="readout-start">—</b></span>
+          <span>end <b id="readout-end">—</b></span>
+          <span>width <b id="readout-width">—</b></span>
+        </div>
       </header>
       <div id="chart"></div>
     </div>
