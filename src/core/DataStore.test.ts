@@ -430,3 +430,51 @@ describe("DataStore — snapshot()", () => {
     expect(snap[0]?.totalRecords).toBe(1);
   });
 });
+
+describe("DataStore.getBar", () => {
+  it("returns undefined for an unknown channel", () => {
+    const store = new DataStore();
+    expect(store.getBar("nope", MINUTE, MINUTE)).toBeUndefined();
+  });
+
+  it("returns undefined for a channel with no data at the interval", () => {
+    const store = new DataStore();
+    store.defineChannel({ id: "primary", kind: "ohlc" });
+    expect(store.getBar("primary", MINUTE, MINUTE)).toBeUndefined();
+  });
+
+  it("returns undefined when no bar sits at the requested time", () => {
+    const store = new DataStore();
+    store.defineChannel({ id: "primary", kind: "ohlc" });
+    store.insert("primary", MINUTE, ohlc(MINUTE));
+    expect(store.getBar("primary", MINUTE, FIVE_MIN)).toBeUndefined();
+  });
+
+  it("returns the OHLC record at a hit time", () => {
+    const store = new DataStore();
+    store.defineChannel({ id: "primary", kind: "ohlc" });
+    store.insert("primary", MINUTE, ohlc(MINUTE, 123));
+    const bar = store.getBar("primary", MINUTE, MINUTE);
+    expect(bar).toBeDefined();
+    expect(Number((bar as OhlcRecord).open)).toBe(123);
+  });
+
+  it("returns the PointRecord at a hit time", () => {
+    const store = new DataStore();
+    store.defineChannel({ id: "ma", kind: "point" });
+    store.insert("ma", MINUTE, point(MINUTE, 77));
+    const rec = store.getBar("ma", MINUTE, MINUTE);
+    expect(rec).toBeDefined();
+    expect(Number((rec as PointRecord).value)).toBe(77);
+  });
+
+  it("mirrors getAt exactly for the same inputs", () => {
+    const store = new DataStore();
+    store.defineChannel({ id: "primary", kind: "ohlc" });
+    store.insert("primary", MINUTE, ohlc(MINUTE));
+    store.insert("primary", MINUTE, ohlc(MINUTE * 2));
+    expect(store.getBar("primary", MINUTE, MINUTE)).toBe(store.getAt("primary", MINUTE, MINUTE));
+    expect(store.getBar("primary", MINUTE, MINUTE * 2)).toBe(store.getAt("primary", MINUTE, MINUTE * 2));
+    expect(store.getBar("primary", MINUTE, MINUTE * 3)).toBe(store.getAt("primary", MINUTE, MINUTE * 3));
+  });
+});

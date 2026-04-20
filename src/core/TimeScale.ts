@@ -105,6 +105,42 @@ export class TimeScale {
     return asTime(this.firstSlotMs + i * Number(this.intervalDuration));
   }
 
+  /**
+   * Snap a plot-local pixel X to the `Time` of the bar centre under it.
+   * Returns `null` when the scale is invalid, has no slots, or when
+   * `pixelX` is outside `[0, plotWidth]`. Rounds to the nearest slot via
+   * `barIndexAtTime`, then clamps to `[0, slotCount - 1]`.
+   */
+  snapToBarTime(pixelX: Pixel | number, plotWidth: number): Time | null {
+    if (!this.valid || this.slotCount <= 0) {
+      return null;
+    }
+    if (!Number.isFinite(plotWidth) || plotWidth <= 0) {
+      return null;
+    }
+    const x = Number(pixelX);
+    if (!Number.isFinite(x) || x < 0 || x > plotWidth) {
+      return null;
+    }
+    const t = this.pixelToTime(asPixel(x));
+    const idx = this.barIndexAtTime(t);
+    const clamped = Math.max(0, Math.min(this.slotCount - 1, idx));
+    return this.timeOfBarIndex(clamped);
+  }
+
+  /**
+   * Companion to `snapToBarTime` — returns both the snapped `Time` and the
+   * centre pixel-X of that bar. Saves a round-trip through `timeToPixel`
+   * when a caller needs both (e.g. the crosshair controller).
+   */
+  snapToBarPixel(pixelX: Pixel | number, plotWidth: number): { time: Time; x: Pixel } | null {
+    const time = this.snapToBarTime(pixelX, plotWidth);
+    if (time === null) {
+      return null;
+    }
+    return { time, x: this.timeToPixel(time) };
+  }
+
   visibleBarSlots(): readonly Time[] {
     if (!this.valid || this.slotCount <= 0) {
       return [];

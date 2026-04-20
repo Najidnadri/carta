@@ -468,6 +468,8 @@ async function main(): Promise<void> {
     resize?: SizeInfo;
   } = {};
   let autoSupply = true;
+  let lastCrosshairPayload: CartaEventMap["crosshair:move"] | null = null;
+  let crosshairPayloadCount = 0;
 
   const onWindowChange = (win: ChartWindow): void => {
     eventCounts.window++;
@@ -536,11 +538,17 @@ async function main(): Promise<void> {
     }
   };
 
+  const onCrosshairMove = (info: CartaEventMap["crosshair:move"]): void => {
+    lastCrosshairPayload = info;
+    crosshairPayloadCount += 1;
+  };
+
   const wireEvents = (c: TimeSeriesChart): void => {
     c.on("window:change", onWindowChange);
     c.on("interval:change", onIntervalChange);
     c.on("resize", onResize);
     c.on("data:request", onDataRequest);
+    c.on("crosshair:move", onCrosshairMove);
   };
 
   const resetEventCounts = (): void => {
@@ -1294,6 +1302,58 @@ async function main(): Promise<void> {
     },
     chartRemoveAllListeners: (): void => {
       chart?.removeAllListeners();
+    },
+    // ── Phase 08 crosshair hooks ─────────────────────────────────────────
+    crosshairStats: (): {
+      seriesRenderCount: number;
+      emitCount: number;
+      bgRedrawCount: number;
+      isVisible: boolean;
+    } | null => {
+      if (chart === null) {
+        return null;
+      }
+      const s = chart.__debugStats();
+      return {
+        seriesRenderCount: s.seriesRenderCount,
+        emitCount: s.crosshair.emitCount,
+        bgRedrawCount: s.crosshair.bgRedrawCount,
+        isVisible: s.crosshair.isVisible,
+      };
+    },
+    lastCrosshairPayload: (): Readonly<CartaEventMap["crosshair:move"]> | null =>
+      lastCrosshairPayload,
+    crosshairPayloadCount: (): number => crosshairPayloadCount,
+    synthMouseMove: (x: number, y: number): void => {
+      const canvas = document.querySelector("canvas");
+      if (canvas === null) {
+        return;
+      }
+      const rect = canvas.getBoundingClientRect();
+      canvas.dispatchEvent(
+        new PointerEvent("pointermove", {
+          clientX: rect.left + x,
+          clientY: rect.top + y,
+          pointerId: 1,
+          pointerType: "mouse",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    },
+    synthMouseLeave: (): void => {
+      const canvas = document.querySelector("canvas");
+      if (canvas === null) {
+        return;
+      }
+      canvas.dispatchEvent(
+        new PointerEvent("pointerleave", {
+          pointerId: 1,
+          pointerType: "mouse",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
     },
   };
   (globalThis as unknown as { __cartaTest?: typeof testHook }).__cartaTest = testHook;

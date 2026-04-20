@@ -114,12 +114,33 @@ export interface IntervalChange {
   readonly current: Interval;
 }
 
+/**
+ * Payload of `crosshair:move`. Shape is stable — fires on both move *and*
+ * leave. On leave, `time` / `price` are `null` and `seriesData` is empty;
+ * `point` still reflects the last known pixel coordinate so hosts can
+ * position UI elements during the transition.
+ *
+ * `seriesData` is keyed by the host's own `Series` reference (the same
+ * instance passed to `chart.addSeries`). Lookup is O(1); iterate for
+ * rendering per-series legends.
+ */
 export interface CrosshairInfo {
-  readonly time: Time;
-  readonly price: Price;
-  readonly x: Pixel;
-  readonly y: Pixel;
+  readonly time: Time | null;
+  readonly price: Price | null;
+  readonly point: {
+    readonly x: Pixel;
+    readonly y: Pixel;
+  };
+  readonly seriesData: ReadonlyMap<CrosshairSeriesKey, DataRecord | null>;
 }
+
+/**
+ * Opaque key type for the `CrosshairInfo.seriesData` map. The concrete
+ * runtime value is the `Series` instance the host passed to `addSeries`,
+ * but the library doesn't export the `Series` class on the type surface
+ * — so this brand keeps the map well-typed without leaking internals.
+ */
+export type CrosshairSeriesKey = object & { readonly __brand: "Series" };
 
 export interface SizeInfo {
   readonly width: number;
@@ -134,6 +155,7 @@ export interface CartaEventMap extends Record<string, unknown> {
   readonly "window:change": ChartWindow;
   readonly "interval:change": IntervalChange;
   readonly "data:request": DataRequest;
+  readonly "crosshair:move": CrosshairInfo;
   readonly resize: SizeInfo;
 }
 
@@ -159,6 +181,9 @@ export interface Theme {
   readonly baselinePositiveBottom: number;
   readonly baselineNegativeTop: number;
   readonly baselineNegativeBottom: number;
+  readonly crosshairLine: number;
+  readonly crosshairTagBg: number;
+  readonly crosshairTagText: number;
 }
 
 export const DEFAULT_THEME: Theme = {
@@ -178,6 +203,9 @@ export const DEFAULT_THEME: Theme = {
   baselinePositiveBottom: 0x26a69a,
   baselineNegativeTop: 0xef5350,
   baselineNegativeBottom: 0xef5350,
+  crosshairLine: 0x8b949e,
+  crosshairTagBg: 0x1f2630,
+  crosshairTagText: 0xc9d1d9,
 };
 
 // ─── Logger ────────────────────────────────────────────────────────────────

@@ -145,3 +145,89 @@ describe("TimeScale — degenerate input (graceful)", () => {
     expect(Number(scale.timeToPixel(asTime(123)))).toBe(0);
   });
 });
+
+describe("TimeScale.snapToBarTime", () => {
+  // Minute-aligned start (1_700_000_000_000 % 60_000 = 20_000, so add 40_000
+  // to land on a minute boundary). 60 one-minute slots across 1200 px →
+  // 20 px per bar. slotCount = 61 because both endpoints align to a slot.
+  const startTime = asTime(1_700_000_040_000);
+  const endTime = asTime(1_700_000_040_000 + HOUR);
+  const scale = new TimeScale({
+    startTime,
+    endTime,
+    intervalDuration: asInterval(MIN),
+    pixelWidth: 1200,
+  });
+
+  it("snaps to bar centre: mid-plot x → the matching slot time", () => {
+    // x=300 → 15 bars in → slot at startTime + 15min
+    const snapped = scale.snapToBarTime(300 as unknown as never, 1200);
+    expect(snapped).not.toBeNull();
+    expect(Number(snapped)).toBe(Number(startTime) + 15 * MIN);
+  });
+
+  it("snaps left of midpoint to the lower slot", () => {
+    // 20 px per bar; x = 309 is 0.45 bars past slot 15 → rounds to 15.
+    const snapped = scale.snapToBarTime(309 as unknown as never, 1200);
+    expect(Number(snapped)).toBe(Number(startTime) + 15 * MIN);
+  });
+
+  it("snaps right of midpoint to the higher slot", () => {
+    // x = 311 is 0.55 bars past slot 15 → rounds up to 16.
+    const snapped = scale.snapToBarTime(311 as unknown as never, 1200);
+    expect(Number(snapped)).toBe(Number(startTime) + 16 * MIN);
+  });
+
+  it("left edge (x=0) snaps to the first slot", () => {
+    const snapped = scale.snapToBarTime(0 as unknown as never, 1200);
+    expect(Number(snapped)).toBe(Number(startTime));
+  });
+
+  it("right edge (x=plotWidth) snaps to the last slot (both endpoints align → 61 slots)", () => {
+    const snapped = scale.snapToBarTime(1200 as unknown as never, 1200);
+    expect(Number(snapped)).toBe(Number(startTime) + 60 * MIN);
+  });
+
+  it("returns null for x < 0", () => {
+    expect(scale.snapToBarTime(-1 as unknown as never, 1200)).toBeNull();
+  });
+
+  it("returns null for x > plotWidth", () => {
+    expect(scale.snapToBarTime(1201 as unknown as never, 1200)).toBeNull();
+  });
+
+  it("returns null for non-finite pixelX", () => {
+    expect(scale.snapToBarTime(Number.NaN as unknown as never, 1200)).toBeNull();
+    expect(scale.snapToBarTime(Number.POSITIVE_INFINITY as unknown as never, 1200)).toBeNull();
+  });
+
+  it("returns null when scale is invalid", () => {
+    const bad = new TimeScale({
+      startTime: asTime(Number.NaN),
+      endTime: asTime(Number.NaN),
+      intervalDuration: asInterval(MIN),
+      pixelWidth: 800,
+    });
+    expect(bad.snapToBarTime(400 as unknown as never, 800)).toBeNull();
+  });
+
+  it("returns null when plotWidth is non-positive or non-finite", () => {
+    expect(scale.snapToBarTime(100 as unknown as never, 0)).toBeNull();
+    expect(scale.snapToBarTime(100 as unknown as never, -1)).toBeNull();
+    expect(scale.snapToBarTime(100 as unknown as never, Number.NaN)).toBeNull();
+  });
+
+  it("snapToBarPixel returns { time, x } at the bar centre", () => {
+    const result = scale.snapToBarPixel(305 as unknown as never, 1200);
+    expect(result).not.toBeNull();
+    if (result === null) {return;}
+    expect(Number(result.time)).toBe(Number(startTime) + 15 * MIN);
+    // slot 15 → 15 × 20 px = 300
+    expect(Number(result.x)).toBeCloseTo(300, 6);
+  });
+
+  it("snapToBarPixel mirrors snapToBarTime null cases", () => {
+    expect(scale.snapToBarPixel(-1 as unknown as never, 1200)).toBeNull();
+    expect(scale.snapToBarPixel(1201 as unknown as never, 1200)).toBeNull();
+  });
+});

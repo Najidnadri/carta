@@ -202,6 +202,19 @@ export class DataStore {
     return cache.getAt(time);
   }
 
+  /**
+   * Alias for `getAt` scoped to the crosshair use-case: "what record sits at
+   * this exact snapped bar time?" Kept as its own method so callers reading
+   * `chart.dataStore.getBar(...)` read intent-first.
+   */
+  getBar(
+    channelId: string,
+    intervalDuration: number,
+    time: number,
+  ): DataRecord | undefined {
+    return this.getAt(channelId, intervalDuration, time);
+  }
+
   recordsInRange(
     channelId: string,
     intervalDuration: number,

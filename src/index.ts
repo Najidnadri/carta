@@ -76,6 +76,11 @@ export {
   niceNumber,
   targetTickCountForHeight,
 } from "./core/priceNaturalStep.js";
+export { CrosshairController } from "./core/CrosshairController.js";
+export type {
+  CrosshairControllerDeps,
+  CrosshairRenderContext,
+} from "./core/CrosshairController.js";
 export { ViewportController } from "./core/ViewportController.js";
 export type { ViewportControllerDeps } from "./core/ViewportController.js";
 export { IntervalCache } from "./core/IntervalCache.js";

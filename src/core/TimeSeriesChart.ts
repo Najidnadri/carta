@@ -1,5 +1,6 @@
 import type { GraphicsContext } from "pixi.js";
 import { ConfigState } from "./ConfigState.js";
+import { CrosshairController } from "./CrosshairController.js";
 import { DataStore } from "./DataStore.js";
 import { DebouncedEmitter } from "./DebouncedEmitter.js";
 import { EventBus } from "./EventBus.js";
@@ -106,6 +107,7 @@ export class TimeSeriesChart {
   private readonly priceAxis: PriceAxis;
   private readonly viewport: ViewportController;
   private readonly priceAxisController: PriceAxisController;
+  private readonly crosshair: CrosshairController;
   private readonly dataStore: DataStore;
   private readonly emitter: EventBus<CartaEventMap>;
   private readonly dataRequestDebouncer: DebouncedEmitter<void>;
@@ -121,6 +123,7 @@ export class TimeSeriesChart {
   private readonly series: Series[] = [];
   private priceFormatter: PriceFormatter;
   private readonly priceScaleFacade: PriceScaleFacade;
+  private seriesRenderCounter = 0;
 
   private constructor(opts: ResolvedOptions, renderer: Renderer, config: ConfigState) {
     this.opts = opts;
@@ -178,6 +181,15 @@ export class TimeSeriesChart {
       setAutoScale: (on): void => { this.setAutoScaleInternal(on); },
       onGestureStart: (): void => { this.viewport.stopKinetic(); },
       options: opts.priceAxisDrag,
+    });
+    this.crosshair = new CrosshairController({
+      stage: renderer.app.stage,
+      canvas: renderer.app.canvas,
+      linesLayer: renderer.crosshairLinesLayer,
+      tagsLayer: renderer.crosshairTagsLayer,
+      eventBus: this.emitter,
+      logger: opts.logger,
+      invalidate: (): void => { this.invalidator.invalidate("crosshair"); },
     });
   }
 
@@ -631,6 +643,30 @@ export class TimeSeriesChart {
     return this.timeAxis.poolSize();
   }
 
+  /**
+   * Dev/test introspection. Returns cumulative counters for the crosshair and
+   * series rendering so Playwright can assert pool stability and fast-path
+   * correctness (e.g. "series render count stays flat during pure crosshair
+   * activity"). Not part of the committed public API — prefixed with `__`.
+   */
+  __debugStats(): {
+    readonly seriesRenderCount: number;
+    readonly crosshair: {
+      readonly emitCount: number;
+      readonly bgRedrawCount: number;
+      readonly isVisible: boolean;
+    };
+  } {
+    return {
+      seriesRenderCount: this.seriesRenderCounter,
+      crosshair: {
+        emitCount: this.crosshair.getEmitCount(),
+        bgRedrawCount: this.crosshair.getBgRedrawCount(),
+        isVisible: this.crosshair.isVisible(),
+      },
+    };
+  }
+
   destroy(): void {
     if (this.disposed) {
       return;
@@ -639,6 +675,7 @@ export class TimeSeriesChart {
     this.dataRequestDebouncer.cancel();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    this.crosshair.destroy();
     this.priceAxisController.destroy();
     this.viewport.destroy();
     this.invalidator.dispose();
@@ -662,6 +699,27 @@ export class TimeSeriesChart {
     if (this.disposed) {
       return;
     }
+
+    // Fast path: pointer moves that only set the `'crosshair'` dirty flag
+    // must not redraw series / axes / grid. Uses the current plot rect +
+    // scales against the last committed window — no layout work.
+    if (reasons.size === 1 && reasons.has("crosshair")) {
+      const plotRect = this.computePlotRect();
+      const snap = this.config.snapshot;
+      this.crosshair.redraw({
+        plotRect,
+        timeScale: this.currentTimeScaleForRect(plotRect),
+        priceScale: this.currentPriceScaleForRect(plotRect),
+        theme: snap.theme,
+        dataStore: this.dataStore,
+        series: this.series,
+        intervalDuration: snap.intervalDuration,
+        priceFormatter: this.priceFormatter,
+      });
+      this.renderer.render();
+      return;
+    }
+
     const plotRect = this.computePlotRect();
     this.renderer.layout(plotRect);
     this.renderer.renderFrame(
@@ -689,6 +747,7 @@ export class TimeSeriesChart {
       };
       for (const s of this.series) {
         s.render(ctx);
+        this.seriesRenderCounter += 1;
       }
     }
     this.timeAxis.render(scale, plotRect, this.config.snapshot.theme);
@@ -699,6 +758,22 @@ export class TimeSeriesChart {
       this.priceFormatter,
       this.opts.logger,
     );
+    // Keep the crosshair in sync with whatever scales / data just changed —
+    // without this branch, a pan drag would leave the hair pointing at the
+    // bar that was under the cursor *before* the drag.
+    if (reasons.has("crosshair") || reasons.has("viewport") || reasons.has("data") || reasons.has("layout") || reasons.has("size")) {
+      const snap = this.config.snapshot;
+      this.crosshair.redraw({
+        plotRect,
+        timeScale: scale,
+        priceScale,
+        theme: snap.theme,
+        dataStore: this.dataStore,
+        series: this.series,
+        intervalDuration: snap.intervalDuration,
+        priceFormatter: this.priceFormatter,
+      });
+    }
     this.renderer.render();
     this.maybeEmitWindowChange(reasons);
   }

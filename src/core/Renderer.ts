@@ -18,22 +18,25 @@ export interface PlotRect {
 }
 
 /**
- * Owns the Pixi `Application` and the 7-layer scene graph.
+ * Owns the Pixi `Application` and the 8-layer scene graph.
  *
  *   stage
- *     ├─ bgLayer          (full-canvas background + placeholder frame)
- *     ├─ gridLayer        (future: grid lines; reserved for cacheAsTexture)
- *     ├─ plotClip         (rect mask → scissor; non-render-group)
- *     │    ├─ seriesLayer (isRenderGroup = true)
+ *     ├─ bgLayer                (full-canvas background + placeholder frame)
+ *     ├─ gridLayer              (future: grid lines; reserved for cacheAsTexture)
+ *     ├─ plotClip               (rect mask → scissor; non-render-group)
+ *     │    ├─ seriesLayer       (isRenderGroup = true)
  *     │    ├─ overlaysLayer
  *     │    └─ drawingsLayer
- *     ├─ crosshairLayer
+ *     ├─ crosshairLinesLayer    (hair lines; below axes so they can't cover tick labels)
  *     ├─ axesLayer
+ *     ├─ crosshairTagsLayer     (price / time readout tags; above axes so they cover ticks)
  *     ├─ legendLayer
  *     └─ tooltipLayer
  *
  * Only `seriesLayer` is a render group — see research §13 ("mask on render
  * group is valid but less optimized than mask on a plain container").
+ * Crosshair layers are `eventMode = 'none'`; visuals must not intercept
+ * pointer events (see `CrosshairController`).
  */
 export class Renderer {
   readonly app: Application;
@@ -45,8 +48,9 @@ export class Renderer {
   readonly seriesLayer = new Container({ label: "seriesLayer", isRenderGroup: true });
   readonly overlaysLayer = new Container({ label: "overlaysLayer" });
   readonly drawingsLayer = new Container({ label: "drawingsLayer" });
-  readonly crosshairLayer = new Container({ label: "crosshairLayer" });
+  readonly crosshairLinesLayer = new Container({ label: "crosshairLinesLayer", eventMode: "none" });
   readonly axesLayer = new Container({ label: "axesLayer" });
+  readonly crosshairTagsLayer = new Container({ label: "crosshairTagsLayer", eventMode: "none" });
   readonly legendLayer = new Container({ label: "legendLayer" });
   readonly tooltipLayer = new Container({ label: "tooltipLayer" });
 
@@ -68,8 +72,9 @@ export class Renderer {
       this.bgLayer,
       this.gridLayer,
       this.plotClip,
-      this.crosshairLayer,
+      this.crosshairLinesLayer,
       this.axesLayer,
+      this.crosshairTagsLayer,
       this.legendLayer,
       this.tooltipLayer,
     );
