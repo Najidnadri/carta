@@ -8,6 +8,7 @@ import {
   HeikinAshiSeries,
   HistogramSeries,
   LineSeries,
+  MarkerOverlay,
   OhlcBarSeries,
   TimeSeriesChart,
   type BaselineMode,
@@ -17,6 +18,9 @@ import {
   type ChartWindow,
   type DataRequest,
   type IntervalChange,
+  type LineStyle,
+  type LineType,
+  type MarkerRecord,
   type SizeInfo,
   type Logger,
   type OhlcRecord,
@@ -137,7 +141,9 @@ let activeSyntheticProvider: PriceRangeProvider | null = null;
 const DEMO_OHLC_CHANNEL = "demo-ohlc";
 const DEMO_VOLUME_CHANNEL = "demo-volume";
 const DEMO_SMA_CHANNEL = "demo-sma";
+const DEMO_MARKER_CHANNEL = "demo-markers";
 const SMA_PERIOD = 20;
+const PIVOT_HALF_WINDOW = 2;
 
 interface SyntheticBar extends OhlcRecord {
   readonly volume: number;
@@ -266,6 +272,68 @@ interface MountResult {
   readonly volume: HistogramSeries;
 }
 
+/**
+ * 5-bar pivot extrema: emits arrowDown at local highs, arrowUp at local lows.
+ * A bar at index i is a local high iff `bars[i].high` strictly exceeds every
+ * high in `[i-half, i+half] \ {i}`; mirror for lows. Edges (i < half or i >
+ * length-1-half) are skipped so every marker has a full 5-bar context.
+ */
+function computePivotMarkers(
+  bars: readonly OhlcRecord[],
+  halfWindow: number = PIVOT_HALF_WINDOW,
+): MarkerRecord[] {
+  if (bars.length < halfWindow * 2 + 1) {
+    return [];
+  }
+  const out: MarkerRecord[] = [];
+  for (let i = halfWindow; i < bars.length - halfWindow; i++) {
+    const me = bars[i];
+    if (me === undefined) {
+      continue;
+    }
+    const meHigh = Number(me.high);
+    const meLow = Number(me.low);
+    if (!Number.isFinite(meHigh) || !Number.isFinite(meLow)) {
+      continue;
+    }
+    let isHigh = true;
+    let isLow = true;
+    for (let j = i - halfWindow; j <= i + halfWindow; j++) {
+      if (j === i) {
+        continue;
+      }
+      const other = bars[j];
+      if (other === undefined) {
+        isHigh = false;
+        isLow = false;
+        break;
+      }
+      const oh = Number(other.high);
+      const ol = Number(other.low);
+      if (!Number.isFinite(oh) || !Number.isFinite(ol)) {
+        isHigh = false;
+        isLow = false;
+        break;
+      }
+      if (oh >= meHigh) {
+        isHigh = false;
+      }
+      if (ol <= meLow) {
+        isLow = false;
+      }
+      if (!isHigh && !isLow) {
+        break;
+      }
+    }
+    if (isHigh) {
+      out.push({ time: me.time, shape: "arrowDown", position: "above" });
+    } else if (isLow) {
+      out.push({ time: me.time, shape: "arrowUp", position: "below" });
+    }
+  }
+  return out;
+}
+
 function computeSma(
   closes: readonly { time: Time; close: number }[],
   period: number,
@@ -299,7 +367,13 @@ function computeSma(
   return out;
 }
 
-async function mount(primaryType: PrimarySeriesType): Promise<MountResult> {
+interface MountOptions {
+  readonly primaryType: PrimarySeriesType;
+  readonly lineStyle: LineStyle;
+  readonly lineType: LineType;
+}
+
+async function mount(mountOpts: MountOptions): Promise<MountResult> {
   const container = document.getElementById("chart");
   if (container === null) {
     throw new Error("Missing #chart element");
@@ -318,8 +392,15 @@ async function mount(primaryType: PrimarySeriesType): Promise<MountResult> {
   chart.priceScale().setDomain(win.priceMin, win.priceMax);
   chart.priceScale().setAutoScale(true);
   chart.defineChannel({ id: DEMO_VOLUME_CHANNEL, kind: "point" });
-  const primary = chart.addSeries(createPrimarySeries(primaryType, DEMO_OHLC_CHANNEL));
-  const sma = chart.addSeries(new LineSeries({ channel: DEMO_SMA_CHANNEL }));
+  chart.defineChannel({ id: DEMO_MARKER_CHANNEL, kind: "marker" });
+  const primary = chart.addSeries(createPrimarySeries(mountOpts.primaryType, DEMO_OHLC_CHANNEL));
+  const sma = chart.addSeries(
+    new LineSeries({
+      channel: DEMO_SMA_CHANNEL,
+      lineStyle: mountOpts.lineStyle,
+      lineType: mountOpts.lineType,
+    }),
+  );
   const volume = chart.addSeries(
     new HistogramSeries({
       channel: DEMO_VOLUME_CHANNEL,
@@ -418,6 +499,13 @@ async function main(): Promise<void> {
     if (req.channelId === DEMO_OHLC_CHANNEL) {
       const bars = generateSyntheticOhlc(start, end, iv, 100);
       chart.supplyData(req.channelId, iv, bars);
+      // Pre-supply marker channel alongside OHLC — markers never fire their
+      // own data:request (marker-kind channels short-circuit in
+      // `DataStore.missingRanges`), so the host must push them proactively.
+      const markers = computePivotMarkers(bars);
+      if (markers.length > 0) {
+        chart.supplyData(DEMO_MARKER_CHANNEL, iv, markers);
+      }
       return;
     }
     if (req.channelId === DEMO_SMA_CHANNEL) {
@@ -468,9 +556,18 @@ async function main(): Promise<void> {
   let volume: HistogramSeries | null = null;
   let areaExtra: AreaSeries | null = null;
   let baselineExtra: BaselineSeries | null = null;
+  let markerOverlay: MarkerOverlay | null = null;
+  let currentLineStyle: LineStyle = "solid";
+  let currentLineType: LineType = "simple";
+
+  const buildMountOpts = (): MountOptions => ({
+    primaryType,
+    lineStyle: currentLineStyle,
+    lineType: currentLineType,
+  });
 
   {
-    const first = await mount(primaryType);
+    const first = await mount(buildMountOpts());
     chart = first.chart;
     primary = first.primary;
     sma = first.sma;
@@ -487,8 +584,9 @@ async function main(): Promise<void> {
     volume = null;
     areaExtra = null;
     baselineExtra = null;
+    markerOverlay = null;
     resetEventCounts();
-    const next = await mount(primaryType);
+    const next = await mount(buildMountOpts());
     if (gen !== generation) {
       next.chart.destroy();
       return;
@@ -513,6 +611,50 @@ async function main(): Promise<void> {
     if (sel !== null && sel.value !== next) {
       sel.value = next;
     }
+  };
+
+  const addMarkerOverlay = (): boolean => {
+    if (chart === null || markerOverlay !== null) {
+      return false;
+    }
+    markerOverlay = chart.addSeries(
+      new MarkerOverlay({
+        channel: DEMO_MARKER_CHANNEL,
+        priceReference: { channel: DEMO_OHLC_CHANNEL },
+      }),
+    );
+    return true;
+  };
+
+  const removeMarkerOverlay = (): boolean => {
+    if (chart === null || markerOverlay === null) {
+      return false;
+    }
+    const removed = chart.removeSeries(markerOverlay);
+    if (removed) {
+      markerOverlay = null;
+    }
+    return removed;
+  };
+
+  const replaceSmaLine = (): void => {
+    if (chart === null || sma === null) {
+      return;
+    }
+    chart.removeSeries(sma);
+    sma = chart.addSeries(
+      new LineSeries({
+        channel: DEMO_SMA_CHANNEL,
+        lineStyle: currentLineStyle,
+        lineType: currentLineType,
+      }),
+    );
+  };
+
+  const setLineStyle = (style: LineStyle, type: LineType): void => {
+    currentLineStyle = style;
+    currentLineType = type;
+    replaceSmaLine();
   };
 
   const readoutStart = document.getElementById("readout-start");
@@ -650,6 +792,43 @@ async function main(): Promise<void> {
     });
   }
 
+  const markerBtn = document.getElementById("toggle-markers");
+  const updateMarkerBtn = (): void => {
+    if (markerBtn === null) {
+      return;
+    }
+    const on = markerOverlay !== null;
+    markerBtn.textContent = `Markers: ${on ? "ON" : "OFF"}`;
+    markerBtn.setAttribute("aria-pressed", String(on));
+  };
+  markerBtn?.addEventListener("click", () => {
+    if (markerOverlay === null) {
+      addMarkerOverlay();
+    } else {
+      removeMarkerOverlay();
+    }
+    updateMarkerBtn();
+  });
+  updateMarkerBtn();
+
+  const lineStyleSelect = document.getElementById("line-style") as HTMLSelectElement | null;
+  const parseLineStyleValue = (raw: string): { style: LineStyle; type: LineType } | null => {
+    const [s, t] = raw.split("-");
+    if (s !== "solid" && s !== "dashed" && s !== "dotted") {
+      return null;
+    }
+    if (t !== "simple" && t !== "stepped") {
+      return null;
+    }
+    return { style: s, type: t };
+  };
+  lineStyleSelect?.addEventListener("change", () => {
+    const parsed = parseLineStyleValue(lineStyleSelect.value);
+    if (parsed !== null) {
+      setLineStyle(parsed.style, parsed.type);
+    }
+  });
+
   // Test hooks (dev only) — used by Playwright for adversarial scenarios.
   const testHook = {
     TimeSeriesChart,
@@ -710,6 +889,50 @@ async function main(): Promise<void> {
       return true;
     },
     getSma: (): LineSeries | null => sma,
+    setSmaStyle: (style: LineStyle, type: LineType = "simple"): void => {
+      setLineStyle(style, type);
+      if (lineStyleSelect !== null) {
+        lineStyleSelect.value = `${style}-${type}`;
+      }
+    },
+    addMarkerOverlay: (): boolean => {
+      const ok = addMarkerOverlay();
+      updateMarkerBtn();
+      return ok;
+    },
+    removeMarkerOverlay: (): boolean => {
+      const ok = removeMarkerOverlay();
+      updateMarkerBtn();
+      return ok;
+    },
+    getMarkerOverlay: (): MarkerOverlay | null => markerOverlay,
+    markerPoolActive: (): number => markerOverlay?.activePoolSize() ?? 0,
+    markerPoolTotal: (): number => markerOverlay?.totalPoolSize() ?? 0,
+    markerSkipCount: (): number => markerOverlay?.lastSkippedCount() ?? 0,
+    markerCount: (): number => {
+      const iv = chart === null ? Number.NaN : Number(chart.getInterval());
+      if (!Number.isFinite(iv) || iv <= 0 || chart === null) {
+        return 0;
+      }
+      return chart.recordsInRange(
+        DEMO_MARKER_CHANNEL,
+        iv,
+        Number.MIN_SAFE_INTEGER,
+        Number.MAX_SAFE_INTEGER,
+      ).length;
+    },
+    setMarkers: (records: readonly MarkerRecord[]): void => {
+      if (chart === null) {
+        return;
+      }
+      const iv = Number(chart.getInterval());
+      if (!Number.isFinite(iv) || iv <= 0) {
+        return;
+      }
+      chart.clearCache({ channelId: DEMO_MARKER_CHANNEL });
+      chart.supplyData(DEMO_MARKER_CHANNEL, iv, records);
+    },
+    computePivotMarkers,
     getVolume: (): HistogramSeries | null => volume,
     volumePoolActive: (): number => volume?.activePoolSize() ?? 0,
     volumePoolTotal: (): number => volume?.totalPoolSize() ?? 0,

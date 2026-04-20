@@ -81,6 +81,17 @@
         <button id="load-data">Load synthetic data</button>
         <button id="clear-cache">Clear cache</button>
         <button id="auto-supply" aria-pressed="false">Auto-supply: OFF</button>
+        <button id="toggle-markers" aria-pressed="false">Markers: OFF</button>
+        <label for="line-style" style="font-size: 12px; color: #8b949e;">
+          SMA
+          <select id="line-style" style="background:#1f2630;color:#c9d1d9;border:1px solid #2d333b;border-radius:4px;padding:3px 6px;font-size:12px;margin-left:4px;">
+            <option value="solid-simple">Solid</option>
+            <option value="dashed-simple">Dashed</option>
+            <option value="dotted-simple">Dotted</option>
+            <option value="solid-stepped">Stepped</option>
+            <option value="dashed-stepped">Dashed stepped</option>
+          </select>
+        </label>
         <label for="primary-series-type" style="font-size: 12px; color: #8b949e;">
           Primary
           <select id="primary-series-type" style="background:#1f2630;color:#c9d1d9;border:1px solid #2d333b;border-radius:4px;padding:3px 6px;font-size:12px;margin-left:4px;">

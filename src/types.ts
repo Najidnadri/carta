@@ -293,10 +293,17 @@ export interface HeikinAshiSeriesOptions {
   readonly bodyGapPx?: number;
 }
 
+export type LineStyle = "solid" | "dashed" | "dotted";
+export type LineType = "simple" | "stepped";
+
 export interface LineSeriesOptions {
   readonly channel: string;
   readonly color?: number;
   readonly lineWidth?: number;
+  /** Defaults to `'solid'`. `'dashed'` renders 6-on / 3-off px, `'dotted'` 1-on / 3-off. */
+  readonly lineStyle?: LineStyle;
+  /** Defaults to `'simple'`. `'stepped'` holds the previous value until the next point's x, then jumps. */
+  readonly lineType?: LineType;
 }
 
 export interface AreaSeriesOptions {
@@ -332,6 +339,31 @@ export interface HistogramSeriesOptions {
    * Defaults to `true`.
    */
   readonly participatesInAutoScale?: boolean;
+}
+
+export type MarkerShape = MarkerRecord["shape"];
+export type MarkerPosition = MarkerRecord["position"];
+export type MarkerPriceField = "high" | "low" | "close" | "value";
+
+export interface MarkerPriceReference {
+  /** Channel id providing the Y-anchor. Must be an `ohlc` or `point` channel. */
+  readonly channel: string;
+  /** Field to read on the referenced record. Only applies to `above`/`below` positions. */
+  readonly field?: MarkerPriceField;
+}
+
+export interface MarkerOverlayOptions {
+  readonly channel: string;
+  /** Channel-and-field that provides the Y anchor for each marker. */
+  readonly priceReference: MarkerPriceReference;
+  /** Default tint when a record has no `color`. Defaults to `theme.line`. */
+  readonly defaultColor?: number;
+  /** Glyph size in CSS px (radius / half-side / half-height). Defaults to 12. */
+  readonly defaultSize?: number;
+  /** Font family for `BitmapText` labels. Defaults to `'Arial'`. */
+  readonly textFontFamily?: string;
+  /** Font size in CSS px for `BitmapText` labels. Defaults to 11. */
+  readonly textFontSize?: number;
 }
 
 export type BaselineMode = number | "first" | "average";

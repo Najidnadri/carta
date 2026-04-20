@@ -57,6 +57,20 @@ export {
   splitAtBaseline,
 } from "./core/BaselineSeries.js";
 export type { BaselinePoint } from "./core/BaselineSeries.js";
+export { MarkerOverlay } from "./core/MarkerOverlay.js";
+export {
+  DASH_PATTERNS,
+  INITIAL_DASH_STATE,
+  emitDashedSegment,
+} from "./core/dashSegment.js";
+export type { DashEmitResult, DashState } from "./core/dashSegment.js";
+export {
+  MIN_MARKER_OFFSET_PX,
+  applyMarkerOffsetPx,
+  markerOffsetPx,
+  resolveMarkerPrice,
+  snapBack,
+} from "./core/markerGeometry.js";
 export {
   generatePriceTicks,
   niceNumber,
