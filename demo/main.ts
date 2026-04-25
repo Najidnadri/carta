@@ -1600,6 +1600,76 @@ async function main(): Promise<void> {
         }),
       );
     },
+    // ── Phase 09 mobile / touch hooks ────────────────────────────────────
+    /**
+     * Dispatch a multi-pointer event sequence on the canvas. Each phase emits
+     * one PointerEvent per supplied pointer, in the listed order. Use to
+     * synthesize pinch / two-finger pan / long-press in Playwright. Pointer
+     * IDs are assumed unique per frame.
+     */
+    synthMultiPointer: (opts: {
+      readonly phase: "down" | "move" | "up" | "cancel";
+      readonly pointers: readonly { id: number; x: number; y: number; type?: "mouse" | "pen" | "touch" }[];
+    }): void => {
+      const canvas = document.querySelector("canvas");
+      if (canvas === null) {
+        return;
+      }
+      const eventName =
+        opts.phase === "down"
+          ? "pointerdown"
+          : opts.phase === "move"
+          ? "pointermove"
+          : opts.phase === "up"
+          ? "pointerup"
+          : "pointercancel";
+      const rect = canvas.getBoundingClientRect();
+      for (const p of opts.pointers) {
+        canvas.dispatchEvent(
+          new PointerEvent(eventName, {
+            pointerId: p.id,
+            pointerType: p.type ?? "touch",
+            clientX: rect.left + p.x,
+            clientY: rect.top + p.y,
+            bubbles: true,
+            cancelable: true,
+            isPrimary: p.id === opts.pointers[0]?.id,
+          }),
+        );
+      }
+    },
+    /**
+     * Dispatch a pointerdown for outside-tap-exit testing. By default fires on
+     * `document`. Pass `target: "canvas"` to dispatch on the chart canvas (so
+     * the document-level listener sees `e.target === canvas` and stays in
+     * tracking mode). Pass `target: "body"` to dispatch on the body element.
+     */
+    synthDocumentPointerDown: (
+      clientX = 0,
+      clientY = 0,
+      target: "document" | "canvas" | "body" = "document",
+    ): void => {
+      const evt = new PointerEvent("pointerdown", {
+        clientX,
+        clientY,
+        pointerId: 999,
+        pointerType: "touch",
+        bubbles: true,
+        cancelable: true,
+      });
+      const dispatcher: EventTarget =
+        target === "canvas"
+          ? (document.querySelector("canvas") ?? document)
+          : target === "body"
+          ? document.body
+          : document;
+      dispatcher.dispatchEvent(evt);
+    },
+    /** Whether the chart is currently in tracking mode (long-press crosshair). */
+    isTrackingActive: (): boolean => chart?.__debugStats().tracking.active ?? false,
+    /** Whether the viewport is in tracking-mode routing (no pan on touch). */
+    isViewportTracking: (): boolean =>
+      chart?.__debugStats().tracking.viewportTracking ?? false,
   };
   (globalThis as unknown as { __cartaTest?: typeof testHook }).__cartaTest = testHook;
 }

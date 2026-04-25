@@ -43,6 +43,13 @@ export interface CrosshairRenderContext {
   readonly series: readonly Series[];
   readonly intervalDuration: number;
   readonly priceFormatter: PriceFormatter;
+  /**
+   * Phase 09 — when `true`, an out-of-plot pointer (e.g. finger drifted over
+   * the price-axis strip) clamps to the plot edges instead of hiding the
+   * crosshair. The persistent "tracking-mode" crosshair stays glued to a
+   * real bar regardless of finger position.
+   */
+  readonly inTrackingMode?: boolean;
 }
 
 export interface CrosshairControllerDeps {
@@ -140,7 +147,7 @@ export class CrosshairController {
       return;
     }
     if (pending.kind === "leave") {
-      this.hide();
+      this.hideVisuals();
       this.emitLeave(pending, ctx);
       return;
     }
@@ -164,6 +171,33 @@ export class CrosshairController {
   /** Introspection: is the crosshair currently visible? */
   isVisible(): boolean {
     return this.vertLine.visible;
+  }
+
+  /**
+   * Phase 09 — drives the crosshair from a touch pointer that bypasses the
+   * `globalpointermove` mouse/pen filter. Coordinates are in stage-root
+   * pixels (i.e. canvas-global, the same space as `e.global` in pointer
+   * events). Used by `TimeSeriesChart` while in tracking mode.
+   */
+  setTrackingMove(globalX: number, globalY: number): void {
+    if (this.disposed) {
+      return;
+    }
+    this.pending = { kind: "move", localX: globalX, localY: globalY };
+    this.deps.invalidate();
+  }
+
+  /**
+   * Phase 09 — public exit hook. Hides the hair lines + tags immediately and
+   * clears any pending state so the next flush is a no-op. Used by
+   * `TimeSeriesChart.exitTrackingInternal`.
+   */
+  hide(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.pending = null;
+    this.hideVisuals();
   }
 
   destroy(): void {
@@ -259,7 +293,7 @@ export class CrosshairController {
     });
   }
 
-  private hide(): void {
+  private hideVisuals(): void {
     this.vertLine.visible = false;
     this.horzLine.visible = false;
     this.priceTag.container.visible = false;
@@ -285,27 +319,38 @@ export class CrosshairController {
 
   private drawActive(pending: PendingState, ctx: CrosshairRenderContext): void {
     const { plotRect, timeScale, priceScale, theme } = ctx;
-    const localX = pending.localX - plotRect.x;
-    const localY = pending.localY - plotRect.y;
+    const rawLocalX = pending.localX - plotRect.x;
+    const rawLocalY = pending.localY - plotRect.y;
 
-    // Treat pointer-outside-plot identically to a leave (user confirmed).
+    // Phase 09 — in tracking mode the persistent crosshair must not flicker
+    // off when the finger drifts over the price-axis strip or the time-axis
+    // gutter. Clamp to plot bounds and continue drawing at the clamped point.
+    if (plotRect.w <= 0 || plotRect.h <= 0) {
+      this.hideVisuals();
+      this.emitLeave(pending, ctx);
+      return;
+    }
+    const inTracking = ctx.inTrackingMode === true;
+    const localX = inTracking
+      ? Math.max(0, Math.min(plotRect.w, rawLocalX))
+      : rawLocalX;
+    const localY = inTracking
+      ? Math.max(0, Math.min(plotRect.h, rawLocalY))
+      : rawLocalY;
+
     const outside =
-      localX < 0 ||
-      localX > plotRect.w ||
-      localY < 0 ||
-      localY > plotRect.h ||
-      plotRect.w <= 0 ||
-      plotRect.h <= 0;
+      !inTracking &&
+      (rawLocalX < 0 || rawLocalX > plotRect.w || rawLocalY < 0 || rawLocalY > plotRect.h);
 
     if (outside) {
-      this.hide();
+      this.hideVisuals();
       this.emitLeave(pending, ctx);
       return;
     }
 
     const snap = timeScale.snapToBarPixel(localX, plotRect.w);
     if (snap === null) {
-      this.hide();
+      this.hideVisuals();
       this.emitLeave(pending, ctx);
       return;
     }

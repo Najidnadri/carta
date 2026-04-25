@@ -14,6 +14,12 @@ const DEFAULT_KINETIC_DECAY_PER_SEC = 5;
 const DEFAULT_MIN_FLING_VELOCITY_PX_PER_MS = 0.1;
 const VELOCITY_WINDOW_MS = 80;
 const MAX_VELOCITY_SAMPLES = 64;
+/** Per-pointer Euclidean displacement gate before pinch math fires. */
+const PINCH_GATE_PX = 6;
+/** Long-press timer duration, touch only. */
+const LONG_PRESS_MS = 350;
+/** Long-press cancellation deadzone — Euclidean displacement from down. */
+const LONG_PRESS_DEADZONE_PX = 8;
 
 interface ResolvedKineticOptions {
   readonly decayPerSec: number;
@@ -62,6 +68,48 @@ export interface ViewportControllerDeps {
         readonly now: () => number;
       }
     | undefined;
+  /**
+   * Phase 09 long-press tracking-mode entry. Fires once when a touch pointer
+   * has been stationary (within `LONG_PRESS_DEADZONE_PX`) for `LONG_PRESS_MS`.
+   * Coordinates are plot-local (already offset by `plotRect.x/y`). The host is
+   * expected to call `setTrackingMode(true)` in response.
+   */
+  readonly onLongPress?: (plotLocalX: number, plotLocalY: number) => void;
+  /**
+   * Phase 09 tracking-mode pointer routing. Fires for each single-finger touch
+   * `globalpointermove` while `setTrackingMode(true)` — instead of panning,
+   * the controller forwards the pointer position to the host so the crosshair
+   * can update. Coordinates are plot-local.
+   */
+  readonly onTrackingMove?: (plotLocalX: number, plotLocalY: number) => void;
+  /**
+   * Phase 09 timer factory. Defaults to `setTimeout`/`clearTimeout`. Override
+   * in tests to drive long-press deterministically with `vi.useFakeTimers`.
+   */
+  readonly timerFns?:
+    | {
+        readonly setTimeout: (cb: () => void, ms: number) => number;
+        readonly clearTimeout: (id: number) => void;
+      }
+    | undefined;
+}
+
+type GestureMode = "idle" | "pan" | "pinch";
+
+interface PinchPair {
+  readonly idA: number;
+  readonly idB: number;
+  startSeparation: number;
+  startCentroidX: number;
+  startSnapshot: WindowSnapshot;
+  gateCrossed: boolean;
+}
+
+interface LongPressArm {
+  readonly pointerId: number;
+  readonly startGlobalX: number;
+  readonly startGlobalY: number;
+  timerId: number;
 }
 
 function resolveKineticOptions(opts: KineticOptions | undefined): ResolvedKineticOptions {
@@ -116,9 +164,14 @@ function resolveOptions(opts: ViewportOptions | undefined): ResolvedOptions {
  * Kinetic scroll runs on a dedicated RAF loop, dt-aware via exponential
  * decay, sampled from a sliding 80ms velocity window, touch-only.
  *
- * The `activePointers` map + `routeGesture` switch scaffold phase 09's pinch
- * support: size === 1 → single-pointer pan; size >= 2 cancels the in-flight
- * drag and latches a "multi-touch" flag until only one pointer remains.
+ * Gestures are tracked via an explicit `mode: 'idle' | 'pan' | 'pinch'`.
+ * `'pinch'` is entered when a second pointer arrives; pinch math runs once
+ * both pointers have moved past `PINCH_GATE_PX` from their start, composing
+ * `computeZoomedWindow` (anchored at the start-centroid time) with
+ * `computePannedWindow` (centroid delta). Long-press tracking mode is armed
+ * on the first touch pointer; on fire, `deps.onLongPress` is invoked. While
+ * `trackingMode === true`, single-finger moves are routed to
+ * `deps.onTrackingMove` instead of `applyPanFromPointer`.
  */
 export class ViewportController {
   private readonly stage: Container;
@@ -130,10 +183,17 @@ export class ViewportController {
   private readonly raf: (cb: FrameRequestCallback) => number;
   private readonly caf: (id: number) => void;
   private readonly now: () => number;
+  private readonly onLongPress: ((plotLocalX: number, plotLocalY: number) => void) | undefined;
+  private readonly onTrackingMove: ((plotLocalX: number, plotLocalY: number) => void) | undefined;
+  private readonly timerSet: (cb: () => void, ms: number) => number;
+  private readonly timerClear: (id: number) => void;
 
   private readonly activePointers = new Map<number, PointerState>();
   private activePanPointerId: number | null = null;
-  private multiTouchLatched = false;
+  private mode: GestureMode = "idle";
+  private pinchPair: PinchPair | null = null;
+  private longPressArm: LongPressArm | null = null;
+  private trackingMode = false;
   private disposed = false;
 
   private kineticRafId = 0;
@@ -150,6 +210,14 @@ export class ViewportController {
     this.raf = deps.rafFns?.request ?? ((cb): number => requestAnimationFrame(cb));
     this.caf = deps.rafFns?.cancel ?? ((id): void => { cancelAnimationFrame(id); });
     this.now = deps.rafFns?.now ?? ((): number => performance.now());
+    this.onLongPress = deps.onLongPress;
+    this.onTrackingMove = deps.onTrackingMove;
+    this.timerSet =
+      deps.timerFns?.setTimeout ??
+      ((cb, ms): number => globalThis.setTimeout(cb, ms) as unknown as number);
+    this.timerClear =
+      deps.timerFns?.clearTimeout ??
+      ((id): void => { globalThis.clearTimeout(id); });
 
     this.stage.eventMode = "static";
     this.stage.hitArea = this.asScreenHitArea();
@@ -190,15 +258,45 @@ export class ViewportController {
     this.stage.hitArea = this.asScreenHitArea();
   }
 
+  /**
+   * Phase 09 — flips the controller into tracking mode. While tracking,
+   * single-finger touch moves are forwarded to `deps.onTrackingMove` instead
+   * of panning the window. Idempotent. Called by `TimeSeriesChart` on
+   * long-press fire and on `exitTrackingMode`.
+   */
+  setTrackingMode(on: boolean): void {
+    if (this.disposed || this.trackingMode === on) {
+      return;
+    }
+    this.trackingMode = on;
+    if (on) {
+      this.cancelLongPressTimer();
+      this.activePanPointerId = null;
+      if (this.mode === "pan") {
+        this.mode = "idle";
+      }
+    } else {
+      this.routeGesture();
+    }
+  }
+
+  /** Dev/test introspection: is tracking mode currently on? */
+  isTrackingMode(): boolean {
+    return this.trackingMode;
+  }
+
   destroy(): void {
     if (this.disposed) {
       return;
     }
     this.disposed = true;
     this.cancelKineticRaf();
+    this.cancelLongPressTimer();
     this.activePointers.clear();
     this.activePanPointerId = null;
-    this.multiTouchLatched = false;
+    this.mode = "idle";
+    this.pinchPair = null;
+    this.trackingMode = false;
 
     this.stage.off("pointerdown", this.onPointerDown);
     this.stage.off("globalpointermove", this.onPointerMove);
@@ -235,6 +333,15 @@ export class ViewportController {
       cancelled: false,
     };
     this.activePointers.set(e.pointerId, state);
+    // Long-press is touch-only, single-pointer, only when not already tracking.
+    // A second pointerdown cancels the timer (we're now in pinch territory).
+    if (this.activePointers.size === 1) {
+      if (!this.trackingMode && type === "touch") {
+        this.armLongPress(e.pointerId, e.global.x, e.global.y);
+      }
+    } else {
+      this.cancelLongPressTimer();
+    }
     this.routeGesture();
   };
 
@@ -243,7 +350,7 @@ export class ViewportController {
       return;
     }
     const state = this.activePointers.get(e.pointerId);
-    if (state === undefined || state.cancelled) {
+    if (state === undefined) {
       return;
     }
     state.lastGlobalX = e.global.x;
@@ -252,6 +359,52 @@ export class ViewportController {
     state.samples.push({ t: sampleT, x: e.global.x });
     while (state.samples.length > MAX_VELOCITY_SAMPLES) {
       state.samples.shift();
+    }
+    // Cancel long-press if the pointer drifts past the deadzone.
+    if (this.longPressArm !== null && this.longPressArm.pointerId === e.pointerId) {
+      const dx = e.global.x - this.longPressArm.startGlobalX;
+      const dy = e.global.y - this.longPressArm.startGlobalY;
+      if (Math.hypot(dx, dy) >= LONG_PRESS_DEADZONE_PX) {
+        this.cancelLongPressTimer();
+      }
+    }
+    // Tracking mode: single-finger touch routes to crosshair, not pan.
+    if (
+      this.trackingMode &&
+      this.activePointers.size === 1 &&
+      state.type === "touch" &&
+      this.onTrackingMove !== undefined
+    ) {
+      const plot = this.plotRect();
+      this.onTrackingMove(e.global.x - plot.x, e.global.y - plot.y);
+      return;
+    }
+    if (state.cancelled) {
+      return;
+    }
+    // Pinch: any pointer that's part of the captured pair drives pinch math.
+    // Math only fires once BOTH pointers have moved past `PINCH_GATE_PX` from
+    // their pointer-down position. Once gate-crossed it stays crossed for the
+    // rest of the gesture.
+    if (this.mode === "pinch" && this.pinchPair !== null) {
+      const pair = this.pinchPair;
+      if (e.pointerId === pair.idA || e.pointerId === pair.idB) {
+        if (!pair.gateCrossed) {
+          const a = this.activePointers.get(pair.idA);
+          const b = this.activePointers.get(pair.idB);
+          if (a !== undefined && b !== undefined) {
+            const dispA = Math.hypot(a.lastGlobalX - a.startGlobalX, a.lastGlobalY - a.startGlobalY);
+            const dispB = Math.hypot(b.lastGlobalX - b.startGlobalX, b.lastGlobalY - b.startGlobalY);
+            if (dispA >= PINCH_GATE_PX && dispB >= PINCH_GATE_PX) {
+              pair.gateCrossed = true;
+            }
+          }
+        }
+        if (pair.gateCrossed) {
+          this.applyPinch();
+        }
+      }
+      return;
     }
     if (this.activePanPointerId === e.pointerId && this.activePointers.size === 1) {
       this.applyPanFromPointer(state);
@@ -273,6 +426,9 @@ export class ViewportController {
     }
     const state = this.activePointers.get(e.pointerId);
     this.activePointers.delete(e.pointerId);
+    if (this.longPressArm !== null && this.longPressArm.pointerId === e.pointerId) {
+      this.cancelLongPressTimer();
+    }
     if (state === undefined) {
       this.routeGesture();
       return;
@@ -280,7 +436,7 @@ export class ViewportController {
     const wasPanPointer = this.activePanPointerId === e.pointerId;
     if (wasPanPointer) {
       this.activePanPointerId = null;
-      if (!state.cancelled && state.type === "touch" && this.activePointers.size === 0) {
+      if (!state.cancelled && state.type === "touch" && this.activePointers.size === 0 && !this.trackingMode) {
         this.maybeStartKinetic(state);
       }
     }
@@ -336,29 +492,63 @@ export class ViewportController {
   };
 
   private routeGesture(): void {
-    if (this.activePointers.size === 0) {
-      if (this.multiTouchLatched) {
-        this.multiTouchLatched = false;
-      }
+    const size = this.activePointers.size;
+    if (size === 0) {
+      this.mode = "idle";
+      this.pinchPair = null;
       this.activePanPointerId = null;
       return;
     }
-    if (this.activePointers.size === 1) {
-      if (this.multiTouchLatched) {
+    if (size === 1) {
+      // A finger lifted out of pinch → drop pinch state. The remaining
+      // pointer does not promote to pan; user must lift + re-down to drag,
+      // matching TradingView/MetaTrader behavior.
+      if (this.mode === "pinch") {
+        this.mode = "idle";
+        this.pinchPair = null;
+        this.activePanPointerId = null;
+        return;
+      }
+      if (this.trackingMode) {
+        // No pan in tracking mode; pointer moves are routed to the crosshair.
+        this.activePanPointerId = null;
         return;
       }
       const [first] = this.activePointers.values();
       if (first !== undefined && this.activePanPointerId === null) {
         this.activePanPointerId = first.id;
+        this.mode = "pan";
       }
       return;
     }
-    if (!this.multiTouchLatched) {
-      this.multiTouchLatched = true;
-      for (const p of this.activePointers.values()) {
-        p.cancelled = true;
+    // size >= 2 → enter pinch on the first two pointers (id-order from the
+    // Map's insertion order = pointerdown order). Third+ fingers are tracked
+    // for cleanup but not consumed by the pinch handler. Snapshot, separation,
+    // centroid are captured at second-pointer-down so the first move that
+    // crosses the per-pointer 6 px gate has a real delta to compute against.
+    if (this.mode !== "pinch") {
+      const ids = [...this.activePointers.keys()].slice(0, 2);
+      const id0 = ids[0];
+      const id1 = ids[1];
+      if (id0 === undefined || id1 === undefined) {
+        return;
       }
+      const a = this.activePointers.get(id0);
+      const b = this.activePointers.get(id1);
+      if (a === undefined || b === undefined) {
+        return;
+      }
+      this.pinchPair = {
+        idA: id0,
+        idB: id1,
+        startSeparation: Math.hypot(a.lastGlobalX - b.lastGlobalX, a.lastGlobalY - b.lastGlobalY),
+        startCentroidX: (a.lastGlobalX + b.lastGlobalX) / 2,
+        startSnapshot: this.snapshot(),
+        gateCrossed: false,
+      };
+      this.mode = "pinch";
       this.activePanPointerId = null;
+      this.cancelLongPressTimer();
     }
   }
 
@@ -372,13 +562,116 @@ export class ViewportController {
     this.applyWindow({ startTime: win.startTime, endTime: win.endTime });
   }
 
+  /**
+   * Pinch math — single-formula form that directly enforces the invariant:
+   * the bar at the start-centroid TIME renders at the live-centroid PLOT-X
+   * after the update.
+   *
+   * Given:
+   *   factor   = startSeparation / liveSeparation
+   *   newSpan  = factor * startSpan        (clamped to [minWidth, maxWidth])
+   *   T*       = the time corresponding to the start centroid in the START window
+   *            = startTime + (startCentroidPlotX / plot.w) * startSpan
+   *   X_live   = live-centroid plot-x (clamped to [0, plot.w])
+   * the new window [newStart, newEnd] satisfies T* → X_live, i.e.
+   *   newStart = T* - (X_live / plot.w) * newSpan
+   *
+   * This is mathematically equivalent to "zoom around startCentroid then pan
+   * by centroidDx" but is harder to bias by floating-point composition.
+   * Idempotent against the gesture-start.
+   */
+  private applyPinch(): void {
+    const pair = this.pinchPair;
+    if (pair?.gateCrossed !== true) {
+      return;
+    }
+    const a = this.activePointers.get(pair.idA);
+    const b = this.activePointers.get(pair.idB);
+    if (a === undefined || b === undefined) {
+      return;
+    }
+    const plot = this.plotRect();
+    if (plot.w <= 0) {
+      return;
+    }
+    const sepNow = Math.hypot(a.lastGlobalX - b.lastGlobalX, a.lastGlobalY - b.lastGlobalY);
+    if (sepNow <= 0 || pair.startSeparation <= 0) {
+      return;
+    }
+    const factor = pair.startSeparation / sepNow;
+    if (!Number.isFinite(factor) || factor <= 0) {
+      return;
+    }
+
+    const startSnap = pair.startSnapshot;
+    const startSpan = Number(startSnap.endTime) - Number(startSnap.startTime);
+    if (!Number.isFinite(startSpan) || startSpan <= 0) {
+      return;
+    }
+
+    const startCentroidPlotX = Math.max(0, Math.min(plot.w, pair.startCentroidX - plot.x));
+    const liveCentroidGlobalX = (a.lastGlobalX + b.lastGlobalX) / 2;
+    const liveCentroidPlotX = Math.max(0, Math.min(plot.w, liveCentroidGlobalX - plot.x));
+    const startCentroidTime = Number(startSnap.startTime) + (startCentroidPlotX / plot.w) * startSpan;
+
+    const minWidth = Math.max(
+      Number(startSnap.intervalDuration),
+      this.options.minIntervalDuration ?? 0,
+    );
+    let newSpan = factor * startSpan;
+    if (newSpan < minWidth) {
+      newSpan = minWidth;
+    } else if (newSpan > this.options.maxWindowDuration) {
+      newSpan = this.options.maxWindowDuration;
+    }
+
+    const newStart = startCentroidTime - (liveCentroidPlotX / plot.w) * newSpan;
+    const newEnd = newStart + newSpan;
+    if (!Number.isFinite(newStart) || !Number.isFinite(newEnd)) {
+      return;
+    }
+    this.applyWindow({ startTime: asTime(newStart), endTime: asTime(newEnd) });
+  }
+
+  private armLongPress(pointerId: number, x: number, y: number): void {
+    this.cancelLongPressTimer();
+    if (this.onLongPress === undefined) {
+      return;
+    }
+    const timerId = this.timerSet(() => {
+      const arm = this.longPressArm;
+      this.longPressArm = null;
+      if (this.disposed || arm === null || this.trackingMode) {
+        return;
+      }
+      const pointer = this.activePointers.get(arm.pointerId);
+      if (pointer === undefined) {
+        return;
+      }
+      const plot = this.plotRect();
+      this.onLongPress?.(pointer.lastGlobalX - plot.x, pointer.lastGlobalY - plot.y);
+    }, LONG_PRESS_MS);
+    this.longPressArm = { pointerId, startGlobalX: x, startGlobalY: y, timerId };
+  }
+
+  private cancelLongPressTimer(): void {
+    if (this.longPressArm !== null) {
+      this.timerClear(this.longPressArm.timerId);
+      this.longPressArm = null;
+    }
+  }
+
   private endAllDrags(): void {
+    this.cancelLongPressTimer();
     if (this.activePointers.size === 0) {
+      this.mode = "idle";
+      this.pinchPair = null;
       return;
     }
     this.activePointers.clear();
     this.activePanPointerId = null;
-    this.multiTouchLatched = false;
+    this.mode = "idle";
+    this.pinchPair = null;
   }
 
   private maybeStartKinetic(state: PointerState): void {

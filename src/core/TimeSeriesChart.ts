@@ -124,6 +124,8 @@ export class TimeSeriesChart {
   private priceFormatter: PriceFormatter;
   private readonly priceScaleFacade: PriceScaleFacade;
   private seriesRenderCounter = 0;
+  private trackingActive = false;
+  private documentPointerDownHandler: ((e: PointerEvent) => void) | null = null;
 
   private constructor(opts: ResolvedOptions, renderer: Renderer, config: ConfigState) {
     this.opts = opts;
@@ -172,6 +174,11 @@ export class TimeSeriesChart {
       applyWindow: (win: WindowInput): void => { this.applyWindowInternal(win); },
       plotRect: (): PlotRect => this.computePlotRect(),
       options: opts.viewport,
+      onLongPress: (localX, localY): void => { this.enterTrackingInternal(localX, localY); },
+      onTrackingMove: (localX, localY): void => {
+        const plot = this.computePlotRect();
+        this.crosshair.setTrackingMove(plot.x + localX, plot.y + localY);
+      },
     });
     this.priceAxisController = new PriceAxisController({
       axesLayer: renderer.axesLayer,
@@ -440,6 +447,74 @@ export class TimeSeriesChart {
     return this.dataStore.missingRanges(channelId, ivRaw, startRaw, endRaw);
   }
 
+  /**
+   * Phase 09 internal — entered automatically when the viewport's long-press
+   * timer fires. The public `enterTrackingMode` API is deferred to Cycle B.
+   * Idempotent.
+   */
+  private enterTrackingInternal(localX: number, localY: number): void {
+    if (this.disposed) {
+      return;
+    }
+    if (this.trackingActive) {
+      // Re-arm position only — long-press fired again is a no-op for state
+      // but still updates where the crosshair sits.
+      const plot = this.computePlotRect();
+      this.crosshair.setTrackingMove(plot.x + localX, plot.y + localY);
+      this.invalidator.invalidate("crosshair");
+      return;
+    }
+    this.trackingActive = true;
+    this.viewport.setTrackingMode(true);
+    const plot = this.computePlotRect();
+    this.crosshair.setTrackingMove(plot.x + localX, plot.y + localY);
+    if (typeof globalThis.document !== "undefined") {
+      this.documentPointerDownHandler = (e: PointerEvent): void => {
+        const canvas = this.renderer.app.canvas;
+        const target = e.target;
+        if (target === canvas) {
+          return;
+        }
+        if (target instanceof Node && canvas.contains(target)) {
+          return;
+        }
+        this.exitTrackingInternal();
+      };
+      globalThis.document.addEventListener(
+        "pointerdown",
+        this.documentPointerDownHandler,
+        { capture: true },
+      );
+    }
+    this.invalidator.invalidate("crosshair");
+  }
+
+  /**
+   * Phase 09 internal exit. Hides the crosshair, drops the document-level
+   * pointerdown listener, and tells the viewport to resume normal pan
+   * routing. Idempotent.
+   */
+  private exitTrackingInternal(): void {
+    if (this.disposed || !this.trackingActive) {
+      return;
+    }
+    this.trackingActive = false;
+    this.viewport.setTrackingMode(false);
+    this.crosshair.hide();
+    if (
+      this.documentPointerDownHandler !== null &&
+      typeof globalThis.document !== "undefined"
+    ) {
+      globalThis.document.removeEventListener(
+        "pointerdown",
+        this.documentPointerDownHandler,
+        { capture: true },
+      );
+    }
+    this.documentPointerDownHandler = null;
+    this.invalidator.invalidate("crosshair");
+  }
+
   /** Dev/test hook: whether the kinetic-scroll RAF is currently running. */
   isKineticActive(): boolean {
     return this.viewport.isKineticActive();
@@ -656,6 +731,10 @@ export class TimeSeriesChart {
       readonly bgRedrawCount: number;
       readonly isVisible: boolean;
     };
+    readonly tracking: {
+      readonly active: boolean;
+      readonly viewportTracking: boolean;
+    };
   } {
     return {
       seriesRenderCount: this.seriesRenderCounter,
@@ -663,6 +742,10 @@ export class TimeSeriesChart {
         emitCount: this.crosshair.getEmitCount(),
         bgRedrawCount: this.crosshair.getBgRedrawCount(),
         isVisible: this.crosshair.isVisible(),
+      },
+      tracking: {
+        active: this.trackingActive,
+        viewportTracking: this.viewport.isTrackingMode(),
       },
     };
   }
@@ -675,6 +758,18 @@ export class TimeSeriesChart {
     this.dataRequestDebouncer.cancel();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    if (
+      this.documentPointerDownHandler !== null &&
+      typeof globalThis.document !== "undefined"
+    ) {
+      globalThis.document.removeEventListener(
+        "pointerdown",
+        this.documentPointerDownHandler,
+        { capture: true },
+      );
+    }
+    this.documentPointerDownHandler = null;
+    this.trackingActive = false;
     this.crosshair.destroy();
     this.priceAxisController.destroy();
     this.viewport.destroy();
@@ -715,6 +810,7 @@ export class TimeSeriesChart {
         series: this.series,
         intervalDuration: snap.intervalDuration,
         priceFormatter: this.priceFormatter,
+        inTrackingMode: this.trackingActive,
       });
       this.renderer.render();
       return;
@@ -772,6 +868,7 @@ export class TimeSeriesChart {
         series: this.series,
         intervalDuration: snap.intervalDuration,
         priceFormatter: this.priceFormatter,
+        inTrackingMode: this.trackingActive,
       });
     }
     this.renderer.render();

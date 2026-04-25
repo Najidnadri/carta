@@ -549,3 +549,57 @@ describe("CrosshairController — destroy", () => {
   });
 });
 
+// ─── Phase 09 — tracking-mode hooks ──────────────────────────────────────
+
+describe("CrosshairController — tracking mode (phase 09)", () => {
+  it("setTrackingMove sets pending and emits on next redraw", async () => {
+    const s = await setup();
+    s.controller.setTrackingMove(400, 200);
+    expect(s.invalidate).toHaveBeenCalledTimes(1);
+    s.controller.redraw({ ...s.ctx(), inTrackingMode: true });
+    expect(s.payloads).toHaveLength(1);
+    const p = s.payloads[0];
+    if (p === undefined) {
+      throw new Error("expected a payload");
+    }
+    expect(p.time).not.toBeNull();
+    expect(p.price).not.toBeNull();
+  });
+
+  it("clamps an out-of-plot tracking-mode pointer instead of hiding", async () => {
+    const s = await setup();
+    // Drive the crosshair via the bypass method to a point past the plot's
+    // right edge (plot width is 1200). Without inTrackingMode, this would
+    // emit a leave + hide.
+    s.controller.setTrackingMove(1500, 200);
+    s.controller.redraw({ ...s.ctx(), inTrackingMode: true });
+    expect(s.payloads).toHaveLength(1);
+    const p = s.payloads[0];
+    if (p === undefined) {
+      throw new Error("expected a payload");
+    }
+    expect(p.time).not.toBeNull();
+    expect(s.controller.isVisible()).toBe(true);
+  });
+
+  it("public hide() clears pending and hides visuals", async () => {
+    const s = await setup();
+    s.controller.setTrackingMove(400, 200);
+    s.controller.redraw({ ...s.ctx(), inTrackingMode: true });
+    expect(s.controller.isVisible()).toBe(true);
+    s.controller.hide();
+    expect(s.controller.isVisible()).toBe(false);
+    // After hide, a redraw with no further setTrackingMove emits nothing new.
+    const before = s.payloads.length;
+    s.controller.redraw({ ...s.ctx(), inTrackingMode: true });
+    expect(s.payloads.length).toBe(before);
+  });
+
+  it("disposed controller ignores setTrackingMove", async () => {
+    const s = await setup();
+    s.controller.destroy();
+    expect(() => { s.controller.setTrackingMove(100, 100); }).not.toThrow();
+    expect(s.invalidate).not.toHaveBeenCalled();
+  });
+});
+

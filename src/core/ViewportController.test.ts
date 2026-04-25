@@ -335,3 +335,259 @@ describe("ViewportController — blur/visibilitychange", () => {
     deps.controller.destroy();
   });
 });
+
+// ─── Phase 09 — pinch + long-press + tracking-mode ───────────────────────
+
+interface PinchDeps {
+  readonly stage: FakeStage;
+  readonly canvas: HTMLCanvasElement;
+  readonly applyWindow: ApplyWindowMock;
+  readonly onLongPress: ReturnType<typeof vi.fn<(x: number, y: number) => void>>;
+  readonly onTrackingMove: ReturnType<typeof vi.fn<(x: number, y: number) => void>>;
+  readonly controller: ViewportController;
+  /** Fast-forward the fake timer queue by `ms`. */
+  readonly tick: (ms: number) => void;
+}
+
+function makeDepsExt(): PinchDeps {
+  const stage = createFakeStage();
+  const canvas = createFakeCanvas(1000, 400);
+  let snap = {
+    startTime: asTime(0),
+    endTime: asTime(1_000_000),
+    intervalDuration: asInterval(1_000),
+  };
+  const applyWindow = vi.fn((w: WindowInput): void => {
+    snap = { ...snap, startTime: w.startTime, endTime: w.endTime };
+  });
+  // Fake timer: deterministic queue, fires when the cumulative tick time reaches ms.
+  let nowMs = 0;
+  let nextTimerId = 1;
+  const queue = new Map<number, { firesAt: number; cb: () => void }>();
+  const onLongPress = vi.fn();
+  const onTrackingMove = vi.fn();
+  const controller = new ViewportController({
+    stage: stage as unknown as Container,
+    canvas,
+    snapshot: (): typeof snap => snap,
+    applyWindow: applyWindow as unknown as (w: WindowInput) => void,
+    plotRect: (): { x: number; y: number; w: number; h: number } => ({ x: 0, y: 0, w: 1000, h: 400 }),
+    rafFns: {
+      request: (): number => 0,
+      cancel: (): void => undefined,
+      now: (): number => nowMs,
+    },
+    onLongPress,
+    onTrackingMove,
+    timerFns: {
+      setTimeout: (cb, ms): number => {
+        const id = nextTimerId++;
+        queue.set(id, { firesAt: nowMs + ms, cb });
+        return id;
+      },
+      clearTimeout: (id): void => { queue.delete(id); },
+    },
+  });
+  const tick = (ms: number): void => {
+    nowMs += ms;
+    for (const [id, entry] of [...queue.entries()]) {
+      if (entry.firesAt <= nowMs) {
+        queue.delete(id);
+        entry.cb();
+      }
+    }
+  };
+  return { stage, canvas, applyWindow, onLongPress, onTrackingMove, controller, tick };
+}
+
+function pdown(stage: FakeStage, id: number, x: number, y: number, type = "touch"): void {
+  stage.emit("pointerdown", {
+    pointerId: id,
+    pointerType: type,
+    global: { x, y },
+  });
+}
+function pmove(stage: FakeStage, id: number, x: number, y: number, type = "touch"): void {
+  stage.emit("globalpointermove", {
+    pointerId: id,
+    pointerType: type,
+    global: { x, y },
+  });
+}
+function pup(stage: FakeStage, id: number, x: number, y: number, type = "touch"): void {
+  stage.emit("pointerup", {
+    pointerId: id,
+    pointerType: type,
+    global: { x, y },
+  });
+}
+
+describe("ViewportController — pinch", () => {
+  it("zooms around midpoint when pointers spread apart", () => {
+    const d = makeDepsExt();
+    pdown(d.stage, 1, 400, 200);
+    pdown(d.stage, 2, 600, 200);
+    d.applyWindow.mockClear();
+    // Both pointers move past 6px gate, separation grows from 200 to 400 → factor 0.5 (zoom in).
+    pmove(d.stage, 1, 300, 200);
+    pmove(d.stage, 2, 700, 200);
+    expect(d.applyWindow).toHaveBeenCalled();
+    const arg = d.applyWindow.mock.calls.at(-1)?.[0] as WindowInput;
+    const newSpan = Number(arg.endTime) - Number(arg.startTime);
+    expect(newSpan).toBeLessThan(1_000_000);
+    expect(newSpan).toBeGreaterThan(0);
+    d.controller.destroy();
+  });
+
+  it("two-finger pan with constant separation translates the window", () => {
+    const d = makeDepsExt();
+    pdown(d.stage, 1, 400, 200);
+    pdown(d.stage, 2, 600, 200);
+    d.applyWindow.mockClear();
+    // Both fingers move +100 px → constant separation, centroid moves +100 px.
+    pmove(d.stage, 1, 500, 200);
+    pmove(d.stage, 2, 700, 200);
+    expect(d.applyWindow).toHaveBeenCalled();
+    const arg = d.applyWindow.mock.calls.at(-1)?.[0] as WindowInput;
+    const newSpan = Number(arg.endTime) - Number(arg.startTime);
+    // Span should stay (near-)constant — separation didn't change.
+    expect(newSpan).toBeGreaterThan(990_000);
+    expect(newSpan).toBeLessThan(1_010_000);
+    // Window translated to earlier times (centroid moved right → window shifts left).
+    expect(Number(arg.startTime)).toBeLessThan(0);
+    d.controller.destroy();
+  });
+
+  it("does not zoom while one finger is below the gate (thumb resting)", () => {
+    const d = makeDepsExt();
+    pdown(d.stage, 1, 400, 200);
+    pdown(d.stage, 2, 600, 200);
+    d.applyWindow.mockClear();
+    // Pointer 1 moves 100 px; pointer 2 only 3 px (under 6 px gate).
+    pmove(d.stage, 1, 500, 200);
+    pmove(d.stage, 2, 603, 200);
+    expect(d.applyWindow).not.toHaveBeenCalled();
+    d.controller.destroy();
+  });
+
+  it("ignores a third finger that lands during an active pinch", () => {
+    const d = makeDepsExt();
+    pdown(d.stage, 1, 400, 200);
+    pdown(d.stage, 2, 600, 200);
+    pmove(d.stage, 1, 300, 200);
+    pmove(d.stage, 2, 700, 200);
+    d.applyWindow.mockClear();
+    // Third finger lands and moves — shouldn't drive any new applyWindow.
+    pdown(d.stage, 3, 800, 200);
+    pmove(d.stage, 3, 850, 200);
+    expect(d.applyWindow).not.toHaveBeenCalled();
+    // Re-driving the original pair still works.
+    pmove(d.stage, 1, 250, 200);
+    expect(d.applyWindow).toHaveBeenCalled();
+    d.controller.destroy();
+  });
+
+  it("ends pinch cleanly when one finger lifts; remaining finger does not adopt as pan", () => {
+    const d = makeDepsExt();
+    pdown(d.stage, 1, 400, 200);
+    pdown(d.stage, 2, 600, 200);
+    pmove(d.stage, 1, 300, 200);
+    pmove(d.stage, 2, 700, 200);
+    pup(d.stage, 2, 700, 200);
+    d.applyWindow.mockClear();
+    // Remaining pointer moves — should NOT drive a pan (no pointer-id was promoted).
+    pmove(d.stage, 1, 100, 200);
+    expect(d.applyWindow).not.toHaveBeenCalled();
+    d.controller.destroy();
+  });
+});
+
+describe("ViewportController — long-press", () => {
+  it("fires onLongPress after 350ms within deadzone", () => {
+    const d = makeDepsExt();
+    pdown(d.stage, 1, 400, 200);
+    d.tick(351);
+    expect(d.onLongPress).toHaveBeenCalledTimes(1);
+    const args = d.onLongPress.mock.calls[0] ?? [];
+    expect(args[0]).toBe(400);
+    expect(args[1]).toBe(200);
+    d.controller.destroy();
+  });
+
+  it("cancels timer on second pointerdown", () => {
+    const d = makeDepsExt();
+    pdown(d.stage, 1, 400, 200);
+    pdown(d.stage, 2, 600, 200);
+    d.tick(400);
+    expect(d.onLongPress).not.toHaveBeenCalled();
+    d.controller.destroy();
+  });
+
+  it("cancels timer on move beyond 8px deadzone", () => {
+    const d = makeDepsExt();
+    pdown(d.stage, 1, 400, 200);
+    pmove(d.stage, 1, 410, 207); // hypot(10,7)=12.2 > 8
+    d.tick(400);
+    expect(d.onLongPress).not.toHaveBeenCalled();
+    d.controller.destroy();
+  });
+
+  it("does not cancel for sub-deadzone jitter", () => {
+    const d = makeDepsExt();
+    pdown(d.stage, 1, 400, 200);
+    pmove(d.stage, 1, 405, 203); // hypot(5,3) ≈ 5.83 < 8
+    d.tick(400);
+    expect(d.onLongPress).toHaveBeenCalledTimes(1);
+    d.controller.destroy();
+  });
+
+  it("cancels timer on pointerup before fire", () => {
+    const d = makeDepsExt();
+    pdown(d.stage, 1, 400, 200);
+    pup(d.stage, 1, 400, 200);
+    d.tick(400);
+    expect(d.onLongPress).not.toHaveBeenCalled();
+    d.controller.destroy();
+  });
+
+  it("does not arm for mouse pointers", () => {
+    const d = makeDepsExt();
+    pdown(d.stage, 1, 400, 200, "mouse");
+    d.tick(400);
+    expect(d.onLongPress).not.toHaveBeenCalled();
+    d.controller.destroy();
+  });
+});
+
+describe("ViewportController — tracking mode", () => {
+  it("routes single-finger touch moves to onTrackingMove instead of panning", () => {
+    const d = makeDepsExt();
+    d.controller.setTrackingMode(true);
+    expect(d.controller.isTrackingMode()).toBe(true);
+    pdown(d.stage, 1, 400, 200);
+    d.applyWindow.mockClear();
+    pmove(d.stage, 1, 500, 250);
+    expect(d.applyWindow).not.toHaveBeenCalled();
+    expect(d.onTrackingMove).toHaveBeenCalledWith(500, 250);
+    d.controller.destroy();
+  });
+
+  it("does not route mouse moves to onTrackingMove (mouse path stays alive)", () => {
+    const d = makeDepsExt();
+    d.controller.setTrackingMode(true);
+    pdown(d.stage, 1, 400, 200, "mouse");
+    pmove(d.stage, 1, 500, 200, "mouse");
+    expect(d.onTrackingMove).not.toHaveBeenCalled();
+    d.controller.destroy();
+  });
+
+  it("setTrackingMode(false) resumes pan routing", () => {
+    const d = makeDepsExt();
+    d.controller.setTrackingMode(true);
+    d.controller.setTrackingMode(false);
+    pdown(d.stage, 1, 400, 200, "mouse");
+    pmove(d.stage, 1, 300, 200, "mouse");
+    expect(d.applyWindow).toHaveBeenCalled();
+    d.controller.destroy();
+  });
+});
