@@ -50,7 +50,7 @@ function rgbaString(hex: number, alpha: number): string {
  * viewport edges during a pan.
  */
 export class AreaSeries extends Series {
-  private readonly opts: AreaSeriesOptions;
+  private opts: AreaSeriesOptions;
   private readonly fillGraphics: Graphics;
   private readonly strokeGraphics: Graphics;
   private gradient: FillGradient | null = null;
@@ -63,6 +63,15 @@ export class AreaSeries extends Series {
     this.strokeGraphics = new Graphics();
     this.container.addChild(this.fillGraphics);
     this.container.addChild(this.strokeGraphics);
+  }
+
+  applyOptions(patch: Partial<AreaSeriesOptions>): void {
+    this.opts = this.mergeOptions(this.opts, patch);
+    // Force a gradient rebuild on the next render — the cache key includes
+    // colours / alphas, so it'll recompute naturally, but we null out the
+    // key to make the failure mode explicit if a future patch ever
+    // bypasses `ensureGradient`.
+    this.requestInvalidate();
   }
 
   priceRangeInWindow(startTime: Time, endTime: Time): PriceRange | null {

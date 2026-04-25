@@ -41,12 +41,17 @@ function isFiniteOhlc(r: DataRecord): r is OhlcRecord {
  */
 export class OhlcBarSeries extends Series {
   private readonly pool: ShapePool;
-  private readonly opts: OhlcBarSeriesOptions;
+  private opts: OhlcBarSeriesOptions;
 
   constructor(options: OhlcBarSeriesOptions) {
     super(options.channel, "ohlc", `OhlcBarSeries(${options.channel})`);
     this.opts = options;
     this.pool = new ShapePool(this.container);
+  }
+
+  applyOptions(patch: Partial<OhlcBarSeriesOptions>): void {
+    this.opts = this.mergeOptions(this.opts, patch);
+    this.requestInvalidate();
   }
 
   priceRangeInWindow(startTime: Time, endTime: Time): PriceRange | null {

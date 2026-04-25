@@ -826,6 +826,7 @@ export class TimeSeriesChart {
     series.setQueryContext({
       dataStore: this.dataStore,
       getInterval: () => Number(this.config.snapshot.intervalDuration),
+      invalidate: () => { this.invalidator.invalidate("data"); },
     });
     series.attach(this.renderer.seriesLayer);
     this.series.push(series);

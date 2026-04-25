@@ -92,7 +92,7 @@ interface PooledMarker {
  *   anchors are silently skipped and counted via `lastSkippedCount()`.
  */
 export class MarkerOverlay extends Series {
-  private readonly opts: MarkerOverlayOptions;
+  private opts: MarkerOverlayOptions;
   private readonly shapeCtxs: Record<MarkerShape, GraphicsContext>;
   private readonly free: PooledMarker[] = [];
   private readonly inUse: PooledMarker[] = [];
@@ -105,6 +105,26 @@ export class MarkerOverlay extends Series {
     super(options.channel, "marker", `MarkerOverlay(${options.channel})`);
     this.opts = options;
     this.shapeCtxs = buildShapeContexts();
+  }
+
+  applyOptions(patch: Partial<MarkerOverlayOptions>): void {
+    const merged = this.mergeOptions(this.opts, patch);
+    // `priceReference.channel` is the y-anchor channel; rebinding it after
+    // construction would silently break the overlay's data lookup. Pin it
+    // alongside `channel`, but allow `field` (high/low/close/value) to flip.
+    if (patch.priceReference !== undefined) {
+      this.opts = {
+        ...merged,
+        priceReference: {
+          ...this.opts.priceReference,
+          ...patch.priceReference,
+          channel: this.opts.priceReference.channel,
+        },
+      };
+    } else {
+      this.opts = merged;
+    }
+    this.requestInvalidate();
   }
 
   /** Markers never contribute to auto-scale. */

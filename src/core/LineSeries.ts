@@ -57,7 +57,7 @@ function isFinitePoint(r: DataRecord): r is PointRecord {
  * at viewport edges during a pan.
  */
 export class LineSeries extends Series {
-  private readonly opts: LineSeriesOptions;
+  private opts: LineSeriesOptions;
   private readonly graphics: Graphics;
 
   constructor(options: LineSeriesOptions) {
@@ -65,6 +65,11 @@ export class LineSeries extends Series {
     this.opts = options;
     this.graphics = new Graphics();
     this.container.addChild(this.graphics);
+  }
+
+  applyOptions(patch: Partial<LineSeriesOptions>): void {
+    this.opts = this.mergeOptions(this.opts, patch);
+    this.requestInvalidate();
   }
 
   priceRangeInWindow(startTime: Time, endTime: Time): PriceRange | null {

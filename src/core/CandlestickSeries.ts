@@ -39,12 +39,17 @@ function isFiniteOhlc(r: DataRecord): r is OhlcRecord {
  */
 export class CandlestickSeries extends Series {
   private readonly pool: ShapePool;
-  private readonly opts: CandlestickSeriesOptions;
+  private opts: CandlestickSeriesOptions;
 
   constructor(options: CandlestickSeriesOptions) {
     super(options.channel, "ohlc", `CandlestickSeries(${options.channel})`);
     this.opts = options;
     this.pool = new ShapePool(this.container);
+  }
+
+  applyOptions(patch: Partial<CandlestickSeriesOptions>): void {
+    this.opts = this.mergeOptions(this.opts, patch);
+    this.requestInvalidate();
   }
 
   priceRangeInWindow(startTime: Time, endTime: Time): PriceRange | null {

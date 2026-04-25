@@ -25,6 +25,12 @@ export interface SeriesRenderContext {
 export interface SeriesQueryContext {
   readonly dataStore: DataStore;
   readonly getInterval: () => number;
+  /**
+   * Trigger a re-render after a state change that originates from inside the
+   * series (e.g. `applyOptions`). Optional in test setups where the series
+   * is exercised without a chart; `TimeSeriesChart.addSeries` always wires it.
+   */
+  readonly invalidate?: () => void;
 }
 
 /**
@@ -67,6 +73,40 @@ export abstract class Series implements PriceRangeProvider {
     if (this.container.parent !== parent) {
       parent.addChild(this.container);
     }
+  }
+
+  /**
+   * Apply a partial patch over the series' constructor options without
+   * re-creating the series. Implementations shallow-merge the patch using
+   * `mergeOptions` (which pins immutable identifiers like `channel`) and
+   * call `requestInvalidate()` so the next flush picks up the new style.
+   *
+   * The patch type is the series' own options interface. Hosts get
+   * autocomplete on every option except the channel (a channel change is
+   * silently dropped — see `mergeOptions` rationale).
+   */
+  abstract applyOptions(patch: object): void;
+
+  /**
+   * Shallow-merge `patch` into `current` while pinning fields that must not
+   * change after construction (`channel`, and `priceReference.channel` for
+   * marker overlays). Returns a new options object — the caller assigns it
+   * back to its own `opts` field.
+   */
+  protected mergeOptions<O extends { readonly channel: string }>(
+    current: O,
+    patch: Partial<O>,
+  ): O {
+    const next: O = { ...current, ...patch };
+    // Pin the channel — changing it post-construction would silently break
+    // the data-store binding registered by `chart.addSeries`.
+    (next as { channel: string }).channel = current.channel;
+    return next;
+  }
+
+  /** Fire the chart's invalidator if a query context with one is bound. */
+  protected requestInvalidate(): void {
+    this.query?.invalidate?.();
   }
 
   /**

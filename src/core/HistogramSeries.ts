@@ -49,12 +49,20 @@ function resolveBarColor(
  */
 export class HistogramSeries extends Series {
   private readonly pool: ShapePool;
-  private readonly opts: HistogramSeriesOptions;
+  private opts: HistogramSeriesOptions;
 
   constructor(options: HistogramSeriesOptions) {
     super(options.channel, "point", `HistogramSeries(${options.channel})`);
     this.opts = options;
     this.pool = new ShapePool(this.container);
+  }
+
+  applyOptions(patch: Partial<HistogramSeriesOptions>): void {
+    this.opts = this.mergeOptions(this.opts, patch);
+    // Flipping `participatesInAutoScale` correctly re-fires auto-scale via
+    // the chart's `'data'` invalidation — `priceRangeInWindow` is re-polled
+    // on the next flush.
+    this.requestInvalidate();
   }
 
   priceRangeInWindow(startTime: Time, endTime: Time): PriceRange | null {

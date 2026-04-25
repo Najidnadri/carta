@@ -161,7 +161,7 @@ export function splitAtBaseline(
  * (positive / negative), rebuilt on theme or colour-option changes.
  */
 export class BaselineSeries extends Series {
-  private readonly opts: BaselineSeriesOptions;
+  private opts: BaselineSeriesOptions;
   private readonly aboveFill: Graphics;
   private readonly belowFill: Graphics;
   private readonly strokeGraphics: Graphics;
@@ -178,6 +178,11 @@ export class BaselineSeries extends Series {
     this.container.addChild(this.aboveFill);
     this.container.addChild(this.belowFill);
     this.container.addChild(this.strokeGraphics);
+  }
+
+  applyOptions(patch: Partial<BaselineSeriesOptions>): void {
+    this.opts = this.mergeOptions(this.opts, patch);
+    this.requestInvalidate();
   }
 
   priceRangeInWindow(startTime: Time, endTime: Time): PriceRange | null {

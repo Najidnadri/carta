@@ -46,7 +46,7 @@ function isFiniteOhlc(r: DataRecord): r is OhlcRecord {
  */
 export class HeikinAshiSeries extends Series {
   private readonly pool: ShapePool;
-  private readonly opts: HeikinAshiSeriesOptions;
+  private opts: HeikinAshiSeriesOptions;
   private readonly cache = new Map<number, HeikinAshiBar>();
   private lastRevision = -1;
   private lastInterval = -1;
@@ -55,6 +55,11 @@ export class HeikinAshiSeries extends Series {
     super(options.channel, "ohlc", `HeikinAshiSeries(${options.channel})`);
     this.opts = options;
     this.pool = new ShapePool(this.container);
+  }
+
+  applyOptions(patch: Partial<HeikinAshiSeriesOptions>): void {
+    this.opts = this.mergeOptions(this.opts, patch);
+    this.requestInvalidate();
   }
 
   setQueryContext(query: SeriesQueryContext): void {
