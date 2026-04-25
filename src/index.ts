@@ -1,5 +1,9 @@
-export { TimeSeriesChart } from "./core/TimeSeriesChart.js";
-export type { TimeSeriesChartConstructionOptions } from "./core/TimeSeriesChart.js";
+export { TimeSeriesChart, resolveDpr } from "./core/TimeSeriesChart.js";
+export type {
+  DprListenerHooks,
+  TimeSeriesChartConstructionOptions,
+} from "./core/TimeSeriesChart.js";
+export { DarkTheme, LightTheme } from "./core/themes.js";
 export { Renderer } from "./core/Renderer.js";
 export type { PlotRect, RendererOptions } from "./core/Renderer.js";
 export { ConfigState } from "./core/ConfigState.js";

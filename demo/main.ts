@@ -5,10 +5,12 @@ import {
   AreaSeries,
   BaselineSeries,
   CandlestickSeries,
+  DarkTheme,
   defaultPriceFormatter,
   formatAxisLabel,
   HeikinAshiSeries,
   HistogramSeries,
+  LightTheme,
   LineSeries,
   MarkerOverlay,
   OhlcBarSeries,
@@ -376,6 +378,55 @@ interface MountOptions {
   readonly lineType: LineType;
 }
 
+interface DprStub {
+  readonly hooks: { matchMedia: (q: string) => MediaQueryList; devicePixelRatio: () => number };
+  readonly setDpr: (next: number) => void;
+  readonly fire: () => void;
+  readonly stats: () => { addCount: number; removeCount: number; activeListeners: number };
+}
+
+let activeDprStub: DprStub | null = null;
+
+function createDprStub(initial: number): DprStub {
+  let dpr = initial;
+  const listeners = new Set<(e: MediaQueryListEvent) => void>();
+  const counters = { addCount: 0, removeCount: 0 };
+  return {
+    hooks: {
+      matchMedia: (q: string): MediaQueryList => {
+        const mql = {
+          matches: false,
+          media: q,
+          onchange: null,
+          addEventListener: (_t: string, l: (e: MediaQueryListEvent) => void): void => {
+            counters.addCount += 1;
+            listeners.add(l);
+          },
+          removeEventListener: (_t: string, l: (e: MediaQueryListEvent) => void): void => {
+            counters.removeCount += 1;
+            listeners.delete(l);
+          },
+          dispatchEvent: (): boolean => true,
+        } as unknown as MediaQueryList;
+        return mql;
+      },
+      devicePixelRatio: (): number => dpr,
+    },
+    setDpr: (next: number): void => { dpr = next; },
+    fire: (): void => {
+      const event = { matches: true } as MediaQueryListEvent;
+      for (const l of [...listeners]) {
+        l(event);
+      }
+    },
+    stats: (): { addCount: number; removeCount: number; activeListeners: number } => ({
+      addCount: counters.addCount,
+      removeCount: counters.removeCount,
+      activeListeners: listeners.size,
+    }),
+  };
+}
+
 async function mount(mountOpts: MountOptions): Promise<MountResult> {
   const container = document.getElementById("chart");
   if (container === null) {
@@ -391,6 +442,15 @@ async function mount(mountOpts: MountOptions): Promise<MountResult> {
     logger: activeLogger,
     timeAxis: { formatContext: { locale: win.locale, timeZone: win.timeZone } },
   };
+  const search = new URLSearchParams(globalThis.location.search);
+  if (search.get("dprStub") === "1") {
+    const initialDpr = Number(search.get("dprInitial") ?? "1") || 1;
+    activeDprStub = createDprStub(initialDpr);
+    (opts as TimeSeriesChartConstructionOptions & { dprListenerHooks: DprStub["hooks"] }).dprListenerHooks =
+      activeDprStub.hooks;
+  } else {
+    activeDprStub = null;
+  }
   const chart = await TimeSeriesChart.create(opts);
   chart.priceScale().setDomain(win.priceMin, win.priceMax);
   chart.priceScale().setAutoScale(true);
@@ -452,6 +512,7 @@ interface EventCounts {
   interval: number;
   data: number;
   resize: number;
+  tracking: number;
 }
 
 async function main(): Promise<void> {
@@ -463,7 +524,9 @@ async function main(): Promise<void> {
     endTime: asTime(initialWindow.endTime),
   });
 
-  const eventCounts: EventCounts = { window: 0, interval: 0, data: 0, resize: 0 };
+  const eventCounts: EventCounts = { window: 0, interval: 0, data: 0, resize: 0, tracking: 0 };
+  const trackingChangeLog: { active: boolean; at: number }[] = [];
+  let lastTrackingChange: { active: boolean } | null = null;
   const lastEvents: {
     window?: ChartWindow;
     interval?: IntervalChange;
@@ -563,12 +626,19 @@ async function main(): Promise<void> {
     updateCrosshairPanel();
   };
 
+  const onTrackingChange = (payload: CartaEventMap["tracking:change"]): void => {
+    eventCounts.tracking += 1;
+    lastTrackingChange = { active: payload.active };
+    trackingChangeLog.push({ active: payload.active, at: performance.now() });
+  };
+
   const wireEvents = (c: TimeSeriesChart): void => {
     c.on("window:change", onWindowChange);
     c.on("interval:change", onIntervalChange);
     c.on("resize", onResize);
     c.on("data:request", onDataRequest);
     c.on("crosshair:move", onCrosshairMove);
+    c.on("tracking:change", onTrackingChange);
   };
 
   const resetEventCounts = (): void => {
@@ -576,6 +646,9 @@ async function main(): Promise<void> {
     eventCounts.interval = 0;
     eventCounts.data = 0;
     eventCounts.resize = 0;
+    eventCounts.tracking = 0;
+    trackingChangeLog.length = 0;
+    lastTrackingChange = null;
   };
 
   let primary: PrimarySeries | null = null;
@@ -668,6 +741,11 @@ async function main(): Promise<void> {
     volume = next.volume;
     wireEvents(chart);
     refreshSeriesMeta();
+    // Phase 10 — re-apply the active theme so a remount doesn't snap back to
+    // dark when the user had flipped to light.
+    if (currentThemeName === "light") {
+      chart.applyOptions({ theme: LightTheme });
+    }
   };
 
   const setPrimaryType = (next: PrimarySeriesType): void => {
@@ -1057,6 +1135,27 @@ async function main(): Promise<void> {
   });
   updateMarkerBtn();
 
+  // Phase 10 — theme toggle. Persists across remounts so a user who flipped
+  // to Light gets a Light chart back after `Remount chart`.
+  let currentThemeName: "dark" | "light" = "dark";
+  const themeBtn = document.getElementById("toggle-theme");
+  const applyThemeToHost = (name: "dark" | "light"): void => {
+    document.body.setAttribute("data-theme", name);
+    if (themeBtn !== null) {
+      themeBtn.textContent = `Theme: ${name === "dark" ? "Dark" : "Light"}`;
+      themeBtn.setAttribute("aria-pressed", String(name === "light"));
+    }
+  };
+  const applyTheme = (name: "dark" | "light"): void => {
+    currentThemeName = name;
+    chart?.applyOptions({ theme: name === "light" ? LightTheme : DarkTheme });
+    applyThemeToHost(name);
+  };
+  themeBtn?.addEventListener("click", () => {
+    applyTheme(currentThemeName === "dark" ? "light" : "dark");
+  });
+  applyThemeToHost(currentThemeName);
+
   const lineStyleSelect = document.getElementById("line-style") as HTMLSelectElement | null;
   const parseLineStyleValue = (raw: string): { style: LineStyle; type: LineType } | null => {
     const [s, t] = raw.split("-");
@@ -1321,6 +1420,13 @@ async function main(): Promise<void> {
       currentPriceFormatter = defaultPriceFormatter;
       chart?.applyOptions({ priceFormatter: defaultPriceFormatter });
     },
+    // Phase 10 — theme controls for Playwright harness.
+    setTheme: (name: "dark" | "light"): void => { applyTheme(name); },
+    setThemeFontFamily: (fontFamily: string): void => {
+      const base = currentThemeName === "light" ? LightTheme : DarkTheme;
+      chart?.applyOptions({ theme: { ...base, fontFamily } });
+    },
+    getCurrentThemeName: (): "dark" | "light" => currentThemeName,
     labelCacheSize: (): number => timeFormatInternals.labelCacheSize(),
     lastWarnings: (): readonly string[] => [...activeLogger.warnings],
     lastErrors: (): readonly string[] => [...activeLogger.errors],
@@ -1670,6 +1776,92 @@ async function main(): Promise<void> {
     /** Whether the viewport is in tracking-mode routing (no pan on touch). */
     isViewportTracking: (): boolean =>
       chart?.__debugStats().tracking.viewportTracking ?? false,
+    // ── Phase 09 cycle B public-API hooks ───────────────────────────────
+    /** Public API: enter tracking programmatically. Returns true if accepted. */
+    enterTrackingMode: (opts?: { time?: number; price?: number }): boolean => {
+      if (chart === null) {
+        return false;
+      }
+      const before = chart.isTrackingMode();
+      const apiOpts: { time?: Time; price?: ReturnType<typeof asPrice> } = {};
+      if (opts?.time !== undefined) {
+        apiOpts.time = asTime(opts.time);
+      }
+      if (opts?.price !== undefined) {
+        apiOpts.price = asPrice(opts.price);
+      }
+      chart.enterTrackingMode(apiOpts);
+      return chart.isTrackingMode() && !before;
+    },
+    /** Public API: exit tracking programmatically. Returns true if a transition happened. */
+    exitTrackingMode: (): boolean => {
+      if (chart === null) {
+        return false;
+      }
+      const before = chart.isTrackingMode();
+      chart.exitTrackingMode();
+      return before && !chart.isTrackingMode();
+    },
+    /** Public API: read current tracking state (no side-effects). */
+    isTrackingMode: (): boolean => chart?.isTrackingMode() ?? false,
+    /** Number of `tracking:change` events observed since last reset. */
+    trackingChangeCount: (): number => eventCounts.tracking,
+    /** Last `tracking:change` payload, or null if no event has fired. */
+    lastTrackingChange: (): { active: boolean } | null =>
+      lastTrackingChange === null ? null : { active: lastTrackingChange.active },
+    /** Full transition log since last reset, in emission order. */
+    trackingChangeLog: (): readonly { active: boolean; at: number }[] =>
+      trackingChangeLog.map((e) => ({ active: e.active, at: e.at })),
+    /** Current renderer DPR + whether the matchMedia listener is armed. */
+    dprStats: (): { resolution: number; listenerArmed: boolean } | null => {
+      if (chart === null) {
+        return null;
+      }
+      const stats = chart.__debugStats();
+      return { resolution: stats.dpr.resolution, listenerArmed: stats.dpr.listenerArmed };
+    },
+    /**
+     * Drive a deterministic DPR change. Only available when the demo was
+     * loaded with `?dprStub=1` (the stub is wired through `dprListenerHooks`
+     * at mount time). Returns the new resolution after the listener settles.
+     */
+    simulateDprChange: (nextDpr: number): { resolution: number; listenerArmed: boolean } | null => {
+      if (activeDprStub === null) {
+        return null;
+      }
+      activeDprStub.setDpr(nextDpr);
+      activeDprStub.fire();
+      if (chart === null) {
+        return null;
+      }
+      const stats = chart.__debugStats();
+      return { resolution: stats.dpr.resolution, listenerArmed: stats.dpr.listenerArmed };
+    },
+    /** Listener-balance stats from the DPR stub (only meaningful with `?dprStub=1`). */
+    dprStubStats: (): { addCount: number; removeCount: number; activeListeners: number } | null =>
+      activeDprStub === null ? null : activeDprStub.stats(),
+    /** Read CSS that 9.5 should apply on the canvas + container. */
+    cssBundle: (): {
+      canvas: { touchAction: string; userSelect: string; webkitUserSelect: string; webkitTapHighlightColor: string };
+      container: { overscrollBehavior: string };
+    } | null => {
+      const canvas = document.querySelector("canvas");
+      const container = document.getElementById("chart");
+      if (canvas === null || container === null) {
+        return null;
+      }
+      return {
+        canvas: {
+          touchAction: canvas.style.touchAction,
+          userSelect: canvas.style.userSelect,
+          webkitUserSelect: canvas.style.getPropertyValue("-webkit-user-select"),
+          webkitTapHighlightColor: canvas.style.getPropertyValue("-webkit-tap-highlight-color"),
+        },
+        container: {
+          overscrollBehavior: container.style.overscrollBehavior,
+        },
+      };
+    },
   };
   (globalThis as unknown as { __cartaTest?: typeof testHook }).__cartaTest = testHook;
 }

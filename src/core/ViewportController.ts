@@ -235,8 +235,6 @@ export class ViewportController {
     if (typeof globalThis.document !== "undefined") {
       globalThis.document.addEventListener("visibilitychange", this.onVisibilityChange);
     }
-
-    this.canvas.style.touchAction = "none";
   }
 
   isKineticActive(): boolean {
@@ -283,6 +281,15 @@ export class ViewportController {
   /** Dev/test introspection: is tracking mode currently on? */
   isTrackingMode(): boolean {
     return this.trackingMode;
+  }
+
+  /**
+   * Phase 09 — number of pointers currently down on the chart. Used by the
+   * public `enterTrackingMode` API to reject programmatic entry while a
+   * multi-pointer gesture (pinch / two-finger pan) is in flight.
+   */
+  activePointerCount(): number {
+    return this.activePointers.size;
   }
 
   destroy(): void {

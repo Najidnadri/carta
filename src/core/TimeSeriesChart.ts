@@ -2,6 +2,7 @@ import type { GraphicsContext } from "pixi.js";
 import { ConfigState } from "./ConfigState.js";
 import { CrosshairController } from "./CrosshairController.js";
 import { DataStore } from "./DataStore.js";
+import { DarkTheme } from "./themes.js";
 import { DebouncedEmitter } from "./DebouncedEmitter.js";
 import { EventBus } from "./EventBus.js";
 import { InvalidationQueue, type DirtyReason } from "./InvalidationQueue.js";
@@ -30,9 +31,9 @@ import { TimeScale } from "./TimeScale.js";
 import { ViewportController } from "./ViewportController.js";
 import {
   asInterval,
+  asPixel,
   asPrice,
   asTime,
-  DEFAULT_THEME,
   type ApplyOptions,
   type CacheStats,
   type CartaEventHandler,
@@ -60,6 +61,8 @@ import {
   type Theme,
   type Time,
   type TimeSeriesChartOptions,
+  type TrackingChange,
+  type TrackingModeOptions,
   type ViewportOptions,
   type WindowInput,
 } from "../types.js";
@@ -82,15 +85,47 @@ interface ResolvedOptions {
   readonly priceAxisDrag: PriceAxisDragOptions | undefined;
   readonly priceFormatter: PriceFormatter;
   readonly data: DataOptions | undefined;
+  readonly dprListenerHooks: DprListenerHooks | undefined;
+}
+
+/**
+ * Phase 09 cycle B — injectable hooks for the DPR change listener so unit
+ * tests can drive `matchMedia` deterministically without touching jsdom's
+ * shimmed environment.
+ */
+export interface DprListenerHooks {
+  readonly matchMedia: (query: string) => MediaQueryList;
+  readonly devicePixelRatio: () => number;
 }
 
 export interface TimeSeriesChartConstructionOptions extends TimeSeriesChartOptions {
   readonly timeAxis?: TimeAxisOptions;
   readonly priceAxisDrag?: PriceAxisDragOptions;
+  /**
+   * Phase 09 cycle B test hook. When provided, the chart uses these
+   * factories instead of `globalThis.window.matchMedia` /
+   * `globalThis.window.devicePixelRatio`. Production code never sets this.
+   */
+  readonly dprListenerHooks?: DprListenerHooks;
 }
 
 const DEFAULT_DOMAIN_MIN = 0;
 const DEFAULT_DOMAIN_MAX = 1;
+const DPR_CAP = 2;
+
+/**
+ * Phase 09 cycle B — clamp + snap DPR to defend against the v8 fractional-
+ * resolution artifacts ([PixiJS issue #6510](https://github.com/pixijs/pixijs/issues/6510)).
+ * Output is one of `{1, 1.5, 2}`. Non-finite or non-positive inputs collapse
+ * to `1`.
+ */
+export function resolveDpr(raw: number): number {
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return 1;
+  }
+  const clamped = Math.min(DPR_CAP, Math.max(1, raw));
+  return Math.round(clamped * 2) / 2;
+}
 
 /**
  * Top-level chart class. Phase 02 surface: create / resize / destroy /
@@ -125,12 +160,30 @@ export class TimeSeriesChart {
   private readonly priceScaleFacade: PriceScaleFacade;
   private seriesRenderCounter = 0;
   private trackingActive = false;
+  private trackingAnchor: { time: Time; price: Price } | null = null;
   private documentPointerDownHandler: ((e: PointerEvent) => void) | null = null;
+  private currentResolution: number;
+  private dprMediaQuery: MediaQueryList | null = null;
+  private dprMediaListener: ((e: MediaQueryListEvent) => void) | null = null;
+  private readonly mediaMatcher: ((query: string) => MediaQueryList) | null;
+  private readonly dprProbe: () => number;
 
   private constructor(opts: ResolvedOptions, renderer: Renderer, config: ConfigState) {
     this.opts = opts;
     this.renderer = renderer;
     this.config = config;
+    this.currentResolution = opts.devicePixelRatio;
+    if (opts.dprListenerHooks !== undefined) {
+      this.mediaMatcher = opts.dprListenerHooks.matchMedia;
+      this.dprProbe = opts.dprListenerHooks.devicePixelRatio;
+    } else if (typeof globalThis.window !== "undefined" && typeof globalThis.window.matchMedia === "function") {
+      const win = globalThis.window;
+      this.mediaMatcher = (q: string): MediaQueryList => win.matchMedia(q);
+      this.dprProbe = (): number => win.devicePixelRatio || 1;
+    } else {
+      this.mediaMatcher = null;
+      this.dprProbe = (): number => 1;
+    }
     this.dataStore =
       opts.data === undefined
         ? new DataStore({ logger: opts.logger })
@@ -174,8 +227,22 @@ export class TimeSeriesChart {
       applyWindow: (win: WindowInput): void => { this.applyWindowInternal(win); },
       plotRect: (): PlotRect => this.computePlotRect(),
       options: opts.viewport,
-      onLongPress: (localX, localY): void => { this.enterTrackingInternal(localX, localY); },
+      onLongPress: (localX, localY): void => {
+        const anchor = this.dataAnchorAtLocalPixel(localX, localY);
+        if (anchor === null) {
+          return;
+        }
+        this.enterTrackingInternal(anchor);
+      },
       onTrackingMove: (localX, localY): void => {
+        if (!this.trackingActive) {
+          return;
+        }
+        const anchor = this.dataAnchorAtLocalPixel(localX, localY);
+        if (anchor === null) {
+          return;
+        }
+        this.trackingAnchor = anchor;
         const plot = this.computePlotRect();
         this.crosshair.setTrackingMove(plot.x + localX, plot.y + localY);
       },
@@ -203,20 +270,21 @@ export class TimeSeriesChart {
   static async create(options: TimeSeriesChartConstructionOptions): Promise<TimeSeriesChart> {
     const logger = options.logger ?? noopLogger;
     const theme: Theme = {
-      ...DEFAULT_THEME,
+      ...DarkTheme,
       ...(options.theme ?? {}),
     };
 
     const containerWidth = options.container.clientWidth;
     const containerHeight = options.container.clientHeight;
+    const rawDpr =
+      options.devicePixelRatio ??
+      (typeof globalThis.window === "undefined" ? 1 : globalThis.window.devicePixelRatio || 1);
     const resolved: ResolvedOptions = {
       container: options.container,
       width: options.width ?? (containerWidth > 0 ? containerWidth : 800),
       height: options.height ?? (containerHeight > 0 ? containerHeight : 400),
       autoResize: options.autoResize ?? true,
-      devicePixelRatio:
-        options.devicePixelRatio ??
-        (typeof globalThis.window === "undefined" ? 1 : globalThis.window.devicePixelRatio || 1),
+      devicePixelRatio: resolveDpr(rawDpr),
       theme,
       logger,
       timeAxis: options.timeAxis,
@@ -226,6 +294,7 @@ export class TimeSeriesChart {
       priceAxisDrag: options.priceAxisDrag,
       priceFormatter: options.priceFormatter ?? defaultPriceFormatter,
       data: options.data,
+      dprListenerHooks: options.dprListenerHooks,
     };
 
     const renderer = await Renderer.create({
@@ -252,6 +321,8 @@ export class TimeSeriesChart {
       chart.resizeObserver = new ResizeObserver(() => { chart.onAutoResize(); });
       chart.resizeObserver.observe(resolved.container);
     }
+
+    chart.armDprListener();
 
     chart.invalidator.invalidate("layout");
     chart.invalidator.invalidate("theme");
@@ -448,26 +519,70 @@ export class TimeSeriesChart {
   }
 
   /**
-   * Phase 09 internal — entered automatically when the viewport's long-press
-   * timer fires. The public `enterTrackingMode` API is deferred to Cycle B.
-   * Idempotent.
+   * Phase 09 cycle B — convert plot-local pixels into a `(time, price)`
+   * data anchor by reading the current `TimeScale` / `PriceScale`. Returns
+   * `null` if the chart has no drawable plot (degenerate window or 0×0
+   * rect). Used by the long-press path and `onTrackingMove`.
    */
-  private enterTrackingInternal(localX: number, localY: number): void {
+  private dataAnchorAtLocalPixel(localX: number, localY: number): { time: Time; price: Price } | null {
+    const plot = this.computePlotRect();
+    if (plot.w <= 0 || plot.h <= 0) {
+      return null;
+    }
+    const timeScale = this.currentTimeScaleForRect(plot);
+    const priceScale = this.currentPriceScaleForRect(plot);
+    const time = timeScale.pixelToTime(asPixel(localX));
+    const price = priceScale.pixelToValue(asPixel(localY));
+    return { time, price };
+  }
+
+  /**
+   * Phase 09 cycle B — re-project the stored tracking anchor to plot
+   * coordinates using the current scales, and push the result into the
+   * crosshair. Called at the start of every flush while tracking is active
+   * so the persistent crosshair stays glued to the data point through pan,
+   * zoom, pinch, resize, theme change, and DPR transitions. Out-of-window
+   * anchors are clamped by `CrosshairController.drawActive` to plot bounds.
+   */
+  private reprojectTrackingAnchor(): void {
+    if (!this.trackingActive || this.trackingAnchor === null) {
+      return;
+    }
+    const plot = this.computePlotRect();
+    if (plot.w <= 0 || plot.h <= 0) {
+      return;
+    }
+    const timeScale = this.currentTimeScaleForRect(plot);
+    const priceScale = this.currentPriceScaleForRect(plot);
+    const localX = Number(timeScale.timeToPixel(this.trackingAnchor.time));
+    const localY = Number(priceScale.valueToPixel(this.trackingAnchor.price));
+    const safeX = Number.isFinite(localX) ? localX : plot.w / 2;
+    const safeY = Number.isFinite(localY) ? localY : plot.h / 2;
+    this.crosshair.setTrackingMove(plot.x + safeX, plot.y + safeY);
+  }
+
+  /**
+   * Phase 09 internal — entered automatically when the viewport's long-press
+   * timer fires (anchor derived from the touch position) OR by the public
+   * `enterTrackingMode` API (anchor from `{time, price}` or plot centroid).
+   * Idempotent: re-entering already-tracking state re-anchors the crosshair
+   * but does NOT emit a second `tracking:change` event.
+   */
+  private enterTrackingInternal(anchor: { time: Time; price: Price }): void {
     if (this.disposed) {
       return;
     }
     if (this.trackingActive) {
-      // Re-arm position only — long-press fired again is a no-op for state
-      // but still updates where the crosshair sits.
-      const plot = this.computePlotRect();
-      this.crosshair.setTrackingMove(plot.x + localX, plot.y + localY);
+      // Re-anchor only — no event on idempotent calls.
+      this.trackingAnchor = anchor;
+      this.reprojectTrackingAnchor();
       this.invalidator.invalidate("crosshair");
       return;
     }
     this.trackingActive = true;
+    this.trackingAnchor = anchor;
     this.viewport.setTrackingMode(true);
-    const plot = this.computePlotRect();
-    this.crosshair.setTrackingMove(plot.x + localX, plot.y + localY);
+    this.reprojectTrackingAnchor();
     if (typeof globalThis.document !== "undefined") {
       this.documentPointerDownHandler = (e: PointerEvent): void => {
         const canvas = this.renderer.app.canvas;
@@ -486,19 +601,24 @@ export class TimeSeriesChart {
         { capture: true },
       );
     }
+    // Emit synchronously *before* the invalidation: by the time the next
+    // flush emits `crosshair:move`, hosts already know we're in tracking.
+    const enterPayload: TrackingChange = Object.freeze({ active: true });
+    this.emitter.emit("tracking:change", enterPayload);
     this.invalidator.invalidate("crosshair");
   }
 
   /**
    * Phase 09 internal exit. Hides the crosshair, drops the document-level
    * pointerdown listener, and tells the viewport to resume normal pan
-   * routing. Idempotent.
+   * routing. Idempotent — calls when not tracking are silent no-ops.
    */
   private exitTrackingInternal(): void {
     if (this.disposed || !this.trackingActive) {
       return;
     }
     this.trackingActive = false;
+    this.trackingAnchor = null;
     this.viewport.setTrackingMode(false);
     this.crosshair.hide();
     if (
@@ -512,7 +632,128 @@ export class TimeSeriesChart {
       );
     }
     this.documentPointerDownHandler = null;
+    const exitPayload: TrackingChange = Object.freeze({ active: false });
+    this.emitter.emit("tracking:change", exitPayload);
     this.invalidator.invalidate("crosshair");
+  }
+
+  /**
+   * Phase 09 cycle B — programmatic entry into tracking mode. `time` /
+   * `price` default to the plot rectangle's centroid (mid-window time, mid-
+   * domain price). Non-finite or out-of-window values fall back to the
+   * centroid default with a `logger.warn`. Rejects with a warn if a
+   * multi-pointer gesture (pinch / two-finger pan) is currently in flight.
+   * Re-entering already-tracking state re-positions the crosshair without
+   * emitting a second `tracking:change` event.
+   */
+  enterTrackingMode(opts?: TrackingModeOptions): void {
+    if (this.disposed) {
+      return;
+    }
+    if (this.viewport.activePointerCount() >= 2) {
+      this.opts.logger.warn(
+        "[carta] enterTrackingMode rejected — a multi-pointer gesture is in flight",
+      );
+      return;
+    }
+    const plot = this.computePlotRect();
+    if (plot.w <= 0 || plot.h <= 0) {
+      // No drawable plot — nothing to point at. Stay idle.
+      return;
+    }
+    const timeScale = this.currentTimeScaleForRect(plot);
+    const priceScale = this.currentPriceScaleForRect(plot);
+    const centroidTime = timeScale.pixelToTime(asPixel(plot.w / 2));
+    const centroidPrice = priceScale.pixelToValue(asPixel(plot.h / 2));
+
+    let time: Time = centroidTime;
+    if (opts?.time !== undefined) {
+      const rawTime = Number(opts.time);
+      if (!Number.isFinite(rawTime)) {
+        this.opts.logger.warn(
+          `[carta] enterTrackingMode received non-finite time (${String(opts.time)}) — falling back to plot centroid`,
+        );
+      } else {
+        time = asTime(rawTime);
+      }
+    }
+
+    let price: Price = centroidPrice;
+    if (opts?.price !== undefined) {
+      const rawPrice = Number(opts.price);
+      if (!Number.isFinite(rawPrice)) {
+        this.opts.logger.warn(
+          `[carta] enterTrackingMode received non-finite price (${String(opts.price)}) — falling back to plot vertical centroid`,
+        );
+      } else {
+        price = asPrice(rawPrice);
+      }
+    }
+
+    this.enterTrackingInternal({ time, price });
+  }
+
+  /**
+   * Phase 09 cycle B — programmatic exit from tracking mode. Idempotent
+   * (no-op + no event when not currently tracking). Equivalent to a tap
+   * outside the canvas.
+   */
+  exitTrackingMode(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.exitTrackingInternal();
+  }
+
+  /** Phase 09 cycle B — whether tracking mode is currently active. */
+  isTrackingMode(): boolean {
+    return this.trackingActive;
+  }
+
+  /**
+   * Phase 09 cycle B — arm a `matchMedia('(resolution: ${dpr}dppx)')`
+   * one-shot listener. When the system DPR changes (browser zoom, monitor
+   * drag) the listener fires `onDprChange` and immediately re-arms with the
+   * new resolution. Idempotent: `armDprListener` while a listener is already
+   * active is a no-op.
+   */
+  private armDprListener(): void {
+    if (this.disposed || this.mediaMatcher === null) {
+      return;
+    }
+    if (this.dprMediaQuery !== null) {
+      return;
+    }
+    const dprForQuery = this.currentResolution;
+    const mq = this.mediaMatcher(`(resolution: ${String(dprForQuery)}dppx)`);
+    const listener = (_e: MediaQueryListEvent): void => {
+      this.onDprChange();
+    };
+    mq.addEventListener("change", listener, { once: true });
+    this.dprMediaQuery = mq;
+    this.dprMediaListener = listener;
+  }
+
+  private disarmDprListener(): void {
+    if (this.dprMediaQuery !== null && this.dprMediaListener !== null) {
+      this.dprMediaQuery.removeEventListener("change", this.dprMediaListener);
+    }
+    this.dprMediaQuery = null;
+    this.dprMediaListener = null;
+  }
+
+  private onDprChange(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.disarmDprListener();
+    const nextDpr = resolveDpr(this.dprProbe());
+    if (nextDpr !== this.currentResolution) {
+      this.currentResolution = nextDpr;
+      this.renderer.setResolution(nextDpr);
+      this.invalidator.invalidate("size");
+    }
+    this.armDprListener();
   }
 
   /** Dev/test hook: whether the kinetic-scroll RAF is currently running. */
@@ -729,11 +970,16 @@ export class TimeSeriesChart {
     readonly crosshair: {
       readonly emitCount: number;
       readonly bgRedrawCount: number;
+      readonly atlasSeedCount: number;
       readonly isVisible: boolean;
     };
     readonly tracking: {
       readonly active: boolean;
       readonly viewportTracking: boolean;
+    };
+    readonly dpr: {
+      readonly resolution: number;
+      readonly listenerArmed: boolean;
     };
   } {
     return {
@@ -741,11 +987,16 @@ export class TimeSeriesChart {
       crosshair: {
         emitCount: this.crosshair.getEmitCount(),
         bgRedrawCount: this.crosshair.getBgRedrawCount(),
+        atlasSeedCount: this.crosshair.getAtlasSeedCount(),
         isVisible: this.crosshair.isVisible(),
       },
       tracking: {
         active: this.trackingActive,
         viewportTracking: this.viewport.isTrackingMode(),
+      },
+      dpr: {
+        resolution: this.currentResolution,
+        listenerArmed: this.dprMediaQuery !== null,
       },
     };
   }
@@ -770,6 +1021,8 @@ export class TimeSeriesChart {
     }
     this.documentPointerDownHandler = null;
     this.trackingActive = false;
+    this.trackingAnchor = null;
+    this.disarmDprListener();
     this.crosshair.destroy();
     this.priceAxisController.destroy();
     this.viewport.destroy();
@@ -816,6 +1069,19 @@ export class TimeSeriesChart {
       return;
     }
 
+    // Phase 09 cycle B — when tracking is active, every full-path flush
+    // (window/size/layout/data change) must re-project the stored data
+    // anchor through the new scales BEFORE the crosshair redraws. Without
+    // this, a pinch / pan / DPR change would leave the crosshair pinned to
+    // its old pixel even though the bar underneath moved.
+    if (
+      this.trackingActive &&
+      this.trackingAnchor !== null &&
+      (reasons.has("viewport") || reasons.has("size") || reasons.has("layout") || reasons.has("data"))
+    ) {
+      this.reprojectTrackingAnchor();
+    }
+
     const plotRect = this.computePlotRect();
     this.renderer.layout(plotRect);
     this.renderer.renderFrame(
@@ -854,10 +1120,19 @@ export class TimeSeriesChart {
       this.priceFormatter,
       this.opts.logger,
     );
-    // Keep the crosshair in sync with whatever scales / data just changed —
-    // without this branch, a pan drag would leave the hair pointing at the
-    // bar that was under the cursor *before* the drag.
-    if (reasons.has("crosshair") || reasons.has("viewport") || reasons.has("data") || reasons.has("layout") || reasons.has("size")) {
+    // Keep the crosshair in sync with whatever scales / data / theme just
+    // changed — without this branch, a pan drag would leave the hair pointing
+    // at the bar under the cursor *before* the drag, and a theme swap while
+    // the crosshair is visible would strand stale colours until the next
+    // pointer move.
+    if (
+      reasons.has("crosshair") ||
+      reasons.has("viewport") ||
+      reasons.has("data") ||
+      reasons.has("layout") ||
+      reasons.has("size") ||
+      reasons.has("theme")
+    ) {
       const snap = this.config.snapshot;
       this.crosshair.redraw({
         plotRect,

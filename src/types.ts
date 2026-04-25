@@ -148,6 +148,32 @@ export interface SizeInfo {
 }
 
 /**
+ * Payload of `tracking:change`. Fires only on actual transitions:
+ * `false → true` when tracking mode is entered (long-press OR
+ * `enterTrackingMode()`), and `true → false` when exited (tap-outside,
+ * `exitTrackingMode()`). Idempotent calls do NOT emit. `destroy()` does NOT
+ * emit a final `false`.
+ *
+ * Ordering relative to `crosshair:move`: `tracking:change` is emitted
+ * synchronously *before* the crosshair invalidation, so the next
+ * `crosshair:move` payload reflects the new state.
+ */
+export interface TrackingChange {
+  readonly active: boolean;
+}
+
+/**
+ * Argument to `chart.enterTrackingMode(opts?)`. All fields optional —
+ * omitted coordinates default to the plot rectangle's centroid (computed
+ * from the current `TimeScale` / `PriceScale`). Non-finite values are
+ * warned and replaced with the centroid default.
+ */
+export interface TrackingModeOptions {
+  readonly time?: Time;
+  readonly price?: Price;
+}
+
+/**
  * Event map for `chart.on` / `off` / `once`. Keys are stable string literals,
  * payload types propagate so handlers get full TS inference.
  */
@@ -156,6 +182,7 @@ export interface CartaEventMap extends Record<string, unknown> {
   readonly "interval:change": IntervalChange;
   readonly "data:request": DataRequest;
   readonly "crosshair:move": CrosshairInfo;
+  readonly "tracking:change": TrackingChange;
   readonly resize: SizeInfo;
 }
 
@@ -164,12 +191,30 @@ export type EventPayload<K extends EventKey> = CartaEventMap[K];
 export type CartaEventHandler<K extends EventKey> = (payload: EventPayload<K>) => void;
 
 // ─── Theme ─────────────────────────────────────────────────────────────────
+/**
+ * Visual constants consumed by every renderer + series. Hosts override at
+ * construction (`TimeSeriesChartOptions.theme`) or at runtime via
+ * `chart.applyOptions({ theme })` — both shallow-merge against the active
+ * theme. Per-series colour options (e.g. `CandlestickSeriesOptions.upColor`)
+ * always win over a theme value.
+ *
+ * Concrete presets ship in `src/core/themes.ts` as `DarkTheme` (the default)
+ * and `LightTheme`. The interface stays flat: discoverability via doc-comment
+ * grouping below, no nested sections that complicate `Partial<Theme>` merges.
+ */
 export interface Theme {
+  // ─── Surface ─────────────────────────────────────────────────
   readonly background: number;
   readonly grid: number;
+  /** Multiplier applied to grid stroke alpha. `1.0` for dark, `0.6` for light. */
+  readonly gridAlpha: number;
   readonly frame: number;
+
+  // ─── Text ────────────────────────────────────────────────────
   readonly text: number;
   readonly textMuted: number;
+
+  // ─── Series defaults ─────────────────────────────────────────
   readonly up: number;
   readonly down: number;
   readonly line: number;
@@ -181,32 +226,21 @@ export interface Theme {
   readonly baselinePositiveBottom: number;
   readonly baselineNegativeTop: number;
   readonly baselineNegativeBottom: number;
+
+  // ─── Crosshair ───────────────────────────────────────────────
   readonly crosshairLine: number;
   readonly crosshairTagBg: number;
   readonly crosshairTagText: number;
-}
 
-export const DEFAULT_THEME: Theme = {
-  background: 0x0e1116,
-  grid: 0x1f2630,
-  frame: 0x2d333b,
-  text: 0xc9d1d9,
-  textMuted: 0x8b949e,
-  up: 0x26a69a,
-  down: 0xef5350,
-  line: 0x58a6ff,
-  areaTop: 0x58a6ff,
-  areaBottom: 0x58a6ff,
-  histogramUp: 0x26a69a,
-  histogramDown: 0xef5350,
-  baselinePositiveTop: 0x26a69a,
-  baselinePositiveBottom: 0x26a69a,
-  baselineNegativeTop: 0xef5350,
-  baselineNegativeBottom: 0xef5350,
-  crosshairLine: 0x8b949e,
-  crosshairTagBg: 0x1f2630,
-  crosshairTagText: 0xc9d1d9,
-};
+  // ─── Typography ──────────────────────────────────────────────
+  /**
+   * CSS font-family stack used for axis labels, crosshair tags, and marker
+   * labels. A theme swap re-rasterizes every visible label on the next flush.
+   */
+  readonly fontFamily: string;
+  /** Base font size in CSS px, applied uniformly to axes / crosshair / markers. */
+  readonly fontSize: number;
+}
 
 // ─── Logger ────────────────────────────────────────────────────────────────
 export interface Logger {

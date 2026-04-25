@@ -7,15 +7,35 @@
     <style>
       :root {
         color-scheme: dark;
+        --bg: #0e1116;
+        --fg: #c9d1d9;
+        --muted: #8b949e;
+        --border: #1f2630;
+        --button-bg: #1f2630;
+        --button-border: #2d333b;
+        --button-bg-hover: #2d333b;
+        --panel-bg: #0b0f15;
+      }
+      [data-theme="light"] {
+        color-scheme: light;
+        --bg: #ffffff;
+        --fg: #24292f;
+        --muted: #57606a;
+        --border: #d0d7de;
+        --button-bg: #f6f8fa;
+        --button-border: #d0d7de;
+        --button-bg-hover: #eaeef2;
+        --panel-bg: #f6f8fa;
       }
       html,
       body {
         margin: 0;
         padding: 0;
         height: 100%;
-        background: #0e1116;
-        color: #c9d1d9;
+        background: var(--bg);
+        color: var(--fg);
         font-family: system-ui, sans-serif;
+        transition: background-color 120ms linear, color 120ms linear;
       }
       #app {
         display: grid;
@@ -24,7 +44,7 @@
       }
       header {
         padding: 12px 16px;
-        border-bottom: 1px solid #1f2630;
+        border-bottom: 1px solid var(--border);
         display: flex;
         flex-wrap: wrap;
         gap: 8px 12px;
@@ -38,28 +58,29 @@
         text-transform: uppercase;
       }
       header button {
-        background: #1f2630;
-        color: #c9d1d9;
-        border: 1px solid #2d333b;
+        background: var(--button-bg);
+        color: var(--fg);
+        border: 1px solid var(--button-border);
         border-radius: 4px;
-        padding: 4px 10px;
+        padding: 6px 10px;
         font-size: 12px;
+        min-height: 44px;
         cursor: pointer;
       }
       header button:hover {
-        background: #2d333b;
+        background: var(--button-bg-hover);
       }
       #readout {
         margin-left: auto;
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
         font-size: 12px;
-        color: #8b949e;
+        color: var(--muted);
         display: flex;
         flex-wrap: wrap;
         gap: 6px 14px;
       }
       #readout span b {
-        color: #c9d1d9;
+        color: var(--fg);
         font-weight: 500;
       }
       #app > *:nth-child(2) {
@@ -77,9 +98,9 @@
         min-height: 0;
       }
       #crosshair-panel {
-        border-left: 1px solid #1f2630;
-        background: #0b0f15;
-        color: #c9d1d9;
+        border-left: 1px solid var(--border);
+        background: var(--panel-bg);
+        color: var(--fg);
         padding: 12px 14px;
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
         font-size: 12px;
@@ -92,7 +113,7 @@
         font-weight: 600;
         letter-spacing: 0.08em;
         text-transform: uppercase;
-        color: #8b949e;
+        color: var(--muted);
       }
       #crosshair-panel dl {
         margin: 0 0 12px 0;
@@ -102,18 +123,19 @@
         column-gap: 10px;
       }
       #crosshair-panel dt {
-        color: #8b949e;
+        color: var(--muted);
       }
       #crosshair-panel dd {
         margin: 0;
-        color: #c9d1d9;
+        color: var(--fg);
         text-align: right;
       }
       #crosshair-panel[data-active="false"] dd {
-        color: #586069;
+        color: var(--muted);
+        opacity: 0.6;
       }
       #crosshair-panel .series-row {
-        border-top: 1px solid #1f2630;
+        border-top: 1px solid var(--border);
         padding-top: 8px;
         margin-top: 8px;
       }
@@ -125,11 +147,11 @@
         border: none;
       }
       #crosshair-panel .series-row .series-name {
-        color: #c9d1d9;
+        color: var(--fg);
         font-weight: 500;
       }
       #crosshair-panel .series-row .series-kind {
-        color: #8b949e;
+        color: var(--muted);
         font-size: 10px;
         text-transform: uppercase;
         letter-spacing: 0.06em;
@@ -142,14 +164,15 @@
         margin-top: 4px;
       }
       #crosshair-panel .series-row .series-values span.label {
-        color: #8b949e;
+        color: var(--muted);
       }
       #crosshair-panel .series-row .series-values span.value {
-        color: #c9d1d9;
+        color: var(--fg);
         text-align: right;
       }
       #crosshair-panel[data-active="false"] .series-row .series-values span.value {
-        color: #586069;
+        color: var(--muted);
+        opacity: 0.6;
       }
       @media (max-width: 700px) {
         #stage {
@@ -158,7 +181,7 @@
         }
         #crosshair-panel {
           border-left: none;
-          border-top: 1px solid #1f2630;
+          border-top: 1px solid var(--border);
           max-height: 40%;
         }
       }
@@ -175,9 +198,10 @@
         <button id="clear-cache">Clear cache</button>
         <button id="auto-supply" aria-pressed="false">Auto-supply: OFF</button>
         <button id="toggle-markers" aria-pressed="false">Markers: OFF</button>
-        <label for="line-style" style="font-size: 12px; color: #8b949e;">
+        <button id="toggle-theme" aria-pressed="false">Theme: Dark</button>
+        <label for="line-style" style="font-size: 12px; color: var(--muted);">
           SMA
-          <select id="line-style" style="background:#1f2630;color:#c9d1d9;border:1px solid #2d333b;border-radius:4px;padding:3px 6px;font-size:12px;margin-left:4px;">
+          <select id="line-style" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:3px 6px;font-size:12px;margin-left:4px;">
             <option value="solid-simple">Solid</option>
             <option value="dashed-simple">Dashed</option>
             <option value="dotted-simple">Dotted</option>
@@ -185,9 +209,9 @@
             <option value="dashed-stepped">Dashed stepped</option>
           </select>
         </label>
-        <label for="primary-series-type" style="font-size: 12px; color: #8b949e;">
+        <label for="primary-series-type" style="font-size: 12px; color: var(--muted);">
           Primary
-          <select id="primary-series-type" style="background:#1f2630;color:#c9d1d9;border:1px solid #2d333b;border-radius:4px;padding:3px 6px;font-size:12px;margin-left:4px;">
+          <select id="primary-series-type" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:3px 6px;font-size:12px;margin-left:4px;">
             <option value="candle">Candles</option>
             <option value="ohlc-bar">OHLC bars</option>
             <option value="heikin-ashi">Heikin-Ashi</option>

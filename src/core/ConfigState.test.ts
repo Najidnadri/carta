@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ConfigState, type ConfigStateSnapshot } from "./ConfigState.js";
-import { asInterval, asTime, DEFAULT_THEME } from "../types.js";
+import { asInterval, asTime } from "../types.js";
+import { DarkTheme } from "./themes.js";
 
 const baseSnapshot = (): ConfigStateSnapshot => ({
   startTime: asTime(0),
@@ -8,7 +9,7 @@ const baseSnapshot = (): ConfigStateSnapshot => ({
   intervalDuration: asInterval(1_000),
   width: 800,
   height: 400,
-  theme: DEFAULT_THEME,
+  theme: DarkTheme,
 });
 
 describe("ConfigState", () => {
@@ -36,7 +37,7 @@ describe("ConfigState", () => {
     const next = cfg.withInterval(asInterval(5_000));
     expect(next.snapshot.intervalDuration).toBe(5_000);
     expect(next.snapshot.width).toBe(800);
-    expect(next.snapshot.theme).toBe(DEFAULT_THEME);
+    expect(next.snapshot.theme).toBe(DarkTheme);
   });
 
   it("withInterval returns same instance when unchanged", () => {
@@ -57,8 +58,8 @@ describe("ConfigState", () => {
 
   it("withTheme uses identity comparison", () => {
     const cfg = new ConfigState(baseSnapshot());
-    expect(cfg.withTheme(DEFAULT_THEME)).toBe(cfg);
-    const newTheme = { ...DEFAULT_THEME };
+    expect(cfg.withTheme(DarkTheme)).toBe(cfg);
+    const newTheme = { ...DarkTheme };
     const next = cfg.withTheme(newTheme);
     expect(next).not.toBe(cfg);
     expect(next.snapshot.theme).toBe(newTheme);

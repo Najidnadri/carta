@@ -26,8 +26,6 @@ export interface PriceTickInfo {
 
 const DEFAULT_MIN_LABEL_PX = 80;
 const DEFAULT_LABEL_PADDING_X = 6;
-const DEFAULT_FONT_SIZE = 11;
-const DEFAULT_FONT_FAMILY = "system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif";
 const POOL_FLOOR = 32;
 
 export const defaultPriceFormatter: PriceFormatter = (v) => v.toFixed(2);
@@ -43,28 +41,35 @@ interface LabelSlot {
  * `TimeAxis`: allocated once, never shrinks; extras hidden via
  * `visible = false`. Clears grid and hides labels when the scale is invalid
  * or the plot rect collapses.
+ *
+ * Phase 10: `fontFamily` / `fontSize` come from the theme at render time when
+ * the constructor didn't supply explicit overrides; theme changes update every
+ * pooled label's style in place on the next render.
  */
 export class PriceAxis {
   private readonly gridLayer: Container;
   private readonly axesLayer: Container;
-  private readonly options: Required<PriceAxisOptions>;
+  private readonly minLabelPx: number;
+  private readonly labelPaddingX: number;
+  private readonly fontFamilyOverride: string | undefined;
+  private readonly fontSizeOverride: number | undefined;
 
   private readonly grid = new Graphics();
   private readonly labelPool: LabelSlot[] = [];
   private poolAllocated = false;
   private destroyed = false;
+  private lastFontFamily = "";
+  private lastFontSize = 0;
 
   private lastTicks: readonly PriceTickInfo[] = [];
 
   constructor(gridLayer: Container, axesLayer: Container, options: PriceAxisOptions = {}) {
     this.gridLayer = gridLayer;
     this.axesLayer = axesLayer;
-    this.options = {
-      minLabelPx: options.minLabelPx ?? DEFAULT_MIN_LABEL_PX,
-      labelPaddingX: options.labelPaddingX ?? DEFAULT_LABEL_PADDING_X,
-      fontSize: options.fontSize ?? DEFAULT_FONT_SIZE,
-      fontFamily: options.fontFamily ?? DEFAULT_FONT_FAMILY,
-    };
+    this.minLabelPx = options.minLabelPx ?? DEFAULT_MIN_LABEL_PX;
+    this.labelPaddingX = options.labelPaddingX ?? DEFAULT_LABEL_PADDING_X;
+    this.fontFamilyOverride = options.fontFamily;
+    this.fontSizeOverride = options.fontSize;
     this.gridLayer.addChild(this.grid);
   }
 
@@ -83,7 +88,10 @@ export class PriceAxis {
     if (this.destroyed) {
       return;
     }
-    this.ensurePool(plotRect.h);
+    const effectiveFontFamily = this.fontFamilyOverride ?? theme.fontFamily;
+    const effectiveFontSize = this.fontSizeOverride ?? theme.fontSize;
+    this.ensurePool(plotRect.h, effectiveFontFamily, effectiveFontSize);
+    this.applyFontIfChanged(effectiveFontFamily, effectiveFontSize);
     this.grid.clear();
 
     if (!scale.valid || plotRect.w <= 0 || plotRect.h <= 0 || scale.pixelHeight <= 0) {
@@ -124,18 +132,18 @@ export class PriceAxis {
 
   // ─── Private ──────────────────────────────────────────────────────────────
 
-  private ensurePool(currentHeight: number): void {
+  private ensurePool(currentHeight: number, fontFamily: string, fontSize: number): void {
     if (this.poolAllocated) {
       return;
     }
     this.poolAllocated = true;
     const desired = Math.max(
       POOL_FLOOR,
-      Math.ceil(Math.max(0, currentHeight) / this.options.minLabelPx) + 4,
+      Math.ceil(Math.max(0, currentHeight) / this.minLabelPx) + 4,
     );
     const style: TextStyleOptions = {
-      fontFamily: this.options.fontFamily,
-      fontSize: this.options.fontSize,
+      fontFamily,
+      fontSize,
       fill: 0xffffff,
     };
     for (let i = 0; i < desired; i++) {
@@ -145,6 +153,24 @@ export class PriceAxis {
       this.axesLayer.addChild(text);
       this.labelPool.push({ text, lastValue: "" });
     }
+    this.lastFontFamily = fontFamily;
+    this.lastFontSize = fontSize;
+  }
+
+  /**
+   * Phase 10 — when the theme's fontFamily / fontSize change, mutate every
+   * pooled label's style in place. Pixi v8 re-rasterizes on the next render.
+   */
+  private applyFontIfChanged(fontFamily: string, fontSize: number): void {
+    if (fontFamily === this.lastFontFamily && fontSize === this.lastFontSize) {
+      return;
+    }
+    for (const slot of this.labelPool) {
+      slot.text.style.fontFamily = fontFamily;
+      slot.text.style.fontSize = fontSize;
+    }
+    this.lastFontFamily = fontFamily;
+    this.lastFontSize = fontSize;
   }
 
   private hideAllLabels(): void {
@@ -161,7 +187,7 @@ export class PriceAxis {
     formatter: PriceFormatter,
     logger: Logger | undefined,
   ): readonly PriceTickInfo[] {
-    const target = targetTickCountForHeight(plotRect.h, this.options.minLabelPx);
+    const target = targetTickCountForHeight(plotRect.h, this.minLabelPx);
     const values = generatePriceTicks(scale.effectiveMin, scale.effectiveMax, target);
 
     let activeFormatter = formatter;
@@ -212,7 +238,7 @@ export class PriceAxis {
     this.grid.stroke({
       width: 1,
       color: theme.grid,
-      alpha: 1,
+      alpha: theme.gridAlpha,
       pixelLine: true,
     });
   }
@@ -222,7 +248,7 @@ export class PriceAxis {
     plotRect: PlotRect,
     theme: Theme,
   ): void {
-    const labelX = plotRect.x + plotRect.w + this.options.labelPaddingX;
+    const labelX = plotRect.x + plotRect.w + this.labelPaddingX;
     const pool = this.labelPool;
     const count = Math.min(ticks.length, pool.length);
 

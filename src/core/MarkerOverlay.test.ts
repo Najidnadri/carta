@@ -5,10 +5,10 @@ import { DataStore } from "./DataStore.js";
 import {
   asPrice,
   asTime,
-  DEFAULT_THEME,
   type MarkerRecord,
   type OhlcRecord,
 } from "../types.js";
+import { DarkTheme } from "./themes.js";
 import type { SeriesRenderContext } from "./Series.js";
 
 const IV = 60_000;
@@ -22,13 +22,25 @@ vi.mock("pixi.js", async () => {
   const actual = await vi.importActual<typeof PixiNS>("pixi.js");
   class FakeBitmapText extends actual.Container {
     text = "";
+    style: { fontFamily: string; fontSize: number; fill: number } = {
+      fontFamily: "Arial",
+      fontSize: 11,
+      fill: 0xffffff,
+    };
     anchor = {
       set: (_x: number, _y: number): void => {
         // Intentional no-op — tests don't assert on anchor math.
       },
     };
-    constructor(..._args: unknown[]) {
+    constructor(opts?: { style?: { fontFamily?: string; fontSize?: number; fill?: number } }) {
       super();
+      if (opts?.style !== undefined) {
+        this.style = {
+          fontFamily: opts.style.fontFamily ?? "Arial",
+          fontSize: opts.style.fontSize ?? 11,
+          fill: opts.style.fill ?? 0xffffff,
+        };
+      }
     }
   }
   return { ...actual, BitmapText: FakeBitmapText };
@@ -78,7 +90,7 @@ function buildCtx(store: DataStore, opts?: { startTime?: number; endTime?: numbe
     timeScale: timeScale as unknown as SeriesRenderContext["timeScale"],
     priceScale: priceScale as unknown as SeriesRenderContext["priceScale"],
     dataStore: store,
-    theme: DEFAULT_THEME,
+    theme: DarkTheme,
   } as unknown as SeriesRenderContext;
 }
 

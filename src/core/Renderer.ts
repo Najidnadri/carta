@@ -92,11 +92,39 @@ export class Renderer {
       autoStart: false,
       sharedTicker: false,
     });
-    app.canvas.style.display = "block";
-    app.canvas.style.width = "100%";
-    app.canvas.style.height = "100%";
+    const canvasStyle = app.canvas.style;
+    canvasStyle.display = "block";
+    canvasStyle.width = "100%";
+    canvasStyle.height = "100%";
+    canvasStyle.touchAction = "none";
+    canvasStyle.userSelect = "none";
+    // Vendor-prefixed properties (-webkit-user-select for iOS Safari,
+    // -webkit-tap-highlight-color for tap-flash suppression) routed via
+    // `setProperty` to dodge the deprecation hints + stay zero-`any`.
+    canvasStyle.setProperty("-webkit-user-select", "none");
+    canvasStyle.setProperty("-webkit-tap-highlight-color", "transparent");
+    // `overscroll-behavior` only takes effect on scroll containers — a
+    // <canvas> is not one, so apply it to the host's container element.
+    options.container.style.overscrollBehavior = "contain";
     options.container.appendChild(app.canvas);
     return new Renderer(app);
+  }
+
+  /**
+   * Update the renderer's resolution (DPR) and resize. Used by the chart's
+   * DPR-change listener so a window dragged across monitors with different
+   * scaling stays sharp. Caller is responsible for invalidating the dirty
+   * queue afterwards — `setResolution` does NOT call `render()`.
+   */
+  setResolution(dpr: number): void {
+    if (this.destroyed) {
+      return;
+    }
+    if (!Number.isFinite(dpr) || dpr <= 0) {
+      return;
+    }
+    this.app.renderer.resolution = dpr;
+    this.app.renderer.resize(this.app.renderer.width / dpr, this.app.renderer.height / dpr);
   }
 
   /** Applies a new plot rect: moves & resizes the clip mask. */

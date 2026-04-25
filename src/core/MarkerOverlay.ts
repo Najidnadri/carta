@@ -18,8 +18,9 @@ import {
 } from "../types.js";
 
 const DEFAULT_SIZE_PX = 12;
-const DEFAULT_FONT_FAMILY = "Arial";
-const DEFAULT_FONT_SIZE_PX = 11;
+/** Bootstrap font used until the first render threads a theme through. */
+const BOOTSTRAP_FONT_FAMILY = "Arial";
+const BOOTSTRAP_FONT_SIZE_PX = 11;
 const TEXT_GAP_PX = 2;
 
 function isMarkerRecord(r: DataRecord): r is MarkerRecord {
@@ -96,6 +97,8 @@ export class MarkerOverlay extends Series {
   private readonly free: PooledMarker[] = [];
   private readonly inUse: PooledMarker[] = [];
   private lastSkipCount = 0;
+  private lastFontFamily = BOOTSTRAP_FONT_FAMILY;
+  private lastFontSize = BOOTSTRAP_FONT_SIZE_PX;
   private destroyed = false;
 
   constructor(options: MarkerOverlayOptions) {
@@ -110,6 +113,13 @@ export class MarkerOverlay extends Series {
   }
 
   render(ctx: SeriesRenderContext): void {
+    // Phase 10 — propagate theme typography to the BitmapText pool. Constructor
+    // option `textFontFamily` / `textFontSize` (when set) wins over the theme
+    // for parity with the v1 series-options precedence contract.
+    const effectiveFontFamily = this.opts.textFontFamily ?? ctx.theme.fontFamily;
+    const effectiveFontSize = this.opts.textFontSize ?? ctx.theme.fontSize;
+    this.applyFontIfChanged(effectiveFontFamily, effectiveFontSize);
+
     this.releaseAll();
     const iv = Number(ctx.intervalDuration);
     if (!Number.isFinite(iv) || iv <= 0) {
@@ -229,8 +239,8 @@ export class MarkerOverlay extends Series {
     const text = new BitmapText({
       text: "",
       style: {
-        fontFamily: this.opts.textFontFamily ?? DEFAULT_FONT_FAMILY,
-        fontSize: this.opts.textFontSize ?? DEFAULT_FONT_SIZE_PX,
+        fontFamily: this.lastFontFamily,
+        fontSize: this.lastFontSize,
         fill: 0xffffff,
       },
     });
@@ -240,6 +250,27 @@ export class MarkerOverlay extends Series {
     const pooled: PooledMarker = { graphics, text };
     this.inUse.push(pooled);
     return pooled;
+  }
+
+  /**
+   * Phase 10 — when the theme's effective fontFamily / fontSize change, mutate
+   * every existing pooled label's style in place. New labels acquired after
+   * this point pick up the new font from `lastFontFamily` / `lastFontSize`.
+   */
+  private applyFontIfChanged(fontFamily: string, fontSize: number): void {
+    if (fontFamily === this.lastFontFamily && fontSize === this.lastFontSize) {
+      return;
+    }
+    for (const p of this.inUse) {
+      p.text.style.fontFamily = fontFamily;
+      p.text.style.fontSize = fontSize;
+    }
+    for (const p of this.free) {
+      p.text.style.fontFamily = fontFamily;
+      p.text.style.fontSize = fontSize;
+    }
+    this.lastFontFamily = fontFamily;
+    this.lastFontSize = fontSize;
   }
 
   private releaseAll(): void {

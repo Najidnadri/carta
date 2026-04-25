@@ -153,15 +153,34 @@ describe("ViewportController — setup", () => {
     controller.destroy();
   });
 
-  it("sets touchAction:none on the canvas", () => {
+  it("does not apply touch-action — Renderer.create owns the canvas CSS bundle", () => {
     const { canvas, controller } = makeDeps();
-    expect(canvas.style.touchAction).toBe("none");
+    expect(canvas.style.touchAction).toBe("");
     controller.destroy();
   });
 
   it("reports kinetic inactive initially", () => {
     const { controller } = makeDeps();
     expect(controller.isKineticActive()).toBe(false);
+    controller.destroy();
+  });
+
+  it("reports activePointerCount = 0 when no pointer is down", () => {
+    const { controller } = makeDeps();
+    expect(controller.activePointerCount()).toBe(0);
+    controller.destroy();
+  });
+
+  it("activePointerCount tracks the live pointer count", () => {
+    const { stage, controller } = makeDeps();
+    stage.emit("pointerdown", { pointerId: 1, pointerType: "touch", global: { x: 100, y: 100 } });
+    expect(controller.activePointerCount()).toBe(1);
+    stage.emit("pointerdown", { pointerId: 2, pointerType: "touch", global: { x: 200, y: 100 } });
+    expect(controller.activePointerCount()).toBe(2);
+    stage.emit("pointerup", { pointerId: 1, pointerType: "touch", global: { x: 100, y: 100 } });
+    expect(controller.activePointerCount()).toBe(1);
+    stage.emit("pointerup", { pointerId: 2, pointerType: "touch", global: { x: 200, y: 100 } });
+    expect(controller.activePointerCount()).toBe(0);
     controller.destroy();
   });
 });

@@ -11,11 +11,11 @@ import {
   asInterval,
   asPrice,
   asTime,
-  DEFAULT_THEME,
   type CartaEventMap,
   type CrosshairInfo,
   type OhlcRecord,
 } from "../types.js";
+import { DarkTheme } from "./themes.js";
 
 // Stub BitmapText — the real one needs a canvas jsdom doesn't provide.
 vi.mock("pixi.js", async () => {
@@ -23,11 +23,23 @@ vi.mock("pixi.js", async () => {
   class FakeBitmapText extends actual.Container {
     text = "";
     readonly __isFakeBitmapText = true;
+    style: { fontFamily: string; fontSize: number; fill: number } = {
+      fontFamily: "Arial",
+      fontSize: 11,
+      fill: 0xffffff,
+    };
     get width(): number { return this.text.length * 6; }
     // eslint-disable-next-line @typescript-eslint/class-literal-property-style
     get height(): number { return 11; }
-    constructor(..._args: unknown[]) {
+    constructor(opts?: { style?: { fontFamily?: string; fontSize?: number; fill?: number } }) {
       super();
+      if (opts?.style !== undefined) {
+        this.style = {
+          fontFamily: opts.style.fontFamily ?? "Arial",
+          fontSize: opts.style.fontSize ?? 11,
+          fill: opts.style.fill ?? 0xffffff,
+        };
+      }
     }
   }
   return { ...actual, BitmapText: FakeBitmapText };
@@ -160,7 +172,7 @@ async function setup(): Promise<{
       plotRect,
       timeScale,
       priceScale,
-      theme: DEFAULT_THEME,
+      theme: DarkTheme,
       dataStore,
       series,
       intervalDuration: MIN,

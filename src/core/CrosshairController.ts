@@ -29,8 +29,9 @@ import {
 const TAG_PADDING_X = 6;
 const TAG_PADDING_Y = 3;
 const TAG_CORNER_RADIUS = 3;
-const TAG_FONT_FAMILY = "Arial";
-const TAG_FONT_SIZE_PX = 11;
+/** Bootstrap font used until the first redraw threads a theme through. */
+const BOOTSTRAP_FONT_FAMILY = "Arial";
+const BOOTSTRAP_FONT_SIZE_PX = 11;
 /** A string wide enough to pre-seed the BitmapText atlas on construction. */
 const ATLAS_SEED = "0123456789-:., ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
@@ -76,6 +77,7 @@ interface Tag {
   lastText: string;
   lastWidth: number;
   lastHeight: number;
+  lastBgColor: number;
 }
 
 /**
@@ -105,6 +107,9 @@ export class CrosshairController {
   private pending: PendingState | null = null;
   private bgRedrawCount = 0;
   private emitCount = 0;
+  private atlasSeedCount = 0;
+  private lastFontFamily = BOOTSTRAP_FONT_FAMILY;
+  private lastFontSize = BOOTSTRAP_FONT_SIZE_PX;
   private disposed = false;
 
   constructor(deps: CrosshairControllerDeps) {
@@ -141,6 +146,10 @@ export class CrosshairController {
     if (this.disposed) {
       return;
     }
+    // Phase 10 — propagate the theme's typography to the BitmapText pool. A
+    // font change re-seeds the atlas so the first post-swap draw doesn't pay
+    // a one-shot glyph-generation hitch.
+    this.applyFontIfChanged(ctx.theme.fontFamily, ctx.theme.fontSize);
     const pending = this.pending;
     if (pending === null) {
       // Idle — no pointer interaction has occurred. Stay hidden; do not emit.
@@ -155,6 +164,38 @@ export class CrosshairController {
   }
 
   /**
+   * Phase 10 — when the theme's `fontFamily` / `fontSize` change, mutate both
+   * tag text styles in place and re-run the atlas seed against the new family
+   * so the first post-swap pointer move doesn't stall on glyph generation.
+   */
+  private applyFontIfChanged(fontFamily: string, fontSize: number): void {
+    if (fontFamily === this.lastFontFamily && fontSize === this.lastFontSize) {
+      return;
+    }
+    this.priceTag.text.style.fontFamily = fontFamily;
+    this.priceTag.text.style.fontSize = fontSize;
+    this.timeTag.text.style.fontFamily = fontFamily;
+    this.timeTag.text.style.fontSize = fontSize;
+    // Re-seed the atlas under the new style. Setting `.text` on a BitmapText
+    // with a new fontFamily forces Pixi v8 to lazily generate glyphs for the
+    // seeded characters; clearing back to "" keeps the tag invisible until
+    // the next move.
+    this.priceTag.text.text = ATLAS_SEED;
+    this.timeTag.text.text = ATLAS_SEED;
+    this.priceTag.text.text = "";
+    this.timeTag.text.text = "";
+    this.priceTag.lastText = "";
+    this.timeTag.lastText = "";
+    this.priceTag.lastWidth = 0;
+    this.priceTag.lastHeight = 0;
+    this.timeTag.lastWidth = 0;
+    this.timeTag.lastHeight = 0;
+    this.lastFontFamily = fontFamily;
+    this.lastFontSize = fontSize;
+    this.atlasSeedCount += 1;
+  }
+
+  /**
    * Introspection hook for unit + Playwright tests. Counts the number of
    * times a tag background was rebuilt (width changed). Should stay flat
    * once the tag text width stabilises.
@@ -166,6 +207,15 @@ export class CrosshairController {
   /** Introspection hook: total `crosshair:move` emissions since construction. */
   getEmitCount(): number {
     return this.emitCount;
+  }
+
+  /**
+   * Phase 10 introspection: how many times the BitmapText atlas has been
+   * re-seeded due to a theme `fontFamily` / `fontSize` change. Stays at `0`
+   * across same-font theme swaps; bumps once per font transition.
+   */
+  getAtlasSeedCount(): number {
+    return this.atlasSeedCount;
   }
 
   /** Introspection: is the crosshair currently visible? */
@@ -231,8 +281,8 @@ export class CrosshairController {
     const text = new BitmapText({
       text: "",
       style: {
-        fontFamily: TAG_FONT_FAMILY,
-        fontSize: TAG_FONT_SIZE_PX,
+        fontFamily: BOOTSTRAP_FONT_FAMILY,
+        fontSize: BOOTSTRAP_FONT_SIZE_PX,
         fill: 0xffffff,
       },
     });
@@ -240,7 +290,7 @@ export class CrosshairController {
     container.addChild(bg);
     container.addChild(text);
     container.visible = false;
-    return { container, bg, text, lastText: "", lastWidth: 0, lastHeight: 0 };
+    return { container, bg, text, lastText: "", lastWidth: 0, lastHeight: 0, lastBgColor: -1 };
   }
 
   private attachListeners(): void {
@@ -438,13 +488,23 @@ export class CrosshairController {
     const boxW = textW + TAG_PADDING_X * 2;
     const boxH = textH + TAG_PADDING_Y * 2;
 
-    if (boxW !== tag.lastWidth || boxH !== tag.lastHeight || tag.lastText === "") {
+    // Phase 10 — also refill on bg color change so a theme swap repaints the
+    // rounded-rect even when boxW/boxH didn't change. Without this trigger,
+    // the crosshair tag bg stays at its previous theme's color until the next
+    // dimension change.
+    if (
+      boxW !== tag.lastWidth ||
+      boxH !== tag.lastHeight ||
+      tag.lastText === "" ||
+      tag.lastBgColor !== theme.crosshairTagBg
+    ) {
       tag.bg
         .clear()
         .roundRect(0, 0, boxW, boxH, TAG_CORNER_RADIUS)
         .fill(theme.crosshairTagBg);
       tag.lastWidth = boxW;
       tag.lastHeight = boxH;
+      tag.lastBgColor = theme.crosshairTagBg;
       this.bgRedrawCount += 1;
     }
     tag.lastText = label;

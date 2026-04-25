@@ -4,10 +4,10 @@ import { DataStore } from "./DataStore.js";
 import {
   asPrice,
   asTime,
-  DEFAULT_THEME,
   type PointRecord,
   type Theme,
 } from "../types.js";
+import { DarkTheme } from "./themes.js";
 
 const IV = 60_000;
 const CHANNEL = "volume";
@@ -95,7 +95,7 @@ describe("HistogramSeries.priceRangeInWindow", () => {
 });
 
 describe("HistogramSeries.resolveBarColor", () => {
-  const theme: Theme = DEFAULT_THEME;
+  const theme: Theme = DarkTheme;
 
   it("prefers record.color when finite and non-negative", () => {
     const color = __internals__.resolveBarColor(

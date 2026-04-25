@@ -24,8 +24,6 @@ export interface TickInfo {
 
 const DEFAULT_MIN_LABEL_PX = 80;
 const DEFAULT_LABEL_PADDING_Y = 6;
-const DEFAULT_FONT_SIZE = 11;
-const DEFAULT_FONT_FAMILY = "system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif";
 const POOL_FLOOR = 64;
 
 interface LabelSlot {
@@ -37,31 +35,38 @@ interface LabelSlot {
  * Owns vertical grid Graphics on `gridLayer` and a pool of `Text` labels on
  * `axesLayer`. Redraws on `layout | viewport | size | theme` dirty. Pool is
  * allocated once and never shrinks; extras are hidden via `visible = false`.
+ *
+ * Phase 10: `fontFamily` / `fontSize` come from the theme at render time when
+ * the constructor didn't supply explicit overrides. A change to either across
+ * a render call updates every pooled label's style in place.
  */
 export class TimeAxis {
   private readonly gridLayer: Container;
   private readonly axesLayer: Container;
-  private readonly options: Required<Omit<TimeAxisOptions, "formatContext">> & {
-    formatContext: FormatContext | undefined;
-  };
+  /** Constructor-supplied overrides — when set, beat `theme.fontFamily`/`fontSize`. */
+  private readonly fontFamilyOverride: string | undefined;
+  private readonly fontSizeOverride: number | undefined;
+  private readonly minLabelPx: number;
+  private readonly labelPaddingY: number;
+  private readonly formatContext: FormatContext | undefined;
 
   private readonly grid = new Graphics();
   private readonly labelPool: LabelSlot[] = [];
   private poolAllocated = false;
   private destroyed = false;
+  private lastFontFamily = "";
+  private lastFontSize = 0;
 
   private lastTicks: readonly TickInfo[] = [];
 
   constructor(gridLayer: Container, axesLayer: Container, options: TimeAxisOptions = {}) {
     this.gridLayer = gridLayer;
     this.axesLayer = axesLayer;
-    this.options = {
-      minLabelPx: options.minLabelPx ?? DEFAULT_MIN_LABEL_PX,
-      labelPaddingY: options.labelPaddingY ?? DEFAULT_LABEL_PADDING_Y,
-      fontSize: options.fontSize ?? DEFAULT_FONT_SIZE,
-      fontFamily: options.fontFamily ?? DEFAULT_FONT_FAMILY,
-      formatContext: options.formatContext,
-    };
+    this.minLabelPx = options.minLabelPx ?? DEFAULT_MIN_LABEL_PX;
+    this.labelPaddingY = options.labelPaddingY ?? DEFAULT_LABEL_PADDING_Y;
+    this.fontFamilyOverride = options.fontFamily;
+    this.fontSizeOverride = options.fontSize;
+    this.formatContext = options.formatContext;
     this.gridLayer.addChild(this.grid);
   }
 
@@ -74,7 +79,10 @@ export class TimeAxis {
     if (this.destroyed) {
       return;
     }
-    this.ensurePool(plotRect.w);
+    const effectiveFontFamily = this.fontFamilyOverride ?? theme.fontFamily;
+    const effectiveFontSize = this.fontSizeOverride ?? theme.fontSize;
+    this.ensurePool(plotRect.w, effectiveFontFamily, effectiveFontSize);
+    this.applyFontIfChanged(effectiveFontFamily, effectiveFontSize);
     this.grid.clear();
 
     if (!scale.valid || plotRect.w <= 0 || plotRect.h <= 0 || scale.barSpacingPx <= 0) {
@@ -114,18 +122,18 @@ export class TimeAxis {
   }
 
   // ─── Private ──────────────────────────────────────────────────────────────
-  private ensurePool(currentWidth: number): void {
+  private ensurePool(currentWidth: number, fontFamily: string, fontSize: number): void {
     if (this.poolAllocated) {
       return;
     }
     this.poolAllocated = true;
     const desired = Math.max(
       POOL_FLOOR,
-      Math.ceil(Math.max(0, currentWidth) / this.options.minLabelPx) + 4,
+      Math.ceil(Math.max(0, currentWidth) / this.minLabelPx) + 4,
     );
     const style: TextStyleOptions = {
-      fontFamily: this.options.fontFamily,
-      fontSize: this.options.fontSize,
+      fontFamily,
+      fontSize,
       fill: 0xffffff,
     };
     for (let i = 0; i < desired; i++) {
@@ -135,6 +143,24 @@ export class TimeAxis {
       this.axesLayer.addChild(text);
       this.labelPool.push({ text, lastValue: "" });
     }
+    this.lastFontFamily = fontFamily;
+    this.lastFontSize = fontSize;
+  }
+
+  /**
+   * Phase 10 — when the theme's fontFamily / fontSize change, mutate every
+   * pooled label's style in place. Pixi v8 re-rasterizes on the next render.
+   */
+  private applyFontIfChanged(fontFamily: string, fontSize: number): void {
+    if (fontFamily === this.lastFontFamily && fontSize === this.lastFontSize) {
+      return;
+    }
+    for (const slot of this.labelPool) {
+      slot.text.style.fontFamily = fontFamily;
+      slot.text.style.fontSize = fontSize;
+    }
+    this.lastFontFamily = fontFamily;
+    this.lastFontSize = fontSize;
   }
 
   private hideAllLabels(): void {
@@ -153,7 +179,7 @@ export class TimeAxis {
     const step = pickNaturalStep(
       scale.barSpacingPx,
       intervalMs,
-      this.options.minLabelPx,
+      this.minLabelPx,
     );
 
     const firstSlot = scale.firstSlotMs;
@@ -161,7 +187,7 @@ export class TimeAxis {
     const endMs = Number(scale.endTime);
     const candidates = generateTickCandidates(startMs, endMs, intervalMs, step, firstSlot);
 
-    const ctx = this.options.formatContext;
+    const ctx = this.formatContext;
     const ticks: TickInfo[] = [];
     let prevDayKey: string | null = null;
 
@@ -194,7 +220,7 @@ export class TimeAxis {
     this.grid.stroke({
       width: 1,
       color: theme.grid,
-      alpha: 1,
+      alpha: theme.gridAlpha,
       pixelLine: true,
     });
   }
@@ -204,7 +230,7 @@ export class TimeAxis {
     plotRect: PlotRect,
     theme: Theme,
   ): void {
-    const labelY = plotRect.y + plotRect.h + this.options.labelPaddingY;
+    const labelY = plotRect.y + plotRect.h + this.labelPaddingY;
     const pool = this.labelPool;
     const count = Math.min(ticks.length, pool.length);
     const plotRight = plotRect.x + plotRect.w;

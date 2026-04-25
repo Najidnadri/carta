@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { LineSeries } from "./LineSeries.js";
 import { DataStore } from "./DataStore.js";
-import { asPrice, asTime, DEFAULT_THEME, type PointRecord } from "../types.js";
+import { asPrice, asTime, type PointRecord } from "../types.js";
+import { DarkTheme } from "./themes.js";
 import type { SeriesRenderContext } from "./Series.js";
 
 const IV = 60_000;
@@ -105,7 +106,7 @@ function buildRenderCtx(
     timeScale,
     priceScale,
     dataStore: store,
-    theme: DEFAULT_THEME,
+    theme: DarkTheme,
   } as unknown as SeriesRenderContext;
 }
 
@@ -207,7 +208,7 @@ describe("LineSeries.render variants", () => {
       timeScale: timeScaleOverride as unknown,
       priceScale: priceScale as unknown,
       dataStore: store,
-      theme: DEFAULT_THEME,
+      theme: DarkTheme,
     } as unknown as SeriesRenderContext;
     store.insertMany(CHANNEL, IV, [pt(0, 10), pt(IV, 10)]);
     const calls = spy(series);
