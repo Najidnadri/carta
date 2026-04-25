@@ -18,7 +18,7 @@ export interface PlotRect {
 }
 
 /**
- * Owns the Pixi `Application` and the 8-layer scene graph.
+ * Owns the Pixi `Application` and the 9-layer scene graph.
  *
  *   stage
  *     ├─ bgLayer                (full-canvas background + placeholder frame)
@@ -29,14 +29,16 @@ export interface PlotRect {
  *     │    └─ drawingsLayer
  *     ├─ crosshairLinesLayer    (hair lines; below axes so they can't cover tick labels)
  *     ├─ axesLayer
+ *     ├─ drawingsHandlesLayer   (anchor handles — escape plot clip; eventMode: 'none')
  *     ├─ crosshairTagsLayer     (price / time readout tags; above axes so they cover ticks)
  *     ├─ legendLayer
  *     └─ tooltipLayer
  *
  * Only `seriesLayer` is a render group — see research §13 ("mask on render
  * group is valid but less optimized than mask on a plain container").
- * Crosshair layers are `eventMode = 'none'`; visuals must not intercept
- * pointer events (see `CrosshairController`).
+ * Crosshair layers + drawings-handles layer are `eventMode = 'none'`; the
+ * chart-level hit-tester finds drawing handles by data, not via Pixi's
+ * per-display-object dispatch (see `DrawingsController`).
  */
 export class Renderer {
   readonly app: Application;
@@ -50,6 +52,7 @@ export class Renderer {
   readonly drawingsLayer = new Container({ label: "drawingsLayer" });
   readonly crosshairLinesLayer = new Container({ label: "crosshairLinesLayer", eventMode: "none" });
   readonly axesLayer = new Container({ label: "axesLayer" });
+  readonly drawingsHandlesLayer = new Container({ label: "drawingsHandlesLayer", eventMode: "none" });
   readonly crosshairTagsLayer = new Container({ label: "crosshairTagsLayer", eventMode: "none" });
   readonly legendLayer = new Container({ label: "legendLayer" });
   readonly tooltipLayer = new Container({ label: "tooltipLayer" });
@@ -74,6 +77,7 @@ export class Renderer {
       this.plotClip,
       this.crosshairLinesLayer,
       this.axesLayer,
+      this.drawingsHandlesLayer,
       this.crosshairTagsLayer,
       this.legendLayer,
       this.tooltipLayer,

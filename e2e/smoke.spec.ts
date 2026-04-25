@@ -1,4 +1,4 @@
-import { test, expect } from "./fixtures/chart.js";
+import { test, expect, type CartaTestHook } from "./fixtures/chart.js";
 
 test.describe("smoke", () => {
   test("demo loads, canvas renders, harness is reachable", async ({ page, chart }) => {

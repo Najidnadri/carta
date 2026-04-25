@@ -2,6 +2,7 @@ import type { GraphicsContext } from "pixi.js";
 import { ConfigState } from "./ConfigState.js";
 import { CrosshairController } from "../interaction/CrosshairController.js";
 import { DataStore } from "../data/DataStore.js";
+import { DrawingsController, type DrawingsFacade } from "../drawings/DrawingsController.js";
 import { DarkTheme } from "../infra/themes.js";
 import { DebouncedEmitter } from "../infra/DebouncedEmitter.js";
 import { EventBus } from "../infra/EventBus.js";
@@ -143,6 +144,8 @@ export class TimeSeriesChart {
   private readonly viewport: ViewportController;
   private readonly priceAxisController: PriceAxisController;
   private readonly crosshair: CrosshairController;
+  private readonly drawingsController: DrawingsController;
+  private readonly drawingsFacade: DrawingsFacade;
   private readonly dataStore: DataStore;
   private readonly emitter: EventBus<CartaEventMap>;
   private readonly dataRequestDebouncer: DebouncedEmitter<void>;
@@ -209,6 +212,20 @@ export class TimeSeriesChart {
       isAutoScale: (): boolean => this.autoScaleEnabled,
       setAutoScale: (on: boolean): void => { this.setAutoScaleInternal(on); },
     };
+    this.drawingsController = new DrawingsController({
+      stage: renderer.app.stage,
+      canvas: renderer.app.canvas,
+      renderer,
+      eventBus: this.emitter,
+      logger: opts.logger,
+      invalidate: (): void => { this.invalidator.invalidate("drawings"); },
+      plotRect: (): PlotRect => this.computePlotRect(),
+      currentTimeScale: () => this.currentTimeScaleForRect(this.computePlotRect()),
+      currentPriceScale: () => this.currentPriceScaleForRect(this.computePlotRect()),
+      currentTheme: () => this.config.snapshot.theme,
+      currentDpr: () => this.currentResolution,
+    });
+    this.drawingsFacade = this.drawingsController.asFacade();
     this.viewport = new ViewportController({
       stage: renderer.app.stage,
       canvas: renderer.app.canvas,
@@ -246,6 +263,7 @@ export class TimeSeriesChart {
         const plot = this.computePlotRect();
         this.crosshair.setTrackingMove(plot.x + localX, plot.y + localY);
       },
+      onPointerDownIntercept: this.drawingsController.onPointerDownIntercept,
     });
     this.priceAxisController = new PriceAxisController({
       axesLayer: renderer.axesLayer,
@@ -771,6 +789,15 @@ export class TimeSeriesChart {
     return this.priceScaleFacade;
   }
 
+  /**
+   * Phase 13 — drawing-tools facade. Imperative API for begin-create / add /
+   * select / get-snapshot / load-snapshot / attach-storage. Read-only;
+   * internal controller stays private.
+   */
+  get drawings(): DrawingsFacade {
+    return this.drawingsFacade;
+  }
+
   /** Apply a subset of chart options at runtime. */
   applyOptions(options: ApplyOptions): void {
     if (this.disposed) {
@@ -1024,6 +1051,7 @@ export class TimeSeriesChart {
     this.trackingActive = false;
     this.trackingAnchor = null;
     this.disarmDprListener();
+    this.drawingsController.destroy();
     this.crosshair.destroy();
     this.priceAxisController.destroy();
     this.viewport.destroy();
@@ -1112,6 +1140,21 @@ export class TimeSeriesChart {
         s.render(ctx);
         this.seriesRenderCounter += 1;
       }
+    }
+    if (
+      reasons.has("drawings") ||
+      reasons.has("viewport") ||
+      reasons.has("size") ||
+      reasons.has("layout") ||
+      reasons.has("theme")
+    ) {
+      this.drawingsController.render({
+        plotRect,
+        timeScale: scale,
+        priceScale,
+        theme: this.config.snapshot.theme,
+        dpr: this.currentResolution,
+      });
     }
     this.timeAxis.render(scale, plotRect, this.config.snapshot.theme);
     this.priceAxis.render(

@@ -92,6 +92,14 @@ export interface ViewportControllerDeps {
         readonly clearTimeout: (id: number) => void;
       }
     | undefined;
+  /**
+   * Phase 13 — drawings get first dibs on `pointerdown`. Returning `true`
+   * means the viewport ignores this pointer entirely: no pan / pinch / long-
+   * press arming. The interceptor takes over via its own listeners. The
+   * companion `move` / `end` events for that pointer naturally fall through
+   * here because `activePointers.get(id)` returns `undefined`.
+   */
+  readonly onPointerDownIntercept?: (e: FederatedPointerEvent) => boolean;
 }
 
 type GestureMode = "idle" | "pan" | "pinch";
@@ -187,6 +195,9 @@ export class ViewportController {
   private readonly onTrackingMove: ((plotLocalX: number, plotLocalY: number) => void) | undefined;
   private readonly timerSet: (cb: () => void, ms: number) => number;
   private readonly timerClear: (id: number) => void;
+  private readonly onPointerDownIntercept:
+    | ((e: FederatedPointerEvent) => boolean)
+    | undefined;
 
   private readonly activePointers = new Map<number, PointerState>();
   private activePanPointerId: number | null = null;
@@ -218,6 +229,7 @@ export class ViewportController {
     this.timerClear =
       deps.timerFns?.clearTimeout ??
       ((id): void => { globalThis.clearTimeout(id); });
+    this.onPointerDownIntercept = deps.onPointerDownIntercept;
 
     this.stage.eventMode = "static";
     this.stage.hitArea = this.asScreenHitArea();
@@ -322,6 +334,10 @@ export class ViewportController {
 
   private readonly onPointerDown = (e: FederatedPointerEvent): void => {
     if (this.disposed) {
+      return;
+    }
+    if (this.onPointerDownIntercept?.(e) === true) {
+      // Drawings (or any other claimant) consumed this pointer.
       return;
     }
     this.cancelKineticRaf();

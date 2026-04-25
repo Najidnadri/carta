@@ -272,6 +272,17 @@
         <button id="toggle-markers" aria-pressed="false">Markers: OFF</button>
         <button id="toggle-theme" aria-pressed="false">Theme: Dark</button>
         <button id="toggle-live-tick" aria-pressed="false">Live tick: OFF</button>
+        <fieldset id="drawings-toolbar" style="border:1px solid var(--button-border);border-radius:4px;padding:4px 6px;display:inline-flex;gap:4px;align-items:center;">
+          <legend style="font-size:10px;color:var(--muted);padding:0 4px;text-transform:uppercase;letter-spacing:0.06em;">Draw</legend>
+          <button id="draw-trendline" aria-pressed="false" title="Trendline">/</button>
+          <button id="draw-horizontalLine" aria-pressed="false" title="Horizontal line">—</button>
+          <button id="draw-verticalLine" aria-pressed="false" title="Vertical line">|</button>
+          <button id="draw-rectangle" aria-pressed="false" title="Rectangle">▭</button>
+          <button id="draw-fibRetracement" aria-pressed="false" title="Fib retracement">F</button>
+          <button id="drawings-clear" title="Clear all drawings">×</button>
+          <button id="drawings-save" title="Save drawings to localStorage">Save</button>
+          <button id="drawings-load" title="Load drawings from localStorage">Load</button>
+        </fieldset>
         <label for="interval-select" style="font-size: 12px; color: var(--muted);">
           Interval
           <select id="interval-select" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:3px 6px;font-size:12px;margin-left:4px;">

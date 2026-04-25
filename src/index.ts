@@ -80,6 +80,10 @@ export {
   niceNumber,
   targetTickCountForHeight,
 } from "./core/price/priceNaturalStep.js";
+export { DrawingsController } from "./core/drawings/DrawingsController.js";
+export type { DrawingsFacade, DrawingsRenderContext } from "./core/drawings/DrawingsController.js";
+export { parseSnapshot, parseDrawing } from "./core/drawings/parsers.js";
+export type { ParseSnapshotResult } from "./core/drawings/parsers.js";
 export { CrosshairController } from "./core/interaction/CrosshairController.js";
 export type {
   CrosshairControllerDeps,
@@ -104,3 +108,38 @@ export {
 } from "./core/viewport/ViewportMath.js";
 export type { ClampOptions, ResultWindow, WindowSnapshot } from "./core/viewport/ViewportMath.js";
 export * from "./types.js";
+export {
+  DEFAULT_FIB_LEVELS,
+  MAIN_PANE_ID,
+  asDrawingId,
+  asPaneId,
+} from "./core/drawings/types.js";
+export type {
+  BeginCreateOptions,
+  Drawing,
+  DrawingAnchor,
+  DrawingContextMenuPayload,
+  DrawingEditPayload,
+  DrawingFill,
+  DrawingId,
+  DrawingKind,
+  DrawingScope,
+  DrawingsChangedPayload,
+  DrawingsRemovedPayload,
+  DrawingsSelectedPayload,
+  DrawingsSnapshot,
+  DrawingsStorageAdapter,
+  DrawingStroke,
+  DrawingStyle,
+  DrawingTextStyle,
+  ExtendMode,
+  FibLevel,
+  FibRetracementDrawing,
+  HorizontalLineDrawing,
+  JsonValue,
+  PaneId,
+  RectangleDrawing,
+  StrokeStyle,
+  TrendlineDrawing,
+  VerticalLineDrawing,
+} from "./core/drawings/types.js";

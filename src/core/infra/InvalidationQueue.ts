@@ -4,7 +4,8 @@ export type DirtyReason =
   | "data"
   | "crosshair"
   | "theme"
-  | "size";
+  | "size"
+  | "drawings";
 
 export type FlushFn = (reasons: ReadonlySet<DirtyReason>) => void;
 

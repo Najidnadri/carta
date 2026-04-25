@@ -1151,12 +1151,104 @@ async function main(): Promise<void> {
     });
   }
 
+  // ── Phase 13 — drawings toolbar (5 tools + clear / save / load) ─────
+  const DRAWING_KINDS = [
+    "trendline",
+    "horizontalLine",
+    "verticalLine",
+    "rectangle",
+    "fibRetracement",
+  ] as const;
+  type DrawingKindName = typeof DRAWING_KINDS[number];
+
+  const updateDrawingToolButtons = (): void => {
+    const isCreating = chart?.drawings.isCreating() ?? false;
+    for (const k of DRAWING_KINDS) {
+      const btn = document.getElementById(`draw-${k}`);
+      if (btn !== null) {
+        const pressed = isCreating;
+        btn.setAttribute("aria-pressed", String(pressed));
+      }
+    }
+  };
+
+  for (const k of DRAWING_KINDS) {
+    const btn = document.getElementById(`draw-${k}`);
+    btn?.addEventListener("click", () => {
+      if (chart === null) {
+        return;
+      }
+      if (chart.drawings.isCreating()) {
+        chart.drawings.cancelCreate();
+      } else {
+        chart.drawings.beginCreate(k);
+      }
+      updateDrawingToolButtons();
+    });
+  }
+  document.getElementById("drawings-clear")?.addEventListener("click", () => {
+    chart?.drawings.clear();
+    updateDrawingToolButtons();
+  });
+
+  const drawingsLocalStorageKey = "carta-demo-drawings";
+  document.getElementById("drawings-save")?.addEventListener("click", () => {
+    if (chart === null) {
+      return;
+    }
+    const snap = chart.drawings.getSnapshot();
+    try {
+      globalThis.localStorage.setItem(drawingsLocalStorageKey, JSON.stringify(snap));
+    } catch {
+      // localStorage may be disabled (e.g. in private mode); silent.
+    }
+  });
+  document.getElementById("drawings-load")?.addEventListener("click", () => {
+    if (chart === null) {
+      return;
+    }
+    let raw: string | null;
+    try {
+      raw = globalThis.localStorage.getItem(drawingsLocalStorageKey);
+    } catch {
+      return;
+    }
+    if (raw === null) {
+      return;
+    }
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      chart.drawings.loadSnapshot(parsed);
+    } catch {
+      // Ignore broken JSON; loadSnapshot itself never throws on bad shape.
+    }
+    updateDrawingToolButtons();
+  });
+
   // Test hooks (dev only) — used by Playwright for adversarial scenarios.
   const testHook = {
     TimeSeriesChart,
     MockSource,
     canvasCount: (): number => document.querySelectorAll("canvas").length,
     getChart: (): TimeSeriesChart | null => chart,
+    // ── Phase 13 — drawings test hooks ──
+    drawingsList: (): readonly unknown[] => chart?.drawings.list() ?? [],
+    drawingsBeginCreate: (kind: string): void => {
+      const valid = DRAWING_KINDS.includes(kind as DrawingKindName);
+      if (chart !== null && valid) {
+        chart.drawings.beginCreate(kind as DrawingKindName);
+      }
+    },
+    drawingsCancelCreate: (): void => { chart?.drawings.cancelCreate(); },
+    drawingsClear: (): void => { chart?.drawings.clear(); },
+    drawingsCount: (): number => chart?.drawings.list().length ?? 0,
+    drawingsSelectedId: (): string | null => {
+      const id = chart?.drawings.getSelectedId() ?? null;
+      return id === null ? null : String(id);
+    },
+    drawingsGetSnapshot: (): unknown => chart?.drawings.getSnapshot() ?? null,
+    drawingsLoadSnapshot: (snap: unknown): { droppedCount: number; droppedKinds: readonly string[] } | null =>
+      chart?.drawings.loadSnapshot(snap) ?? null,
     // ── Phase 11 cycle A — request log / overlay / live tick / interval ──
     requestLogEntries: (): readonly RequestLogEntry[] => requestLog.snapshot(),
     requestLogTotal: (): number => requestLog.totalPushed(),

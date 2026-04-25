@@ -3,6 +3,13 @@
  * Branded units (Time, Interval, Pixel, Price) enforce unit-safety at public
  * API boundaries without runtime cost.
  */
+import type {
+  DrawingContextMenuPayload,
+  DrawingEditPayload,
+  DrawingsChangedPayload,
+  DrawingsRemovedPayload,
+  DrawingsSelectedPayload,
+} from "./core/drawings/types.js";
 
 // ─── Branded units ─────────────────────────────────────────────────────────
 export type Time = number & { readonly __brand: "Time" };
@@ -184,6 +191,12 @@ export interface CartaEventMap extends Record<string, unknown> {
   readonly "crosshair:move": CrosshairInfo;
   readonly "tracking:change": TrackingChange;
   readonly resize: SizeInfo;
+  readonly "drawings:created": DrawingsChangedPayload;
+  readonly "drawings:updated": DrawingsChangedPayload;
+  readonly "drawings:removed": DrawingsRemovedPayload;
+  readonly "drawings:selected": DrawingsSelectedPayload;
+  readonly "drawing:edit": DrawingEditPayload;
+  readonly "drawing:contextmenu": DrawingContextMenuPayload;
 }
 
 export type EventKey = keyof CartaEventMap;
