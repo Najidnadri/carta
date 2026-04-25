@@ -37,7 +37,7 @@ import {
   type Time,
   type TimeSeriesChartConstructionOptions,
 } from "../src/index.js";
-import { __internals__ as timeFormatInternals } from "../src/core/timeFormat.js";
+import { __internals__ as timeFormatInternals } from "../src/core/time/timeFormat.js";
 
 (globalThis as unknown as { Carta?: typeof CartaExports }).Carta = CartaExports;
 
