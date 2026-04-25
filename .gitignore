@@ -11,3 +11,5 @@ plans/
 .research/
 /screenshots
 /test-reports
+/test-results
+/playwright-report

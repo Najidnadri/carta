@@ -2,6 +2,50 @@
 
 ### Added
 
+- **Phase 12 — testing infrastructure (single cycle).** Closes the v0.1
+  shipping gate. Adds Playwright e2e (`playwright.config.ts`, chromium-only
+  with `--use-gl=swiftshader --enable-unsafe-swiftshader`, `retries:2` in CI,
+  `reuseExistingServer` locally) plus 8 specs under `e2e/` driving
+  `globalThis.__cartaTest` + DOM readouts only — never canvas pixels. Specs:
+  `smoke.spec.ts` (page-load + adversarial 1.4 `clearRequestLog` race),
+  `pan.spec.ts`, `zoom.spec.ts` (+ adversarial 1.9 `synthWheel` deltaY=0
+  no-op), `interval.spec.ts` (+ adversarial 1.6 `selectInterval(current)`
+  no-op), `theme.spec.ts`. Typed harness fixture at `e2e/fixtures/chart.ts`.
+- **Phase 12 — vitest v8 coverage.** `vite.config.ts` test block gains a
+  `coverage` section using `@vitest/coverage-v8`. Per-glob `perFile` thresholds
+  at 80 lines / 75 branches on `data/`, `price/`, `viewport/`, `infra/`,
+  `time/`. Pixi-touching files (render, series, overlays, axes,
+  `ViewportController`, `TimeSeriesChart`, `Chart`, `PixiRenderer`) explicitly
+  excluded so coverage tracks pure-logic only. Achieved 95.22 % lines /
+  90.81 % branches overall (every glob ≥ 93 % lines).
+- **Phase 12 — GitHub Actions CI.** `.github/workflows/ci.yml` runs a
+  `verify` job (lint → typecheck → unit + coverage → build) on `ubuntu-latest`
+  with pnpm cache, then a dependent `e2e` job that caches
+  `~/.cache/ms-playwright` keyed on the resolved Playwright version. Required
+  from day 1 (no `continue-on-error`). Concurrency cancels in-progress runs
+  on the same ref. Coverage is uploaded as an artifact on every run; the
+  Playwright HTML report uploads only on failure.
+- **Phase 12 — scripts.** `pnpm test:coverage`, `pnpm test:e2e`,
+  `pnpm test:e2e:headed`, `pnpm test:all`. `pnpm typecheck` now also runs
+  `tsc -p tsconfig.e2e.json` so the e2e tree stays type-clean. ESLint config
+  gains an `e2e/**` override (relaxed `unsafe-*` rules; e2e cannot escape the
+  full strict-typed-checked baseline).
+
+### Changed
+
+- `vitest` bumped to 4.1.5 (peer-aligned with `@vitest/coverage-v8` 4.1.5).
+  No behavioral change.
+
+**Phase 12 validation:** `pnpm test` 549/549 in 1.74 s execution time
+(AC #1 read as execution time per `plans/12-testing.md` §8); `pnpm test:e2e`
+8/8 in 20.2 s; `pnpm test:coverage` 95.22 % lines / 90.81 % branches
+overall, every per-glob threshold passes; `pnpm build` ESM 117.74 kB / CJS
+95.22 kB; `test-carta` returns 11/11 regression-sentinel stories at parity
+with phase 11 cycle B (frame-time P50 ~218 ms / P95 ~275 ms on swiftshader,
+matching phase 11's ~250/284). Report at
+`test-reports/phase-12-testing-2026-04-25.md`. Screenshots under
+`screenshots/phase-12-testing/{laptop,mobile,tablet}/`.
+
 - **Phase 11 cycle A — demo upgrades.** New `demo/mock-source.ts` exports a
   deterministic `MockSource` class with one fetcher per channel kind
   (`fetchOhlc / fetchVolume / fetchSma / fetchEvents`) plus tick generators
