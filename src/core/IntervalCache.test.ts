@@ -429,6 +429,117 @@ describe("IntervalCache — adversarial edge cases", () => {
   });
 });
 
+describe("IntervalCache — first/last time helpers (cycle B)", () => {
+  it("firstTime / lastTime return null when empty", () => {
+    const cache = new IntervalCache<OhlcRecord>({
+      interval: MINUTE,
+      kind: "ohlc",
+      options: DEFAULT_OPTS,
+      logger: noopLogger,
+    });
+    expect(cache.firstTime()).toBeNull();
+    expect(cache.lastTime()).toBeNull();
+  });
+
+  it("firstTime === lastTime === only record for a single-element cache", () => {
+    const cache = new IntervalCache<OhlcRecord>({
+      interval: MINUTE,
+      kind: "ohlc",
+      options: DEFAULT_OPTS,
+      logger: noopLogger,
+    });
+    cache.insert(ohlc(7 * MINUTE));
+    expect(cache.firstTime()).toBe(7 * MINUTE);
+    expect(cache.lastTime()).toBe(7 * MINUTE);
+  });
+
+  it("firstTime tracks smallest time, lastTime tracks largest after inserts", () => {
+    const cache = new IntervalCache<OhlcRecord>({
+      interval: MINUTE,
+      kind: "ohlc",
+      options: DEFAULT_OPTS,
+      logger: noopLogger,
+    });
+    cache.insertMany([ohlc(5 * MINUTE), ohlc(10 * MINUTE), ohlc(1 * MINUTE)]);
+    expect(cache.firstTime()).toBe(1 * MINUTE);
+    expect(cache.lastTime()).toBe(10 * MINUTE);
+  });
+
+  it("firstTime / lastTime return null again after clear()", () => {
+    const cache = new IntervalCache<OhlcRecord>({
+      interval: MINUTE,
+      kind: "ohlc",
+      options: DEFAULT_OPTS,
+      logger: noopLogger,
+    });
+    cache.insert(ohlc(2 * MINUTE));
+    cache.clear();
+    expect(cache.firstTime()).toBeNull();
+    expect(cache.lastTime()).toBeNull();
+  });
+
+  it("firstTime advances after evictOldest; lastTime stable", () => {
+    const cache = new IntervalCache<OhlcRecord>({
+      interval: MINUTE,
+      kind: "ohlc",
+      options: DEFAULT_OPTS,
+      logger: noopLogger,
+    });
+    cache.insertMany([ohlc(1 * MINUTE), ohlc(2 * MINUTE), ohlc(3 * MINUTE)]);
+    cache.evictOldest(1);
+    expect(cache.firstTime()).toBe(2 * MINUTE);
+    expect(cache.lastTime()).toBe(3 * MINUTE);
+  });
+});
+
+describe("IntervalCache — first/last in range (cycle B)", () => {
+  function build(times: readonly number[]): IntervalCache<OhlcRecord> {
+    const cache = new IntervalCache<OhlcRecord>({
+      interval: MINUTE,
+      kind: "ohlc",
+      options: DEFAULT_OPTS,
+      logger: noopLogger,
+    });
+    cache.insertMany(times.map((t) => ohlc(t)));
+    return cache;
+  }
+
+  it("returns null when the cache is empty", () => {
+    const cache = build([]);
+    expect(cache.firstTimeInRange(0, 10 * MINUTE)).toBeNull();
+    expect(cache.lastTimeInRange(0, 10 * MINUTE)).toBeNull();
+  });
+
+  it("returns null when the range excludes every cached point", () => {
+    const cache = build([5 * MINUTE, 6 * MINUTE]);
+    expect(cache.firstTimeInRange(10 * MINUTE, 20 * MINUTE)).toBeNull();
+    expect(cache.lastTimeInRange(10 * MINUTE, 20 * MINUTE)).toBeNull();
+    expect(cache.firstTimeInRange(1 * MINUTE, 4 * MINUTE)).toBeNull();
+    expect(cache.lastTimeInRange(1 * MINUTE, 4 * MINUTE)).toBeNull();
+  });
+
+  it("returns inclusive boundary matches on both ends", () => {
+    const cache = build([5 * MINUTE, 6 * MINUTE, 7 * MINUTE]);
+    expect(cache.firstTimeInRange(5 * MINUTE, 5 * MINUTE)).toBe(5 * MINUTE);
+    expect(cache.lastTimeInRange(7 * MINUTE, 7 * MINUTE)).toBe(7 * MINUTE);
+    expect(cache.firstTimeInRange(5 * MINUTE, 7 * MINUTE)).toBe(5 * MINUTE);
+    expect(cache.lastTimeInRange(5 * MINUTE, 7 * MINUTE)).toBe(7 * MINUTE);
+  });
+
+  it("partial overlap returns the innermost data point", () => {
+    const cache = build([5 * MINUTE, 6 * MINUTE, 7 * MINUTE]);
+    expect(cache.firstTimeInRange(6 * MINUTE, 20 * MINUTE)).toBe(6 * MINUTE);
+    expect(cache.lastTimeInRange(0, 6 * MINUTE)).toBe(6 * MINUTE);
+  });
+
+  it("returns null for inverted or non-finite ranges", () => {
+    const cache = build([5 * MINUTE, 6 * MINUTE, 7 * MINUTE]);
+    expect(cache.firstTimeInRange(10, 5)).toBeNull();
+    expect(cache.firstTimeInRange(Number.NaN, 10 * MINUTE)).toBeNull();
+    expect(cache.lastTimeInRange(Number.NaN, 10 * MINUTE)).toBeNull();
+  });
+});
+
 describe("IntervalCache — perf spot-check (logged, not asserted)", () => {
   it("inserts 100k sorted OHLC into an empty cache", () => {
     const cache = new IntervalCache<OhlcRecord>({

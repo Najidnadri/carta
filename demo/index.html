@@ -65,9 +65,102 @@
       #app > *:nth-child(2) {
         min-height: 0;
       }
+      #stage {
+        display: grid;
+        grid-template-columns: 1fr 280px;
+        min-height: 0;
+        height: 100%;
+      }
       #chart {
         width: 100%;
         height: 100%;
+        min-height: 0;
+      }
+      #crosshair-panel {
+        border-left: 1px solid #1f2630;
+        background: #0b0f15;
+        color: #c9d1d9;
+        padding: 12px 14px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        overflow-y: auto;
+        min-height: 0;
+      }
+      #crosshair-panel h2 {
+        margin: 0 0 8px 0;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #8b949e;
+      }
+      #crosshair-panel dl {
+        margin: 0 0 12px 0;
+        display: grid;
+        grid-template-columns: auto 1fr;
+        row-gap: 4px;
+        column-gap: 10px;
+      }
+      #crosshair-panel dt {
+        color: #8b949e;
+      }
+      #crosshair-panel dd {
+        margin: 0;
+        color: #c9d1d9;
+        text-align: right;
+      }
+      #crosshair-panel[data-active="false"] dd {
+        color: #586069;
+      }
+      #crosshair-panel .series-row {
+        border-top: 1px solid #1f2630;
+        padding-top: 8px;
+        margin-top: 8px;
+      }
+      #crosshair-panel .series-row header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0;
+        border: none;
+      }
+      #crosshair-panel .series-row .series-name {
+        color: #c9d1d9;
+        font-weight: 500;
+      }
+      #crosshair-panel .series-row .series-kind {
+        color: #8b949e;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      #crosshair-panel .series-row .series-values {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        row-gap: 2px;
+        column-gap: 10px;
+        margin-top: 4px;
+      }
+      #crosshair-panel .series-row .series-values span.label {
+        color: #8b949e;
+      }
+      #crosshair-panel .series-row .series-values span.value {
+        color: #c9d1d9;
+        text-align: right;
+      }
+      #crosshair-panel[data-active="false"] .series-row .series-values span.value {
+        color: #586069;
+      }
+      @media (max-width: 700px) {
+        #stage {
+          grid-template-columns: 1fr;
+          grid-template-rows: 1fr auto;
+        }
+        #crosshair-panel {
+          border-left: none;
+          border-top: 1px solid #1f2630;
+          max-height: 40%;
+        }
       }
     </style>
   </head>
@@ -109,7 +202,22 @@
           <span>evt <b id="readout-events">—</b></span>
         </div>
       </header>
-      <div id="chart"></div>
+      <div id="stage">
+        <div id="chart"></div>
+        <aside id="crosshair-panel" data-active="false" aria-label="Crosshair readout">
+          <h2>Crosshair</h2>
+          <dl>
+            <dt>status</dt><dd id="cx-status">idle</dd>
+            <dt>time</dt><dd id="cx-time">—</dd>
+            <dt>price</dt><dd id="cx-price">—</dd>
+            <dt>point</dt><dd id="cx-point">—</dd>
+            <dt>emits</dt><dd id="cx-emits">0</dd>
+          </dl>
+          <section id="series-readouts" aria-label="Series values at crosshair">
+            <!-- populated by main.ts -->
+          </section>
+        </aside>
+      </div>
     </div>
     <script type="module" src="./main.ts"></script>
   </body>

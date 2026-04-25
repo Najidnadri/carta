@@ -14,6 +14,7 @@ import { formatAxisLabel } from "./timeFormat.js";
 import {
   asPixel,
   asPrice,
+  asTime,
   type CartaEventMap,
   type CrosshairInfo,
   type CrosshairSeriesKey,
@@ -309,8 +310,17 @@ export class CrosshairController {
       return;
     }
 
-    const snappedX = Number(snap.x);
-    const snappedTime = snap.time;
+    // Cycle B — clamp the raw slot snap to the visible-window data range so
+    // the hair sticks to the last/first data bar when the cursor drifts into
+    // an empty future-or-past gutter. No-op when the cursor is already inside
+    // the data range or when no non-marker series in this window has any data.
+    const effectiveTime = this.clampSnappedTimeToDataRange(snap.time, ctx);
+    const snappedTime = effectiveTime;
+    // Single source of truth for the hair's pixel X. Using `timeToPixel`
+    // regardless of whether the clamp kicked in avoids a 1 px flicker at the
+    // boundary when `snap.x` (possibly integer-rounded) disagrees with a
+    // fresh `timeToPixel(effectiveTime)` by a sub-pixel.
+    const snappedX = Number(timeScale.timeToPixel(effectiveTime));
     const rawPrice = Number(priceScale.pixelToValue(asPixel(localY)));
     const finitePrice = Number.isFinite(rawPrice) ? rawPrice : null;
 
@@ -421,6 +431,63 @@ export class CrosshairController {
     } catch {
       return "";
     }
+  }
+
+  /**
+   * Clamp a raw slot-snapped `Time` to the window-scoped data range across
+   * every series in `ctx.series`. When the cursor lands past the latest data
+   * bar in the visible window, returns that latest time; symmetric for the
+   * earliest. When no series has any cached data in the window, returns
+   * `raw` unchanged — preserves cycle A behavior for fresh/empty charts.
+   */
+  private clampSnappedTimeToDataRange(
+    raw: Time,
+    ctx: CrosshairRenderContext,
+  ): Time {
+    const winStart = Number(ctx.timeScale.startTime);
+    const winEnd = Number(ctx.timeScale.endTime);
+    if (!Number.isFinite(winStart) || !Number.isFinite(winEnd) || winStart > winEnd) {
+      return raw;
+    }
+    let minT = Number.POSITIVE_INFINITY;
+    let maxT = Number.NEGATIVE_INFINITY;
+    for (const s of ctx.series) {
+      // Markers are annotations on a sparse time grid — including them in
+      // the clamp union would pin the hair to marker times even when the
+      // primary price series has nothing in the window. Skip them.
+      if (s.kind === "marker") {
+        continue;
+      }
+      const first = ctx.dataStore.earliestTimeInWindow(
+        s.channel,
+        ctx.intervalDuration,
+        winStart,
+        winEnd,
+      );
+      const last = ctx.dataStore.latestTimeInWindow(
+        s.channel,
+        ctx.intervalDuration,
+        winStart,
+        winEnd,
+      );
+      if (first !== null && first < minT) {
+        minT = first;
+      }
+      if (last !== null && last > maxT) {
+        maxT = last;
+      }
+    }
+    if (minT === Number.POSITIVE_INFINITY || maxT === Number.NEGATIVE_INFINITY) {
+      return raw;
+    }
+    const t = Number(raw);
+    if (t > maxT) {
+      return asTime(maxT);
+    }
+    if (t < minT) {
+      return asTime(minT);
+    }
+    return raw;
   }
 
   private collectSeriesData(

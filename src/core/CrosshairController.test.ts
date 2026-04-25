@@ -360,6 +360,168 @@ describe("CrosshairController — background redraw cadence", () => {
   });
 });
 
+describe("CrosshairController — snap clamp to data range (cycle B)", () => {
+  // TimeScale: 60 slots over 1200 px ⇒ 20 px per bar, slot 0 at startTime.
+  // Slot times: START + k * MIN for k in [0, 60].
+  const lastSlotTime = START + 60 * MIN;
+
+  function seedPrimary(
+    s: Awaited<ReturnType<typeof setup>>,
+    times: readonly number[],
+  ): Series {
+    s.dataStore.defineChannel({ id: "primary", kind: "ohlc" });
+    for (const t of times) {
+      s.dataStore.insert("primary", MIN, ohlc(t, 150));
+    }
+    const series = { channel: "primary", kind: "ohlc" } as unknown as Series;
+    s.series.push(series);
+    return series;
+  }
+
+  it("clamps to last data time when cursor is past last bar in window", async () => {
+    const s = await setup();
+    // Data only in first 10 bars → cursor at right edge (past last data bar)
+    // should clamp to slot 9 (START + 9 * MIN).
+    const lastDataTime = START + 9 * MIN;
+    const times = Array.from({ length: 10 }, (_, k) => START + k * MIN);
+    seedPrimary(s, times);
+
+    fakeMove(s.stage, 1100, 200); // Far right — raw snap would be a high slot.
+    s.controller.redraw(s.ctx());
+
+    const p = s.payloads.at(-1);
+    expect(p).toBeDefined();
+    if (p === undefined) {return;}
+    expect(Number(p.time)).toBe(lastDataTime);
+    // seriesData at clamped time contains the real record.
+    const rec = [...p.seriesData.values()][0];
+    expect(rec).not.toBeNull();
+  });
+
+  it("clamps to first data time when cursor is before first bar in window", async () => {
+    const s = await setup();
+    // Data only in the last 10 bars; cursor near left edge.
+    const times = Array.from({ length: 10 }, (_, k) => START + (50 + k) * MIN);
+    seedPrimary(s, times);
+
+    fakeMove(s.stage, 5, 200); // Far left.
+    s.controller.redraw(s.ctx());
+
+    const p = s.payloads.at(-1);
+    expect(p).toBeDefined();
+    if (p === undefined) {return;}
+    expect(Number(p.time)).toBe(START + 50 * MIN);
+  });
+
+  it("keeps raw slot snap when cursor is inside the data range", async () => {
+    const s = await setup();
+    // Data spans slot 0..20; cursor at mid should NOT clamp.
+    const times = Array.from({ length: 21 }, (_, k) => START + k * MIN);
+    seedPrimary(s, times);
+
+    // x = 200 px at 20 px/bar ⇒ slot 10.
+    fakeMove(s.stage, 200, 200);
+    s.controller.redraw(s.ctx());
+
+    const p = s.payloads.at(-1);
+    expect(p).toBeDefined();
+    if (p === undefined) {return;}
+    expect(Number(p.time)).toBe(START + 10 * MIN);
+  });
+
+  it("keeps raw slot snap when cursor lands on an interior empty slot", async () => {
+    const s = await setup();
+    // Data at slot 0 and slot 20 only. Interior gap from 1..19.
+    seedPrimary(s, [START, START + 20 * MIN]);
+
+    // Mid-gap cursor — x ≈ 200px (slot 10). Should stay on slot 10, not clamp.
+    fakeMove(s.stage, 200, 200);
+    s.controller.redraw(s.ctx());
+
+    const p = s.payloads.at(-1);
+    expect(p).toBeDefined();
+    if (p === undefined) {return;}
+    expect(Number(p.time)).toBe(START + 10 * MIN);
+    // seriesData for interior gap slot is null (no record).
+    const rec = [...p.seriesData.values()][0];
+    expect(rec).toBeNull();
+  });
+
+  it("does not clamp when no series has any data in the window", async () => {
+    const s = await setup();
+    s.dataStore.defineChannel({ id: "primary", kind: "ohlc" });
+    const series = { channel: "primary", kind: "ohlc" } as unknown as Series;
+    s.series.push(series);
+
+    fakeMove(s.stage, 1100, 200);
+    s.controller.redraw(s.ctx());
+
+    const p = s.payloads.at(-1);
+    expect(p).toBeDefined();
+    if (p === undefined) {return;}
+    // Raw slot at x=1100 (20 px/bar) is 55; clamped to slotCount-1 === 60.
+    // Either way, not clamped to data (since there's none).
+    expect(Number(p.time)).toBeGreaterThan(START + 50 * MIN);
+    expect(Number(p.time)).toBeLessThanOrEqual(lastSlotTime);
+  });
+
+  it("skips marker-kind series in the clamp union", async () => {
+    const s = await setup();
+    // OHLC primary has data up to slot 5. A marker series has one marker at
+    // slot 40. Cursor at far right should clamp to the OHLC max (slot 5),
+    // NOT to the marker at slot 40.
+    s.dataStore.defineChannel({ id: "primary", kind: "ohlc" });
+    s.dataStore.defineChannel({ id: "markers", kind: "marker" });
+    for (let k = 0; k <= 5; k++) {
+      s.dataStore.insert("primary", MIN, ohlc(START + k * MIN, 150));
+    }
+    s.dataStore.insert("markers", MIN, {
+      time: asTime(START + 40 * MIN),
+      position: "above",
+      shape: "circle",
+    });
+    const sA = { channel: "primary", kind: "ohlc" } as unknown as Series;
+    const sM = { channel: "markers", kind: "marker" } as unknown as Series;
+    s.series.push(sA, sM);
+
+    fakeMove(s.stage, 1100, 200); // Far right.
+    s.controller.redraw(s.ctx());
+
+    const p = s.payloads.at(-1);
+    expect(p).toBeDefined();
+    if (p === undefined) {return;}
+    expect(Number(p.time)).toBe(START + 5 * MIN);
+  });
+
+  it("uses the union across series: max of per-series lastTime", async () => {
+    const s = await setup();
+    // primary has data up to slot 5; sma has data up to slot 30.
+    s.dataStore.defineChannel({ id: "primary", kind: "ohlc" });
+    s.dataStore.defineChannel({ id: "sma", kind: "point" });
+    for (let k = 0; k <= 5; k++) {
+      s.dataStore.insert("primary", MIN, ohlc(START + k * MIN, 150));
+    }
+    for (let k = 10; k <= 30; k++) {
+      s.dataStore.insert("sma", MIN, {
+        time: asTime(START + k * MIN),
+        value: asPrice(123),
+      });
+    }
+    const sA = { channel: "primary", kind: "ohlc" } as unknown as Series;
+    const sB = { channel: "sma", kind: "point" } as unknown as Series;
+    s.series.push(sA, sB);
+
+    // Cursor at far right; should clamp to slot 30 (the union's max), not slot 5.
+    fakeMove(s.stage, 1100, 200);
+    s.controller.redraw(s.ctx());
+
+    const p = s.payloads.at(-1);
+    expect(p).toBeDefined();
+    if (p === undefined) {return;}
+    expect(Number(p.time)).toBe(START + 30 * MIN);
+  });
+});
+
 describe("CrosshairController — destroy", () => {
   it("unsubscribes stage + canvas listeners and hides crosshair", async () => {
     const s = await setup();

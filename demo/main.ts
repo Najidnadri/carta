@@ -5,6 +5,8 @@ import {
   AreaSeries,
   BaselineSeries,
   CandlestickSeries,
+  defaultPriceFormatter,
+  formatAxisLabel,
   HeikinAshiSeries,
   HistogramSeries,
   LineSeries,
@@ -16,6 +18,7 @@ import {
   type CartaEventMap,
   type Channel,
   type ChartWindow,
+  type CrosshairSeriesKey,
   type DataRequest,
   type IntervalChange,
   type LineStyle,
@@ -471,6 +474,18 @@ async function main(): Promise<void> {
   let lastCrosshairPayload: CartaEventMap["crosshair:move"] | null = null;
   let crosshairPayloadCount = 0;
 
+  // Demo mirrors the formatter it passes to `applyOptions`. The library has
+  // no public getter, so we keep a local ref and update it in lockstep with
+  // any `applyOptions({priceFormatter})` call.
+  let currentPriceFormatter: PriceFormatter = defaultPriceFormatter;
+
+  interface SeriesMeta {
+    readonly name: string;
+    readonly kind: "ohlc" | "point" | "marker";
+  }
+  const seriesMeta = new Map<CrosshairSeriesKey, SeriesMeta>();
+  const keyOf = (s: object): CrosshairSeriesKey => s as unknown as CrosshairSeriesKey;
+
   const onWindowChange = (win: ChartWindow): void => {
     eventCounts.window++;
     lastEvents.window = win;
@@ -541,6 +556,11 @@ async function main(): Promise<void> {
   const onCrosshairMove = (info: CartaEventMap["crosshair:move"]): void => {
     lastCrosshairPayload = info;
     crosshairPayloadCount += 1;
+    // Cycle B fix F-2 — write the panel inline with the emit so the next
+    // paint reflects this frame's payload (≤ 1 RAF). DOM writes are still
+    // ≤ 1/RAF because the controller caps emits at RAF rate; cxCache
+    // suppresses no-op writes.
+    updateCrosshairPanel();
   };
 
   const wireEvents = (c: TimeSeriesChart): void => {
@@ -574,6 +594,39 @@ async function main(): Promise<void> {
     lineType: currentLineType,
   });
 
+  const primaryLabelFor = (type: PrimarySeriesType): string => {
+    switch (type) {
+      case "candle":
+        return "Candles";
+      case "ohlc-bar":
+        return "OHLC bars";
+      case "heikin-ashi":
+        return "Heikin-Ashi";
+    }
+  };
+
+  const refreshSeriesMeta = (): void => {
+    seriesMeta.clear();
+    if (primary !== null) {
+      seriesMeta.set(keyOf(primary), { name: primaryLabelFor(primaryType), kind: "ohlc" });
+    }
+    if (sma !== null) {
+      seriesMeta.set(keyOf(sma), { name: "SMA", kind: "point" });
+    }
+    if (volume !== null) {
+      seriesMeta.set(keyOf(volume), { name: "Volume", kind: "point" });
+    }
+    if (areaExtra !== null) {
+      seriesMeta.set(keyOf(areaExtra), { name: "Area", kind: "point" });
+    }
+    if (baselineExtra !== null) {
+      seriesMeta.set(keyOf(baselineExtra), { name: "Baseline", kind: "point" });
+    }
+    if (markerOverlay !== null) {
+      seriesMeta.set(keyOf(markerOverlay), { name: "Markers", kind: "marker" });
+    }
+  };
+
   {
     const first = await mount(buildMountOpts());
     chart = first.chart;
@@ -581,6 +634,7 @@ async function main(): Promise<void> {
     sma = first.sma;
     volume = first.volume;
     wireEvents(chart);
+    refreshSeriesMeta();
   }
 
   const remount = async (): Promise<void> => {
@@ -594,6 +648,15 @@ async function main(): Promise<void> {
     baselineExtra = null;
     markerOverlay = null;
     resetEventCounts();
+    // Cycle B — drop stale crosshair state so the side panel doesn't render
+    // a payload whose series keys point at destroyed instances.
+    lastCrosshairPayload = null;
+    crosshairPayloadCount = 0;
+    seriesMeta.clear();
+    // Cycle B fix F-2 — sync the panel to em-dashes immediately, before the
+    // next mount potentially re-emits, so the AC "panel reverts to em-dashes
+    // within 1 RAF without cursor move" holds even on slow remounts.
+    updateCrosshairPanel();
     const next = await mount(buildMountOpts());
     if (gen !== generation) {
       next.chart.destroy();
@@ -604,6 +667,7 @@ async function main(): Promise<void> {
     sma = next.sma;
     volume = next.volume;
     wireEvents(chart);
+    refreshSeriesMeta();
   };
 
   const setPrimaryType = (next: PrimarySeriesType): void => {
@@ -615,6 +679,7 @@ async function main(): Promise<void> {
     }
     primaryType = next;
     primary = chart.addSeries(createPrimarySeries(next, DEMO_OHLC_CHANNEL));
+    refreshSeriesMeta();
     const sel = document.getElementById("primary-series-type") as HTMLSelectElement | null;
     if (sel !== null && sel.value !== next) {
       sel.value = next;
@@ -631,6 +696,7 @@ async function main(): Promise<void> {
         priceReference: { channel: DEMO_OHLC_CHANNEL },
       }),
     );
+    refreshSeriesMeta();
     return true;
   };
 
@@ -641,6 +707,7 @@ async function main(): Promise<void> {
     const removed = chart.removeSeries(markerOverlay);
     if (removed) {
       markerOverlay = null;
+      refreshSeriesMeta();
     }
     return removed;
   };
@@ -657,6 +724,7 @@ async function main(): Promise<void> {
         lineType: currentLineType,
       }),
     );
+    refreshSeriesMeta();
   };
 
   const setLineStyle = (style: LineStyle, type: LineType): void => {
@@ -671,6 +739,175 @@ async function main(): Promise<void> {
   const readoutDomain = document.getElementById("readout-domain");
   const readoutCache = document.getElementById("readout-cache");
   const readoutEvents = document.getElementById("readout-events");
+  const cxPanel = document.getElementById("crosshair-panel");
+  const cxStatus = document.getElementById("cx-status");
+  const cxTime = document.getElementById("cx-time");
+  const cxPrice = document.getElementById("cx-price");
+  const cxPoint = document.getElementById("cx-point");
+  const cxEmits = document.getElementById("cx-emits");
+  const cxSeries = document.getElementById("series-readouts");
+
+  const EM_DASH = "—";
+  // Field-level cache so we only mutate textContent when the rendered string
+  // actually changes — keeps DOM writes at 0 cost during settled hover.
+  const cxCache = {
+    status: "",
+    time: "",
+    price: "",
+    point: "",
+    emits: "",
+    active: false,
+    seriesHtml: "",
+  };
+
+  const formatOhlcValue = (v: number, formatter: PriceFormatter): string => {
+    if (!Number.isFinite(v)) { return EM_DASH; }
+    try { return formatter(v); } catch { return EM_DASH; }
+  };
+
+  const appendKV = (parent: HTMLElement, label: string, value: string): void => {
+    const lbl = document.createElement("span");
+    lbl.className = "label";
+    lbl.textContent = label;
+    const val = document.createElement("span");
+    val.className = "value";
+    val.textContent = value;
+    parent.append(lbl, val);
+  };
+
+  // Builds a fingerprint for `cxCache` diffing. Includes only the dynamic
+  // fields (per-series values + meta size); the structure is stable for a
+  // given seriesMeta state, so a fingerprint match guarantees zero DOM work.
+  const seriesReadoutFingerprint = (
+    payload: CartaEventMap["crosshair:move"] | null,
+  ): string => {
+    if (seriesMeta.size === 0) { return ""; }
+    const parts: string[] = [];
+    for (const [key, meta] of seriesMeta) {
+      const rec = payload?.seriesData.get(key) ?? null;
+      parts.push(meta.name, meta.kind);
+      if (meta.kind === "ohlc") {
+        const o = rec !== null && "open" in rec ? formatOhlcValue(Number(rec.open), currentPriceFormatter) : EM_DASH;
+        const h = rec !== null && "high" in rec ? formatOhlcValue(Number(rec.high), currentPriceFormatter) : EM_DASH;
+        const l = rec !== null && "low" in rec ? formatOhlcValue(Number(rec.low), currentPriceFormatter) : EM_DASH;
+        const c = rec !== null && "close" in rec ? formatOhlcValue(Number(rec.close), currentPriceFormatter) : EM_DASH;
+        const volRaw = rec !== null && "volume" in rec ? rec.volume : undefined;
+        const vol = volRaw !== undefined ? formatOhlcValue(volRaw, currentPriceFormatter) : "";
+        parts.push(o, h, l, c, vol);
+      } else if (meta.kind === "point") {
+        const v = rec !== null && "value" in rec ? formatOhlcValue(Number(rec.value), currentPriceFormatter) : EM_DASH;
+        parts.push(v);
+      } else {
+        parts.push(rec !== null ? "present" : EM_DASH);
+      }
+    }
+    return parts.join("");
+  };
+
+  const buildSeriesReadoutNodes = (
+    payload: CartaEventMap["crosshair:move"] | null,
+  ): readonly HTMLElement[] => {
+    if (seriesMeta.size === 0) { return []; }
+    const out: HTMLElement[] = [];
+    for (const [key, meta] of seriesMeta) {
+      const rec = payload?.seriesData.get(key) ?? null;
+      const article = document.createElement("article");
+      article.className = "series-row";
+      article.dataset.kind = meta.kind;
+      article.dataset.name = meta.name;
+
+      const header = document.createElement("header");
+      const nameEl = document.createElement("span");
+      nameEl.className = "series-name";
+      nameEl.textContent = meta.name;
+      const kindEl = document.createElement("span");
+      kindEl.className = "series-kind";
+      kindEl.textContent = meta.kind;
+      header.append(nameEl, kindEl);
+
+      const values = document.createElement("div");
+      values.className = "series-values";
+
+      if (meta.kind === "marker") {
+        appendKV(values, "marker", rec !== null ? "present" : EM_DASH);
+      } else if (meta.kind === "ohlc") {
+        const o = rec !== null && "open" in rec ? formatOhlcValue(Number(rec.open), currentPriceFormatter) : EM_DASH;
+        const h = rec !== null && "high" in rec ? formatOhlcValue(Number(rec.high), currentPriceFormatter) : EM_DASH;
+        const l = rec !== null && "low" in rec ? formatOhlcValue(Number(rec.low), currentPriceFormatter) : EM_DASH;
+        const c = rec !== null && "close" in rec ? formatOhlcValue(Number(rec.close), currentPriceFormatter) : EM_DASH;
+        appendKV(values, "O", o);
+        appendKV(values, "H", h);
+        appendKV(values, "L", l);
+        appendKV(values, "C", c);
+        const volRaw = rec !== null && "volume" in rec ? rec.volume : undefined;
+        if (volRaw !== undefined) {
+          appendKV(values, "V", formatOhlcValue(volRaw, currentPriceFormatter));
+        }
+      } else {
+        const v = rec !== null && "value" in rec
+          ? formatOhlcValue(Number(rec.value), currentPriceFormatter)
+          : EM_DASH;
+        appendKV(values, "value", v);
+      }
+
+      article.append(header, values);
+      out.push(article);
+    }
+    return out;
+  };
+
+  const updateCrosshairPanel = (): void => {
+    if (cxPanel === null) {
+      return;
+    }
+    const payload = lastCrosshairPayload;
+    const active = payload !== null && payload.time !== null;
+    const iv = chart === null ? NaN : Number(chart.getInterval());
+    const timeStr = active && Number.isFinite(iv) && iv > 0
+      ? formatAxisLabel(payload.time, iv, false)
+      : EM_DASH;
+    const priceStr = active && payload.price !== null
+      ? (((): string => { try { return currentPriceFormatter(Number(payload.price)); } catch { return EM_DASH; } })())
+      : EM_DASH;
+    const pointStr = payload !== null
+      ? `${Number(payload.point.x).toFixed(0)}, ${Number(payload.point.y).toFixed(0)}`
+      : EM_DASH;
+    const statusStr = payload === null ? "idle" : active ? "active" : "outside plot";
+    const emitsStr = String(crosshairPayloadCount);
+
+    if (cxCache.active !== active) {
+      cxPanel.dataset.active = String(active);
+      cxCache.active = active;
+    }
+    if (cxCache.status !== statusStr && cxStatus !== null) {
+      cxStatus.textContent = statusStr;
+      cxCache.status = statusStr;
+    }
+    if (cxCache.time !== timeStr && cxTime !== null) {
+      cxTime.textContent = timeStr;
+      cxCache.time = timeStr;
+    }
+    if (cxCache.price !== priceStr && cxPrice !== null) {
+      cxPrice.textContent = priceStr;
+      cxCache.price = priceStr;
+    }
+    if (cxCache.point !== pointStr && cxPoint !== null) {
+      cxPoint.textContent = pointStr;
+      cxCache.point = pointStr;
+    }
+    if (cxCache.emits !== emitsStr && cxEmits !== null) {
+      cxEmits.textContent = emitsStr;
+      cxCache.emits = emitsStr;
+    }
+    if (cxSeries !== null) {
+      const fingerprint = seriesReadoutFingerprint(payload);
+      if (fingerprint !== cxCache.seriesHtml) {
+        const nodes = buildSeriesReadoutNodes(payload);
+        cxSeries.replaceChildren(...nodes);
+        cxCache.seriesHtml = fingerprint;
+      }
+    }
+  };
   const formatCacheStats = (stats: readonly CacheStats[]): string => {
     if (stats.length === 0) {
       return "—";
@@ -706,6 +943,7 @@ async function main(): Promise<void> {
     if (readoutEvents !== null) {
       readoutEvents.textContent = `w:${String(eventCounts.window)} i:${String(eventCounts.interval)} d:${String(eventCounts.data)} r:${String(eventCounts.resize)}`;
     }
+    updateCrosshairPanel();
   };
   requestAnimationFrame(updateReadout);
 
@@ -949,6 +1187,7 @@ async function main(): Promise<void> {
         return false;
       }
       areaExtra = chart.addSeries(new AreaSeries({ channel }));
+      refreshSeriesMeta();
       return true;
     },
     removeAreaSeries: (): boolean => {
@@ -958,6 +1197,7 @@ async function main(): Promise<void> {
       const removed = chart.removeSeries(areaExtra);
       if (removed) {
         areaExtra = null;
+        refreshSeriesMeta();
       }
       return removed;
     },
@@ -966,6 +1206,7 @@ async function main(): Promise<void> {
         return false;
       }
       baselineExtra = chart.addSeries(new BaselineSeries({ channel, baseline }));
+      refreshSeriesMeta();
       return true;
     },
     removeBaselineSeries: (): boolean => {
@@ -975,6 +1216,7 @@ async function main(): Promise<void> {
       const removed = chart.removeSeries(baselineExtra);
       if (removed) {
         baselineExtra = null;
+        refreshSeriesMeta();
       }
       return removed;
     },
@@ -985,6 +1227,7 @@ async function main(): Promise<void> {
       const removed = chart.removeSeries(primary);
       if (removed) {
         primary = null;
+        refreshSeriesMeta();
       }
       return removed;
     },
@@ -1071,10 +1314,12 @@ async function main(): Promise<void> {
       chart?.removePriceRangeProvider(p);
     },
     setPriceFormatter: (formatter: PriceFormatter): void => {
+      currentPriceFormatter = formatter;
       chart?.applyOptions({ priceFormatter: formatter });
     },
     resetPriceFormatter: (): void => {
-      chart?.applyOptions({ priceFormatter: (v) => v.toFixed(2) });
+      currentPriceFormatter = defaultPriceFormatter;
+      chart?.applyOptions({ priceFormatter: defaultPriceFormatter });
     },
     labelCacheSize: (): number => timeFormatInternals.labelCacheSize(),
     lastWarnings: (): readonly string[] => [...activeLogger.warnings],

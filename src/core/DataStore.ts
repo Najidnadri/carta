@@ -215,6 +215,35 @@ export class DataStore {
     return this.getAt(channelId, intervalDuration, time);
   }
 
+  /**
+   * O(log n). Earliest record time in `[start, end]` for the channel's cache
+   * at this interval, or `null` when nothing qualifies (channel unregistered,
+   * no cache bucket, empty, or no record inside the range).
+   */
+  earliestTimeInWindow(
+    channelId: string,
+    intervalDuration: number,
+    start: number,
+    end: number,
+  ): number | null {
+    const cache = this.channels.get(channelId)?.byInterval.get(intervalDuration);
+    return cache?.firstTimeInRange(start, end) ?? null;
+  }
+
+  /**
+   * O(log n). Latest record time in `[start, end]` for the channel's cache
+   * at this interval. See `earliestTimeInWindow` for null semantics.
+   */
+  latestTimeInWindow(
+    channelId: string,
+    intervalDuration: number,
+    start: number,
+    end: number,
+  ): number | null {
+    const cache = this.channels.get(channelId)?.byInterval.get(intervalDuration);
+    return cache?.lastTimeInRange(start, end) ?? null;
+  }
+
   recordsInRange(
     channelId: string,
     intervalDuration: number,

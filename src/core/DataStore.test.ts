@@ -478,3 +478,67 @@ describe("DataStore.getBar", () => {
     expect(store.getBar("primary", MINUTE, MINUTE * 3)).toBe(store.getAt("primary", MINUTE, MINUTE * 3));
   });
 });
+
+describe("DataStore — earliest/latestTimeInWindow (cycle B)", () => {
+  it("returns null for an unregistered channel", () => {
+    const store = new DataStore();
+    expect(store.earliestTimeInWindow("nope", MINUTE, 0, 10 * MINUTE)).toBeNull();
+    expect(store.latestTimeInWindow("nope", MINUTE, 0, 10 * MINUTE)).toBeNull();
+  });
+
+  it("returns null when the channel has no cache bucket at this interval", () => {
+    const store = new DataStore();
+    store.defineChannel({ id: "primary", kind: "ohlc" });
+    expect(store.earliestTimeInWindow("primary", MINUTE, 0, 10 * MINUTE)).toBeNull();
+    expect(store.latestTimeInWindow("primary", MINUTE, 0, 10 * MINUTE)).toBeNull();
+  });
+
+  it("returns null when the cache bucket exists but holds no records in the window", () => {
+    const store = new DataStore();
+    store.defineChannel({ id: "primary", kind: "ohlc" });
+    store.insert("primary", MINUTE, ohlc(MINUTE));
+    expect(store.earliestTimeInWindow("primary", MINUTE, 10 * MINUTE, 20 * MINUTE)).toBeNull();
+    expect(store.latestTimeInWindow("primary", MINUTE, 10 * MINUTE, 20 * MINUTE)).toBeNull();
+  });
+
+  it("returns min/max times for data wholly inside the window", () => {
+    const store = new DataStore();
+    store.defineChannel({ id: "primary", kind: "ohlc" });
+    for (const t of [3 * MINUTE, 4 * MINUTE, 7 * MINUTE]) {
+      store.insert("primary", MINUTE, ohlc(t));
+    }
+    expect(store.earliestTimeInWindow("primary", MINUTE, MINUTE, 10 * MINUTE)).toBe(3 * MINUTE);
+    expect(store.latestTimeInWindow("primary", MINUTE, MINUTE, 10 * MINUTE)).toBe(7 * MINUTE);
+  });
+
+  it("treats range boundaries as inclusive on both ends", () => {
+    const store = new DataStore();
+    store.defineChannel({ id: "primary", kind: "ohlc" });
+    store.insert("primary", MINUTE, ohlc(5 * MINUTE));
+    store.insert("primary", MINUTE, ohlc(7 * MINUTE));
+    expect(store.earliestTimeInWindow("primary", MINUTE, 5 * MINUTE, 7 * MINUTE)).toBe(5 * MINUTE);
+    expect(store.latestTimeInWindow("primary", MINUTE, 5 * MINUTE, 7 * MINUTE)).toBe(7 * MINUTE);
+    expect(store.earliestTimeInWindow("primary", MINUTE, 5 * MINUTE, 5 * MINUTE)).toBe(5 * MINUTE);
+    expect(store.earliestTimeInWindow("primary", MINUTE, 7 * MINUTE, 7 * MINUTE)).toBe(7 * MINUTE);
+  });
+
+  it("works for point-kind channels (markers still covered by firstTime helpers)", () => {
+    const store = new DataStore();
+    store.defineChannel({ id: "sma", kind: "point" });
+    for (const t of [2 * MINUTE, 8 * MINUTE]) {
+      store.insert("sma", MINUTE, point(t));
+    }
+    expect(store.earliestTimeInWindow("sma", MINUTE, 0, 10 * MINUTE)).toBe(2 * MINUTE);
+    expect(store.latestTimeInWindow("sma", MINUTE, 0, 10 * MINUTE)).toBe(8 * MINUTE);
+  });
+
+  it("narrows to the window when data extends past it", () => {
+    const store = new DataStore();
+    store.defineChannel({ id: "primary", kind: "ohlc" });
+    for (const t of [1 * MINUTE, 3 * MINUTE, 5 * MINUTE, 7 * MINUTE, 9 * MINUTE]) {
+      store.insert("primary", MINUTE, ohlc(t));
+    }
+    expect(store.earliestTimeInWindow("primary", MINUTE, 4 * MINUTE, 8 * MINUTE)).toBe(5 * MINUTE);
+    expect(store.latestTimeInWindow("primary", MINUTE, 4 * MINUTE, 8 * MINUTE)).toBe(7 * MINUTE);
+  });
+});

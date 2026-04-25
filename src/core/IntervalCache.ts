@@ -65,6 +65,17 @@ export class IntervalCache<R extends DataRecord> {
     return this._byTime.get(time);
   }
 
+  /** O(1). Returns the earliest cached record time, or `null` if empty. */
+  firstTime(): number | null {
+    return this._times.length === 0 ? null : (this._times[0] as number);
+  }
+
+  /** O(1). Returns the latest cached record time, or `null` if empty. */
+  lastTime(): number | null {
+    const n = this._times.length;
+    return n === 0 ? null : (this._times[n - 1] as number);
+  }
+
   /**
    * Insert a single record. Returns `true` if the record was accepted,
    * `false` if it was dropped (non-finite time, or unaligned on ohlc/point).
@@ -113,6 +124,48 @@ export class IntervalCache<R extends DataRecord> {
       this._revision++;
     }
     return acceptedCount;
+  }
+
+  /**
+   * O(log n). Earliest cached record time with `start <= time <= end`, or
+   * `null` if no cached record falls in the inclusive range.
+   */
+  firstTimeInRange(start: number, end: number): number | null {
+    if (
+      !Number.isFinite(start) ||
+      !Number.isFinite(end) ||
+      start > end ||
+      this._times.length === 0
+    ) {
+      return null;
+    }
+    const idx = lowerBound(this._times, start);
+    if (idx >= this._times.length) {
+      return null;
+    }
+    const t = this._times[idx] as number;
+    return t > end ? null : t;
+  }
+
+  /**
+   * O(log n). Latest cached record time with `start <= time <= end`, or
+   * `null` if no cached record falls in the inclusive range.
+   */
+  lastTimeInRange(start: number, end: number): number | null {
+    if (
+      !Number.isFinite(start) ||
+      !Number.isFinite(end) ||
+      start > end ||
+      this._times.length === 0
+    ) {
+      return null;
+    }
+    const hi = lowerBound(this._times, end + 1);
+    if (hi === 0) {
+      return null;
+    }
+    const t = this._times[hi - 1] as number;
+    return t < start ? null : t;
   }
 
   /**
