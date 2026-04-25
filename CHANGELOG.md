@@ -2,6 +2,47 @@
 
 ### Added
 
+- **Phase 11 cycle A — demo upgrades.** New `demo/mock-source.ts` exports a
+  deterministic `MockSource` class with one fetcher per channel kind
+  (`fetchOhlc / fetchVolume / fetchSma / fetchEvents`) plus tick generators
+  (`tickOhlc / tickVolume`). The fundamental series is at 1 m resolution;
+  coarser intervals are aggregated as `open=first.open, high=max, low=min,
+  close=last.close, volume=sum`. SMA fetch is self-sufficient (no
+  chart-cache dependency). `tickOhlc` falls back to `basePrice` when the
+  supplied `prev` is malformed (NaN/Infinity OHLC fields).
+- **Phase 11 cycle A — interval / overlay / live-tick demo UI.**
+  `demo/index.html` adds an interval `<select>` (1 m / 5 m / 1 h / 1 D),
+  an overlay-shape `<select>` (Line / Area / Baseline against the same
+  `demo-sma` channel), a `Live tick` toggle button, and a per-channel
+  data-request log table (`#request-log-table`, capacity 50). Mobile
+  `@media (max-width: 700px)` block makes `body` scrollable, gives `#chart`
+  `min-height: 50svh`, flows the sidebar (with the new request log) below
+  the chart, and bumps native `<select>` controls to ≥44×44 tap targets.
+- **Phase 11 cycle A — `RequestLog` ring buffer.** `demo/request-log.ts`
+  exposes a bounded append-and-drop log (capacity 50 by default) with
+  per-row source tagging (`data:request` vs `cache-hit-synthetic`).
+  Synthetic cache-hit rows are pushed on overlay-shape swaps when the
+  SMA channel has cached records, making the no-refetch invariant visible
+  to traders.
+- **Phase 11 cycle A — `LiveTickDriver`.** `demo/live-tick-driver.ts`
+  runs a drift-free 1 Hz `setTimeout` loop that reads the latest cached
+  OHLC, calls `MockSource.tickOhlc(iv, now, prev)` to extend or
+  boundary-append, and supplies paired ohlc + volume ticks via
+  `chart.supplyTick`. Survives `Remount chart` — the demo replays the
+  toggle state against the freshly-mounted chart.
+- **Phase 11 cycle A — Playwright test hooks.** `__cartaTest`
+  surface gains `MockSource`, `requestLogEntries() / requestLogTotal() /
+  clearRequestLog()`, `setOverlayShape() / getOverlayShape()`,
+  `startLiveTick() / stopLiveTick() / isLiveTickRunning() /
+  liveTickCount() / fireLiveTickOnce()`, and `selectInterval()`. Every
+  pre-existing hook (e.g. `generateOhlc`, `computePivotMarkers`,
+  `loadDemoData`, `setSmaStyle`) remains callable.
+- **Phase 11 cycle A — vitest coverage.** `demo/mock-source.test.ts`,
+  `demo/request-log.test.ts`, `demo/live-tick-driver.test.ts` cover
+  determinism, 1 m → ND aggregation, extend-vs-append boundary, NaN-prev
+  fallback, ring-buffer drop semantics, drift-free scheduling, and stop
+  cancellation. `vite.config.ts` `test.include` extended to
+  `demo/**/*.test.ts`.
 - `TimeSeriesChart` class with layered PixiJS v8 scene graph (`bgLayer / gridLayer /
   plotClip(seriesLayer, overlays, drawings) / crosshairLayer / axesLayer / legendLayer /
   tooltipLayer`), scissor-rect plot clip, and render-on-demand dirty-flag invalidation.

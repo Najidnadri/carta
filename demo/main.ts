@@ -38,6 +38,9 @@ import {
   type TimeSeriesChartConstructionOptions,
 } from "../src/index.js";
 import { __internals__ as timeFormatInternals } from "../src/core/time/timeFormat.js";
+import { computePivotMarkers, MockSource } from "./mock-source.js";
+import { LiveTickDriver } from "./live-tick-driver.js";
+import { RequestLog, type RequestLogEntry } from "./request-log.js";
 
 (globalThis as unknown as { Carta?: typeof CartaExports }).Carta = CartaExports;
 
@@ -148,112 +151,8 @@ const DEMO_VOLUME_CHANNEL = "demo-volume";
 const DEMO_SMA_CHANNEL = "demo-sma";
 const DEMO_MARKER_CHANNEL = "demo-markers";
 const SMA_PERIOD = 20;
-const PIVOT_HALF_WINDOW = 2;
 
-interface SyntheticBar extends OhlcRecord {
-  readonly volume: number;
-}
-
-/**
- * Deterministic seeded synthetic OHLC + volume generator. Used by the demo's
- * "Load synthetic data" button to exercise the cache wiring before Phase 07
- * series exist to render it. Inputs are bar-aligned; output is sorted asc.
- */
-function generateSyntheticOhlc(
-  startTime: number,
-  endTime: number,
-  intervalDuration: number,
-  basePrice: number,
-): SyntheticBar[] {
-  if (
-    !Number.isFinite(startTime) ||
-    !Number.isFinite(endTime) ||
-    !Number.isFinite(intervalDuration) ||
-    intervalDuration <= 0 ||
-    !Number.isInteger(intervalDuration) ||
-    startTime > endTime
-  ) {
-    return [];
-  }
-  const start = Math.floor(startTime / intervalDuration) * intervalDuration;
-  const end = Math.floor(endTime / intervalDuration) * intervalDuration;
-  const out: SyntheticBar[] = [];
-  let prev = basePrice;
-  let seed = 0x9e3779b1 ^ start;
-  const next = (): number => {
-    seed = Math.imul(seed ^ (seed >>> 15), 0x85ebca6b) >>> 0;
-    seed = Math.imul(seed ^ (seed >>> 13), 0xc2b2ae35) >>> 0;
-    return ((seed ^ (seed >>> 16)) >>> 0) / 0xffffffff;
-  };
-  for (let t = start; t <= end; t += intervalDuration) {
-    const drift = (next() - 0.5) * basePrice * 0.01;
-    const open = prev;
-    const close = Math.max(0.01, open + drift);
-    const high = Math.max(open, close) + next() * basePrice * 0.005;
-    const low = Math.min(open, close) - next() * basePrice * 0.005;
-    const volume = Math.floor(next() * 5000) + 100;
-    out.push({
-      time: asTime(t),
-      open: asPrice(open),
-      high: asPrice(high),
-      low: asPrice(Math.max(0.0001, low)),
-      close: asPrice(close),
-      volume,
-    });
-    prev = close;
-  }
-  return out;
-}
-
-const VOLUME_OVERLAY_BAND_FRACTION = 0.15;
-// Bright palette so up/down bars exceed criterion-1 luminance delta (> 40/255)
-// and stay distinguishable in sunlight and greyscale.
-const VOLUME_UP_COLOR = 0x00e676;
-const VOLUME_DOWN_COLOR = 0xff1744;
-
-/**
- * Map raw volume values into a visual band at the bottom of the candle's
- * price range so the histogram overlays the candles without dragging the
- * auto-scale domain outside the candle extents. Pre-colors bars by
- * close ≥ open so HistogramSeries' per-record color override is exercised.
- */
-function scaleVolumeForOverlay(bars: readonly SyntheticBar[]): PointRecord[] {
-  if (bars.length === 0) {
-    return [];
-  }
-  let priceMin = Number.POSITIVE_INFINITY;
-  let priceMax = Number.NEGATIVE_INFINITY;
-  let volumeMax = 0;
-  for (const b of bars) {
-    const low = Number(b.low);
-    const high = Number(b.high);
-    if (Number.isFinite(low) && low < priceMin) {
-      priceMin = low;
-    }
-    if (Number.isFinite(high) && high > priceMax) {
-      priceMax = high;
-    }
-    if (b.volume > volumeMax) {
-      volumeMax = b.volume;
-    }
-  }
-  if (!Number.isFinite(priceMin) || !Number.isFinite(priceMax) || priceMin >= priceMax || volumeMax <= 0) {
-    return [];
-  }
-  const band = (priceMax - priceMin) * VOLUME_OVERLAY_BAND_FRACTION;
-  const out: PointRecord[] = [];
-  for (const b of bars) {
-    const normalized = b.volume / volumeMax;
-    const value = priceMin + normalized * band;
-    const isUp = Number(b.close) >= Number(b.open);
-    out.push({
-      time: b.time,
-      value: asPrice(value),
-      color: isUp ? VOLUME_UP_COLOR : VOLUME_DOWN_COLOR,
-    });
-  }
-  return out;
-}
+const sharedMockSource = new MockSource({ basePrice: 100 });
 
 type PrimarySeriesType = "candle" | "ohlc-bar" | "heikin-ashi";
 
@@ -275,101 +174,6 @@ interface MountResult {
   readonly primary: PrimarySeries;
   readonly sma: LineSeries;
   readonly volume: HistogramSeries;
-}
-
-/**
- * 5-bar pivot extrema: emits arrowDown at local highs, arrowUp at local lows.
- * A bar at index i is a local high iff `bars[i].high` strictly exceeds every
- * high in `[i-half, i+half] \ {i}`; mirror for lows. Edges (i < half or i >
- * length-1-half) are skipped so every marker has a full 5-bar context.
- */
-function computePivotMarkers(
-  bars: readonly OhlcRecord[],
-  halfWindow: number = PIVOT_HALF_WINDOW,
-): MarkerRecord[] {
-  if (bars.length < halfWindow * 2 + 1) {
-    return [];
-  }
-  const out: MarkerRecord[] = [];
-  for (let i = halfWindow; i < bars.length - halfWindow; i++) {
-    const me = bars[i];
-    if (me === undefined) {
-      continue;
-    }
-    const meHigh = Number(me.high);
-    const meLow = Number(me.low);
-    if (!Number.isFinite(meHigh) || !Number.isFinite(meLow)) {
-      continue;
-    }
-    let isHigh = true;
-    let isLow = true;
-    for (let j = i - halfWindow; j <= i + halfWindow; j++) {
-      if (j === i) {
-        continue;
-      }
-      const other = bars[j];
-      if (other === undefined) {
-        isHigh = false;
-        isLow = false;
-        break;
-      }
-      const oh = Number(other.high);
-      const ol = Number(other.low);
-      if (!Number.isFinite(oh) || !Number.isFinite(ol)) {
-        isHigh = false;
-        isLow = false;
-        break;
-      }
-      if (oh >= meHigh) {
-        isHigh = false;
-      }
-      if (ol <= meLow) {
-        isLow = false;
-      }
-      if (!isHigh && !isLow) {
-        break;
-      }
-    }
-    if (isHigh) {
-      out.push({ time: me.time, shape: "arrowDown", position: "above" });
-    } else if (isLow) {
-      out.push({ time: me.time, shape: "arrowUp", position: "below" });
-    }
-  }
-  return out;
-}
-
-function computeSma(
-  closes: readonly { time: Time; close: number }[],
-  period: number,
-): PointRecord[] {
-  if (closes.length < period) {
-    return [];
-  }
-  const out: PointRecord[] = [];
-  let sum = 0;
-  for (let i = 0; i < period; i++) {
-    const entry = closes[i];
-    if (entry === undefined) {
-      return [];
-    }
-    sum += entry.close;
-  }
-  const seed = closes[period - 1];
-  if (seed === undefined) {
-    return [];
-  }
-  out.push({ time: seed.time, value: asPrice(sum / period) });
-  for (let i = period; i < closes.length; i++) {
-    const curr = closes[i];
-    const prev = closes[i - period];
-    if (curr === undefined || prev === undefined) {
-      continue;
-    }
-    sum += curr.close - prev.close;
-    out.push({ time: curr.time, value: asPrice(sum / period) });
-  }
-  return out;
 }
 
 interface MountOptions {
@@ -577,42 +381,29 @@ async function main(): Promise<void> {
       return;
     }
     if (req.channelId === DEMO_OHLC_CHANNEL) {
-      const bars = generateSyntheticOhlc(start, end, iv, 100);
+      const bars = sharedMockSource.fetchOhlc(iv, start, end);
       chart.supplyData(req.channelId, iv, bars);
       // Pre-supply marker channel alongside OHLC — markers never fire their
       // own data:request (marker-kind channels short-circuit in
       // `DataStore.missingRanges`), so the host must push them proactively.
-      const markers = computePivotMarkers(bars);
+      const markers = sharedMockSource.fetchEvents(iv, start, end);
       if (markers.length > 0) {
         chart.supplyData(DEMO_MARKER_CHANNEL, iv, markers);
       }
       return;
     }
     if (req.channelId === DEMO_SMA_CHANNEL) {
-      // Pull all cached candles ±SMA_PERIOD bars so the SMA has enough
-      // lookback to cover the requested window.
-      const windowPad = SMA_PERIOD * iv;
-      const cached = chart.recordsInRange(
-        DEMO_OHLC_CHANNEL,
-        iv,
-        start - windowPad,
-        end,
-      ) as readonly OhlcRecord[];
-      const closes = cached.map((b) => ({ time: b.time, close: Number(b.close) }));
-      const sma = computeSma(closes, SMA_PERIOD).filter(
-        (p) => Number(p.time) >= start && Number(p.time) <= end,
-      );
+      const sma = sharedMockSource.fetchSma(iv, start, end, SMA_PERIOD);
       if (sma.length > 0) {
         chart.supplyData(req.channelId, iv, sma);
       }
       return;
     }
     if (req.channelId === DEMO_VOLUME_CHANNEL) {
-      // Pull the same synthetic bars the candles use, then host-scale
-      // the volume into the bottom 15% of the candle range and pre-color
-      // by up/down sentiment so HistogramSeries gets per-bar colors.
-      const bars = generateSyntheticOhlc(start, end, iv, 100);
-      chart.supplyData(req.channelId, iv, scaleVolumeForOverlay(bars));
+      const points = sharedMockSource.fetchVolume(iv, start, end);
+      if (points.length > 0) {
+        chart.supplyData(req.channelId, iv, points);
+      }
     }
   };
 
@@ -712,6 +503,12 @@ async function main(): Promise<void> {
 
   const remount = async (): Promise<void> => {
     const gen = ++generation;
+    // Phase 11 cycle A — drop the live-tick driver before destroying the chart
+    // so we don't hold a dangling reference. Re-arm after mount if the user
+    // had toggled it ON.
+    const liveWanted = liveTickWanted;
+    liveTickDriver?.stop();
+    liveTickDriver = null;
     chart?.destroy();
     chart = null;
     primary = null;
@@ -720,6 +517,7 @@ async function main(): Promise<void> {
     areaExtra = null;
     baselineExtra = null;
     markerOverlay = null;
+    overlayAlt = null;
     resetEventCounts();
     // Cycle B — drop stale crosshair state so the side panel doesn't render
     // a payload whose series keys point at destroyed instances.
@@ -740,11 +538,23 @@ async function main(): Promise<void> {
     sma = next.sma;
     volume = next.volume;
     wireEvents(chart);
+    chart.on("data:request", logRequest);
     refreshSeriesMeta();
     // Phase 10 — re-apply the active theme so a remount doesn't snap back to
     // dark when the user had flipped to light.
     if (currentThemeName === "light") {
       chart.applyOptions({ theme: LightTheme });
+    }
+    // Re-apply overlay shape if user had swapped to area/baseline pre-remount.
+    if (overlayShape !== "line") {
+      const targetShape = overlayShape;
+      overlayShape = "line";
+      setOverlayShape(targetShape);
+    }
+    if (liveWanted) {
+      liveTickDriver = buildLiveTickDriver();
+      liveTickDriver?.start();
+      updateLiveTickBtn();
     }
   };
 
@@ -1043,24 +853,23 @@ async function main(): Promise<void> {
     if (!Number.isFinite(ivNum) || ivNum <= 0 || !Number.isFinite(s) || !Number.isFinite(e)) {
       return;
     }
-    const domain = chart.priceScale().getDomain();
-    const mid = (Number(domain.min) + Number(domain.max)) / 2 || 100;
     const volume: Channel = { id: DEMO_VOLUME_CHANNEL, kind: "point" };
     chart.defineChannel(volume);
-    const windowPad = SMA_PERIOD * ivNum;
-    const bars = generateSyntheticOhlc(s - windowPad, e, ivNum, mid);
-    chart.supplyData(DEMO_OHLC_CHANNEL, ivNum, bars);
-    const visibleBars = bars.filter((b) => Number(b.time) >= s);
-    const volumePoints = scaleVolumeForOverlay(visibleBars);
+    const bars = sharedMockSource.fetchOhlc(ivNum, s, e);
+    if (bars.length > 0) {
+      chart.supplyData(DEMO_OHLC_CHANNEL, ivNum, bars);
+    }
+    const volumePoints = sharedMockSource.fetchVolume(ivNum, s, e);
     if (volumePoints.length > 0) {
       chart.supplyData(DEMO_VOLUME_CHANNEL, ivNum, volumePoints);
     }
-    const closes = bars.map((b) => ({ time: b.time, close: Number(b.close) }));
-    const sma = computeSma(closes, SMA_PERIOD).filter(
-      (p) => Number(p.time) >= s && Number(p.time) <= e,
-    );
+    const sma = sharedMockSource.fetchSma(ivNum, s, e, SMA_PERIOD);
     if (sma.length > 0) {
       chart.supplyData(DEMO_SMA_CHANNEL, ivNum, sma);
+    }
+    const markers = sharedMockSource.fetchEvents(ivNum, s, e);
+    if (markers.length > 0) {
+      chart.supplyData(DEMO_MARKER_CHANNEL, ivNum, markers);
     }
   };
   document.getElementById("load-data")?.addEventListener("click", loadSyntheticData);
@@ -1174,11 +983,209 @@ async function main(): Promise<void> {
     }
   });
 
+  // ── Phase 11 cycle A — request log, interval selector, overlay shape, live tick ──
+  const requestLogTbody = document.getElementById("request-log-tbody");
+  const requestLogFooter = document.getElementById("request-log-footer");
+  const requestLog = new RequestLog({
+    capacity: 50,
+    tbody: requestLogTbody,
+    footer: requestLogFooter,
+  });
+  requestLog.render();
+
+  const logRequest = (req: DataRequest): void => {
+    const iv = Number(req.intervalDuration);
+    const start = Number(req.startTime);
+    const end = Number(req.endTime);
+    if (!Number.isFinite(iv) || iv <= 0) {
+      return;
+    }
+    requestLog.push({
+      channelId: req.channelId,
+      kind: req.kind,
+      interval: iv,
+      start,
+      end,
+      source: "data:request",
+    });
+  };
+  chart.on("data:request", logRequest);
+
+  type OverlayShape = "line" | "area" | "baseline";
+  let overlayShape: OverlayShape = "line";
+  let overlayAlt: AreaSeries | BaselineSeries | null = null;
+
+  const recordsCachedFor = (channelId: string, iv: number, start: number, end: number): boolean => {
+    if (chart === null) {
+      return false;
+    }
+    return chart.recordsInRange(channelId, iv, start, end).length > 0;
+  };
+
+  const setOverlayShape = (next: OverlayShape): void => {
+    if (chart === null || next === overlayShape) {
+      return;
+    }
+    const prev = overlayShape;
+    overlayShape = next;
+    const win = chart.getWindow();
+    const iv = Number(chart.getInterval());
+    const s = Number(win.startTime);
+    const e = Number(win.endTime);
+    const cacheHit = recordsCachedFor(DEMO_SMA_CHANNEL, iv, s, e);
+
+    if (prev === "line" && sma !== null) {
+      chart.removeSeries(sma);
+      sma = null;
+    } else if (overlayAlt !== null) {
+      chart.removeSeries(overlayAlt);
+      overlayAlt = null;
+    }
+    if (next === "line") {
+      sma = chart.addSeries(
+        new LineSeries({
+          channel: DEMO_SMA_CHANNEL,
+          lineStyle: currentLineStyle,
+          lineType: currentLineType,
+        }),
+      );
+    } else if (next === "area") {
+      overlayAlt = chart.addSeries(new AreaSeries({ channel: DEMO_SMA_CHANNEL }));
+    } else {
+      overlayAlt = chart.addSeries(
+        new BaselineSeries({ channel: DEMO_SMA_CHANNEL, baseline: 100 }),
+      );
+    }
+    refreshSeriesMeta();
+    if (cacheHit && Number.isFinite(iv) && iv > 0) {
+      requestLog.push({
+        channelId: DEMO_SMA_CHANNEL,
+        kind: "point",
+        interval: iv,
+        start: s,
+        end: e,
+        source: "cache-hit-synthetic",
+      });
+    }
+    const sel = document.getElementById("overlay-shape") as HTMLSelectElement | null;
+    if (sel !== null && sel.value !== next) {
+      sel.value = next;
+    }
+  };
+
+  const overlayShapeSelect = document.getElementById("overlay-shape") as HTMLSelectElement | null;
+  if (overlayShapeSelect !== null) {
+    overlayShapeSelect.value = overlayShape;
+    overlayShapeSelect.addEventListener("change", () => {
+      const raw = overlayShapeSelect.value;
+      if (raw === "line" || raw === "area" || raw === "baseline") {
+        setOverlayShape(raw);
+      }
+    });
+  }
+
+  // ── Live-tick driver ─────────────────────────────────────────────────
+  let liveTickDriver: LiveTickDriver | null = null;
+  let liveTickWanted = false;
+
+  const buildLiveTickDriver = (): LiveTickDriver | null => {
+    if (chart === null) {
+      return null;
+    }
+    return new LiveTickDriver({
+      chart,
+      source: sharedMockSource,
+      ohlcChannel: DEMO_OHLC_CHANNEL,
+      volumeChannel: DEMO_VOLUME_CHANNEL,
+      intervalMs: 1000,
+    });
+  };
+
+  const liveTickBtn = document.getElementById("toggle-live-tick");
+  const updateLiveTickBtn = (): void => {
+    if (liveTickBtn === null) {
+      return;
+    }
+    const on = liveTickWanted && liveTickDriver?.isRunning() === true;
+    liveTickBtn.textContent = `Live tick: ${on ? "ON" : "OFF"}`;
+    liveTickBtn.setAttribute("aria-pressed", String(on));
+  };
+  const startLiveTick = (): void => {
+    liveTickWanted = true;
+    liveTickDriver ??= buildLiveTickDriver();
+    liveTickDriver?.start();
+    updateLiveTickBtn();
+  };
+  const stopLiveTick = (): void => {
+    liveTickWanted = false;
+    liveTickDriver?.stop();
+    updateLiveTickBtn();
+  };
+  liveTickBtn?.addEventListener("click", () => {
+    if (liveTickWanted) {
+      stopLiveTick();
+    } else {
+      startLiveTick();
+    }
+  });
+  updateLiveTickBtn();
+
+  // ── Interval selector ────────────────────────────────────────────────
+  const intervalSelect = document.getElementById("interval-select") as HTMLSelectElement | null;
+  if (intervalSelect !== null) {
+    intervalSelect.value = String(initialWindow.intervalDuration);
+    intervalSelect.addEventListener("change", () => {
+      const next = Number(intervalSelect.value);
+      if (!Number.isFinite(next) || next <= 0 || chart === null) {
+        return;
+      }
+      const wasRunning = liveTickDriver?.isRunning() === true;
+      if (wasRunning) {
+        liveTickDriver?.stop();
+      }
+      chart.setInterval(next);
+      if (wasRunning) {
+        liveTickDriver?.start();
+        updateLiveTickBtn();
+      }
+    });
+  }
+
   // Test hooks (dev only) — used by Playwright for adversarial scenarios.
   const testHook = {
     TimeSeriesChart,
+    MockSource,
     canvasCount: (): number => document.querySelectorAll("canvas").length,
     getChart: (): TimeSeriesChart | null => chart,
+    // ── Phase 11 cycle A — request log / overlay / live tick / interval ──
+    requestLogEntries: (): readonly RequestLogEntry[] => requestLog.snapshot(),
+    requestLogTotal: (): number => requestLog.totalPushed(),
+    clearRequestLog: (): void => { requestLog.clear(); },
+    setOverlayShape: (shape: "line" | "area" | "baseline"): void => { setOverlayShape(shape); },
+    getOverlayShape: (): OverlayShape => overlayShape,
+    startLiveTick: (): void => { startLiveTick(); },
+    stopLiveTick: (): void => { stopLiveTick(); },
+    isLiveTickRunning: (): boolean => liveTickDriver?.isRunning() === true,
+    liveTickCount: (): number => liveTickDriver?.tickCounter() ?? 0,
+    fireLiveTickOnce: (): void => { liveTickDriver?.fireOnceForTest(); },
+    selectInterval: (intervalDuration: number): void => {
+      if (chart === null) {
+        return;
+      }
+      const wasRunning = liveTickDriver?.isRunning() === true;
+      if (wasRunning) {
+        liveTickDriver?.stop();
+      }
+      chart.setInterval(intervalDuration);
+      const sel = document.getElementById("interval-select") as HTMLSelectElement | null;
+      if (sel !== null) {
+        sel.value = String(intervalDuration);
+      }
+      if (wasRunning) {
+        liveTickDriver?.start();
+        updateLiveTickBtn();
+      }
+    },
     resize: (w: number, h: number): void => {
       chart?.resize(w, h);
     },
@@ -1499,8 +1506,10 @@ async function main(): Promise<void> {
       endTime: number,
       intervalDuration: number,
       basePrice: number,
-    ): readonly OhlcRecord[] =>
-      generateSyntheticOhlc(startTime, endTime, intervalDuration, basePrice),
+    ): readonly OhlcRecord[] => {
+      void basePrice;
+      return sharedMockSource.fetchOhlc(intervalDuration, startTime, endTime);
+    },
     synthWheel: (opts: {
       x: number;
       y: number;

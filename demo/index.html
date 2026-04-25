@@ -106,6 +106,57 @@
         font-size: 12px;
         overflow-y: auto;
         min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      #request-log-section {
+        border-top: 1px solid var(--border);
+        padding-top: 8px;
+      }
+      #request-log-section h2 {
+        margin: 0 0 6px 0;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      #request-log-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      #request-log-table th,
+      #request-log-table td {
+        text-align: left;
+        padding: 3px 4px;
+        border-bottom: 1px solid var(--border);
+      }
+      #request-log-table td.channel {
+        word-break: break-word;
+      }
+      #request-log-table td.range,
+      #request-log-table td.at {
+        white-space: nowrap;
+      }
+      #request-log-table th {
+        color: var(--muted);
+        font-weight: 500;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      #request-log-table tr[data-source="cache-hit-synthetic"] td.source {
+        color: #58a6ff;
+      }
+      #request-log-table tr[data-source="data:request"] td.source {
+        color: #f0883e;
+      }
+      #request-log-footer {
+        color: var(--muted);
+        font-size: 10px;
+        margin-top: 4px;
       }
       #crosshair-panel h2 {
         margin: 0 0 8px 0;
@@ -175,14 +226,35 @@
         opacity: 0.6;
       }
       @media (max-width: 700px) {
+        html,
+        body {
+          height: auto;
+          min-height: 100%;
+        }
+        #app {
+          height: auto;
+          min-height: 100svh;
+          grid-template-rows: auto auto auto;
+        }
         #stage {
           grid-template-columns: 1fr;
-          grid-template-rows: 1fr auto;
+          grid-template-rows: minmax(50svh, 1fr) auto;
+        }
+        #chart {
+          min-height: 50svh;
         }
         #crosshair-panel {
           border-left: none;
           border-top: 1px solid var(--border);
-          max-height: 40%;
+          max-height: none;
+        }
+        header select,
+        header label {
+          min-height: 44px;
+        }
+        header select {
+          padding: 10px 8px;
+          font-size: 14px;
         }
       }
     </style>
@@ -199,6 +271,24 @@
         <button id="auto-supply" aria-pressed="false">Auto-supply: OFF</button>
         <button id="toggle-markers" aria-pressed="false">Markers: OFF</button>
         <button id="toggle-theme" aria-pressed="false">Theme: Dark</button>
+        <button id="toggle-live-tick" aria-pressed="false">Live tick: OFF</button>
+        <label for="interval-select" style="font-size: 12px; color: var(--muted);">
+          Interval
+          <select id="interval-select" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:3px 6px;font-size:12px;margin-left:4px;">
+            <option value="60000">1m</option>
+            <option value="300000">5m</option>
+            <option value="3600000">1h</option>
+            <option value="86400000">1D</option>
+          </select>
+        </label>
+        <label for="overlay-shape" style="font-size: 12px; color: var(--muted);">
+          Overlay
+          <select id="overlay-shape" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:3px 6px;font-size:12px;margin-left:4px;">
+            <option value="line">Line</option>
+            <option value="area">Area</option>
+            <option value="baseline">Baseline</option>
+          </select>
+        </label>
         <label for="line-style" style="font-size: 12px; color: var(--muted);">
           SMA
           <select id="line-style" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:3px 6px;font-size:12px;margin-left:4px;">
@@ -239,6 +329,26 @@
           </dl>
           <section id="series-readouts" aria-label="Series values at crosshair">
             <!-- populated by main.ts -->
+          </section>
+          <section id="request-log-section" aria-label="Per-channel data-request log">
+            <h2>Request log</h2>
+            <table id="request-log-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>t</th>
+                  <th>channel</th>
+                  <th>kind</th>
+                  <th>ivl</th>
+                  <th>range</th>
+                  <th>src</th>
+                </tr>
+              </thead>
+              <tbody id="request-log-tbody">
+                <!-- populated by request-log.ts -->
+              </tbody>
+            </table>
+            <div id="request-log-footer">0 / 50 · #0</div>
           </section>
         </aside>
       </div>
