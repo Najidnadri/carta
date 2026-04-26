@@ -759,10 +759,17 @@ function projectCallout(d: CalloutDrawing, ctx: ProjectionContext): CalloutGeom 
   const charW = 6;
   const padding = 8;
   const lineH = 14;
-  const lines = d.text.length === 0 ? 0 : Math.max(1, d.text.split("\n").length);
+  // Phase 13 Cycle D — empty-text callouts ALWAYS render a placeholder bubble
+  // so the user sees the speech-bubble pill from the moment they place the
+  // second anchor. Pre-D behavior was a 0×0 bbox (invisible) which made
+  // freshly-placed callouts look like a stray pin. Minimum 60×22 CSS px.
+  const lines = d.text.length === 0 ? 1 : Math.max(1, d.text.split("\n").length);
   const longestLine = d.text.split("\n").reduce((m, l) => Math.max(m, l.length), 0);
-  const labelW = lines === 0 ? 0 : Math.max(20, longestLine * charW + padding * 2);
-  const labelH = lines === 0 ? 0 : lines * lineH + padding;
+  const minEmptyW = 60;
+  const labelW = d.text.length === 0
+    ? minEmptyW
+    : Math.max(20, longestLine * charW + padding * 2);
+  const labelH = lines * lineH + padding;
   const labelX = labelCenter.x - labelW / 2;
   const labelY = labelCenter.y - labelH / 2;
   const leaderEnd = computeLeaderEnd(pin, labelX, labelY, labelW, labelH);
@@ -1245,7 +1252,11 @@ function projectFibArcs(d: FibArcsDrawing, ctx: ProjectionContext): FibArcsGeom 
 
 // ─── Phase 13 Cycle C.3 — brush + icon projectors ──────────────────────────
 
-const DEFAULT_ICON_SIZE_CSS = 32;
+// Phase 13 Cycle D — visible default. The earlier 32 / 40 sizes were too
+// small to read against candle bodies; 28 (after the CanvasSource fix)
+// reads well and isn't oversized. Users can resize via the bottom-right
+// handle once selected.
+const DEFAULT_ICON_SIZE_CSS = 28;
 
 function projectBrush(d: BrushDrawing, ctx: ProjectionContext): BrushGeom {
   const a0 = projectAnchor(ctx.timeScale, ctx.priceScale, Number(d.anchors[0].time), Number(d.anchors[0].price));

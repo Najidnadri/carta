@@ -76,6 +76,18 @@ export function isDarkTheme(theme: Theme): boolean {
 
 const DARK_THEME_DEFAULT_ALPHA_FLOOR = 0.85;
 
+/**
+ * Phase 13 Cycle D — ghost mode (live create-preview). When `true`,
+ * `resolveStroke` raises every stroke alpha to a `≥ 0.7` floor so the
+ * compound `g.alpha = 0.55` container fade lands at ≈ 0.385 visible — readable
+ * even on dim fib connectors. Set by `redrawDrawing` before the per-kind
+ * switch and cleared in a `finally`. Pixi rendering is single-threaded so the
+ * module-level mutable is safe; the `try/finally` guards exception paths.
+ */
+let CURRENT_GHOST = false;
+
+const GHOST_STROKE_ALPHA_FLOOR = 0.7;
+
 function resolveStroke(stroke: DrawingStroke | undefined, theme: Theme, dpr: number): ResolvedStroke {
   const baseWidth = stroke?.width ?? 1;
   const dprBucket = dpr <= 1 ? 1 : dpr <= 1.5 ? 1.5 : 2;
@@ -86,6 +98,9 @@ function resolveStroke(stroke: DrawingStroke | undefined, theme: Theme, dpr: num
   let effectiveAlpha = stroke?.alpha ?? 1;
   if (stroke?.alpha === undefined && isDarkTheme(theme)) {
     effectiveAlpha = Math.max(effectiveAlpha, DARK_THEME_DEFAULT_ALPHA_FLOOR);
+  }
+  if (CURRENT_GHOST) {
+    effectiveAlpha = Math.max(effectiveAlpha, GHOST_STROKE_ALPHA_FLOOR);
   }
   return Object.freeze({
     color: stroke?.color ?? theme.line,
@@ -176,8 +191,14 @@ function drawRectangle(g: Graphics, geom: RectangleGeom, drawing: Drawing, theme
   const y = geom.yMin;
   const w = geom.xMax - geom.xMin;
   const h = geom.yMax - geom.yMin;
-  if (fill !== undefined) {
-    g.rect(x, y, w, h).fill({ color: fill.color, alpha: fill.alpha ?? 0.2 });
+  // Phase 13 Cycle D — default fill: shapes always render filled at low
+  // alpha so a freshly-placed rectangle / ellipse / channel / range is
+  // visually obvious without the host setting a fill. Hosts can pass an
+  // explicit `fill` to override; pass `{ alpha: 0 }` to opt out entirely.
+  const fillColor = fill?.color ?? stroke.color;
+  const fillAlpha = fill?.alpha ?? 0.15;
+  if (fillAlpha > 0) {
+    g.rect(x, y, w, h).fill({ color: fillColor, alpha: fillAlpha });
   }
   // Border (sub-pixel snap so 1-px strokes render sharply).
   const sx = Math.round(x) + 0.5;
@@ -304,24 +325,33 @@ function drawText(g: Graphics, geom: TextGeom, drawing: Drawing, theme: Theme): 
 
 function drawCallout(g: Graphics, geom: CalloutGeom, drawing: Drawing, theme: Theme, dpr: number): void {
   const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
-  // Pin marker.
-  g.circle(geom.pin.x, geom.pin.y, 3).fill({ color: stroke.color, alpha: 1 });
+  // Phase 13 Cycle D — always render the speech-bubble pill so the drawing
+  // is visible from creation (rather than being a 3-px pin until the user
+  // styles a fill). The bubble inherits the host-supplied fill when set,
+  // else uses a theme-derived default. Rounded-rect background + 1-px
+  // stroke border so the bubble reads on both light and dark themes.
+  const fill = drawing.style.fill;
+  const fillColor = fill?.color ?? theme.crosshairTagBg;
+  const fillAlpha = fill?.alpha ?? 0.85;
+  if (geom.labelW > 0 && geom.labelH > 0) {
+    g.roundRect(geom.labelX, geom.labelY, geom.labelW, geom.labelH, 4).fill({
+      color: fillColor,
+      alpha: fillAlpha,
+    });
+    g.roundRect(geom.labelX, geom.labelY, geom.labelW, geom.labelH, 4).stroke({
+      color: stroke.color,
+      alpha: stroke.alpha * 0.8,
+      width: 1,
+    });
+  }
   // Leader line (only when pin is outside label bbox).
   if (geom.leaderEnd !== null) {
     g.moveTo(geom.pin.x, geom.pin.y)
       .lineTo(geom.leaderEnd.x, geom.leaderEnd.y)
       .stroke({ color: stroke.color, alpha: stroke.alpha, width: stroke.width });
   }
-  // Label background; the pool draws the actual BitmapText pill.
-  // We only stroke the bbox border at low alpha so the box is visible when
-  // it is empty (zero-text bbox is clipped to 0).
-  const fill = drawing.style.fill;
-  if (geom.labelW > 0 && geom.labelH > 0 && fill !== undefined) {
-    g.rect(geom.labelX, geom.labelY, geom.labelW, geom.labelH).fill({
-      color: fill.color,
-      alpha: fill.alpha ?? 0.12,
-    });
-  }
+  // Pin marker — drawn last so it sits on top of the leader.
+  g.circle(geom.pin.x, geom.pin.y, 3).fill({ color: stroke.color, alpha: 1 });
 }
 
 function drawArrow(g: Graphics, geom: ArrowGeom, drawing: Drawing, theme: Theme, dpr: number): void {
@@ -460,10 +490,14 @@ function drawEllipse(g: Graphics, geom: EllipseGeom, drawing: Drawing, theme: Th
   }
   const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
   const fill = drawing.style.fill;
-  if (fill !== undefined) {
+  // Cycle D — default fill at 0.15 alpha so a freshly-placed ellipse is
+  // visible without host styling (mirrors rectangle).
+  const fillColor = fill?.color ?? stroke.color;
+  const fillAlpha = fill?.alpha ?? 0.15;
+  if (fillAlpha > 0) {
     g.ellipse(geom.cx, geom.cy, geom.rx, geom.ry).fill({
-      color: fill.color,
-      alpha: fill.alpha ?? 0.18,
+      color: fillColor,
+      alpha: fillAlpha,
     });
   }
   g.ellipse(geom.cx, geom.cy, geom.rx, geom.ry).stroke({
@@ -570,12 +604,28 @@ function drawIcon(_g: Graphics): void {
   /* sprite handles the visual; graphics row stays empty */
 }
 
+/**
+ * Phase 13 Cycle D — selection visual mode passed through to `redrawDrawing`.
+ * - `'primary'`: drawing is the selection focus (single-select target or
+ *   multi-select primary). Renders a thicker dashed marquee + larger handle.
+ * - `'secondary'`: drawing is part of a multi-select but not the primary.
+ *   Thinner marquee + smaller handle.
+ * - `null`: not selected.
+ */
+export type SelectedKind = "primary" | "secondary" | null;
+
+export interface RedrawOptions {
+  readonly selected?: SelectedKind;
+  readonly ghost?: boolean;
+}
+
 export function redrawDrawing(
   g: Graphics,
   drawing: Drawing,
   geom: ScreenGeom,
   theme: Theme,
   dpr: number,
+  opts: RedrawOptions = {},
 ): void {
   g.clear();
   if (!drawing.visible) {
@@ -583,6 +633,37 @@ export function redrawDrawing(
     return;
   }
   g.visible = true;
+  const ghost = opts.ghost === true;
+  const selected = opts.selected ?? null;
+  // Container-level fade for ghost previews — single multiplicative pass that
+  // dims the entire body uniformly without each draw fn needing an alpha arg.
+  // 0.85 reads clearly against both light and dark themes; the per-stroke
+  // ghost-floor (0.7) keeps even the dimmest fib connector legible after
+  // compound fade.
+  g.alpha = ghost ? 0.85 : 1;
+  CURRENT_GHOST = ghost;
+  try {
+    // Cycle D — under-stroke halo on selected drawings. Renders BEFORE the
+    // body so the body lays on top of the halo. Skipped for ghost previews.
+    if (selected !== null && !ghost) {
+      drawHalo(g, drawing, geom, theme, dpr, selected);
+    }
+    drawBody(g, drawing, geom, theme, dpr);
+    if (selected !== null && !ghost) {
+      drawSelectionMarquee(g, geom, theme, dpr, selected);
+    }
+  } finally {
+    CURRENT_GHOST = false;
+  }
+}
+
+function drawBody(
+  g: Graphics,
+  drawing: Drawing,
+  geom: ScreenGeom,
+  theme: Theme,
+  dpr: number,
+): void {
   switch (geom.kind) {
     case "trendline":
       drawTrendline(g, geom, drawing, theme, dpr);
@@ -663,26 +744,367 @@ export function redrawDrawing(
   }
 }
 
+// ─── Phase 13 Cycle D — Selection decoration ──────────────────────────────
+
+const FILLED_KINDS = new Set<ScreenGeom["kind"]>([
+  "rectangle",
+  "ellipse",
+  "parallelChannel",
+  "longPosition",
+  "shortPosition",
+  "dateRange",
+  "priceRange",
+  "priceDateRange",
+]);
+
+const MARQUEE_PADDING_PX = 4;
+
+/** Compute the screen-space bounding box of a `ScreenGeom`. */
+export function geomBbox(geom: ScreenGeom): {
+  readonly xMin: number;
+  readonly xMax: number;
+  readonly yMin: number;
+  readonly yMax: number;
+} {
+  // Many geoms already carry a precomputed bbox — re-export for consistency.
+  if ("bbox" in geom) {
+    return geom.bbox;
+  }
+  switch (geom.kind) {
+    case "trendline":
+    case "ray":
+    case "extendedLine": {
+      const a = geom.visible[0];
+      const b = geom.visible[1];
+      return {
+        xMin: Math.min(a.x, b.x),
+        xMax: Math.max(a.x, b.x),
+        yMin: Math.min(a.y, b.y),
+        yMax: Math.max(a.y, b.y),
+      };
+    }
+    case "horizontalLine": {
+      return { xMin: geom.x1, xMax: geom.x2, yMin: geom.snappedY, yMax: geom.snappedY };
+    }
+    case "verticalLine": {
+      return { xMin: geom.snappedX, xMax: geom.snappedX, yMin: geom.y1, yMax: geom.y2 };
+    }
+    case "horizontalRay": {
+      return { xMin: geom.x1, xMax: geom.x2, yMin: geom.snappedY, yMax: geom.snappedY };
+    }
+    case "rectangle": {
+      return { xMin: geom.xMin, xMax: geom.xMax, yMin: geom.yMin, yMax: geom.yMax };
+    }
+    case "ellipse": {
+      return { xMin: geom.xMin, xMax: geom.xMax, yMin: geom.yMin, yMax: geom.yMax };
+    }
+    case "text": {
+      // Anchor + a small reach for the dot; pool emits the pill separately.
+      return {
+        xMin: geom.anchor.x - 4,
+        xMax: geom.anchor.x + 80,
+        yMin: geom.anchor.y - 16,
+        yMax: geom.anchor.y + 4,
+      };
+    }
+    case "callout": {
+      const xMin = Math.min(geom.pin.x, geom.labelX);
+      const xMax = Math.max(geom.pin.x, geom.labelX + Math.max(20, geom.labelW));
+      const yMin = Math.min(geom.pin.y, geom.labelY);
+      const yMax = Math.max(geom.pin.y, geom.labelY + Math.max(20, geom.labelH));
+      return { xMin, xMax, yMin, yMax };
+    }
+    case "arrow": {
+      const a = geom.anchors[0];
+      const b = geom.anchors[1];
+      return {
+        xMin: Math.min(a.x, b.x),
+        xMax: Math.max(a.x, b.x),
+        yMin: Math.min(a.y, b.y),
+        yMax: Math.max(a.y, b.y),
+      };
+    }
+    case "dateRange":
+    case "priceRange":
+    case "priceDateRange": {
+      return { xMin: geom.xLeft, xMax: geom.xRight, yMin: geom.yTop, yMax: geom.yBottom };
+    }
+    case "icon": {
+      const half = geom.sizeCss / 2;
+      return {
+        xMin: geom.anchor.x - half,
+        xMax: geom.anchor.x + half,
+        yMin: geom.anchor.y - half,
+        yMax: geom.anchor.y + half,
+      };
+    }
+  }
+}
+
+function drawSelectionMarquee(
+  g: Graphics,
+  geom: ScreenGeom,
+  theme: Theme,
+  dpr: number,
+  selected: SelectedKind,
+): void {
+  const bbox = geomBbox(geom);
+  const w = bbox.xMax - bbox.xMin;
+  const h = bbox.yMax - bbox.yMin;
+  // Skip if the bbox collapsed to a point — there's nothing to outline.
+  if (w <= 1 && h <= 1) {
+    return;
+  }
+  const dprBucket = dpr <= 1 ? 1 : dpr <= 1.5 ? 1.5 : 2;
+  const baseWidth = selected === "primary" ? 1.5 : 1;
+  const stroke: ResolvedStroke = Object.freeze({
+    color: theme.selection,
+    alpha: 0.7,
+    width: baseWidth * dprBucket,
+    style: "dashed",
+  });
+  const x = bbox.xMin - MARQUEE_PADDING_PX;
+  const y = bbox.yMin - MARQUEE_PADDING_PX;
+  const ww = w + MARQUEE_PADDING_PX * 2;
+  const hh = h + MARQUEE_PADDING_PX * 2;
+  // Four dashed segments rather than a single rect so each side picks up the
+  // dash phase reset (`drawDashedSegment` re-zeroes per-segment).
+  drawSegment(g, x, y, x + ww, y, stroke);
+  drawSegment(g, x + ww, y, x + ww, y + hh, stroke);
+  drawSegment(g, x + ww, y + hh, x, y + hh, stroke);
+  drawSegment(g, x, y + hh, x, y, stroke);
+}
+
+function drawHalo(
+  g: Graphics,
+  drawing: Drawing,
+  geom: ScreenGeom,
+  theme: Theme,
+  dpr: number,
+  selected: SelectedKind,
+): void {
+  const dprBucket = dpr <= 1 ? 1 : dpr <= 1.5 ? 1.5 : 2;
+  const baseStroke = drawing.style.stroke;
+  const baseWidth = (baseStroke?.width ?? 1) * dprBucket;
+  const isFilled = FILLED_KINDS.has(geom.kind);
+  // Filled kinds already carry visual weight — use a thinner halo so the
+  // selected look is unmistakable but doesn't drown the fill.
+  const widthBump = isFilled ? 2 : 4;
+  const haloAlpha = isFilled ? 0.18 : 0.25;
+  // Phase 13 Cycle D — halo respects the body's dash style so dashed /
+  // dotted strokes don't get visually filled-in by a continuous halo. A
+  // solid halo on a dashed body would mask the dash gaps and the user
+  // would see what looks like a solid line.
+  const halo: ResolvedStroke = Object.freeze({
+    color: theme.selection,
+    alpha: selected === "primary" ? haloAlpha : haloAlpha * 0.7,
+    width: baseWidth + widthBump,
+    style: baseStroke?.style ?? "solid",
+  });
+  switch (geom.kind) {
+    case "trendline": {
+      const v0 = geom.visible[0];
+      const v1 = geom.visible[1];
+      drawSegment(g, v0.x, v0.y, v1.x, v1.y, halo);
+      return;
+    }
+    case "horizontalLine": {
+      drawSegment(g, geom.x1, geom.snappedY, geom.x2, geom.snappedY, halo);
+      return;
+    }
+    case "verticalLine": {
+      drawSegment(g, geom.snappedX, geom.y1, geom.snappedX, geom.y2, halo);
+      return;
+    }
+    case "ray":
+    case "extendedLine": {
+      const v0 = geom.visible[0];
+      const v1 = geom.visible[1];
+      drawSegment(g, v0.x, v0.y, v1.x, v1.y, halo);
+      return;
+    }
+    case "horizontalRay": {
+      drawSegment(g, geom.x1, geom.snappedY, geom.x2, geom.snappedY, halo);
+      return;
+    }
+    case "rectangle": {
+      const x = geom.xMin;
+      const y = geom.yMin;
+      const w = geom.xMax - geom.xMin;
+      const h = geom.yMax - geom.yMin;
+      g.rect(x, y, w, h).stroke({ color: halo.color, alpha: halo.alpha, width: halo.width });
+      return;
+    }
+    case "fibRetracement": {
+      // Halo each level line (not the trend connector which is already faint).
+      for (const lvl of geom.levels) {
+        if (!lvl.visible) {
+          continue;
+        }
+        drawSegment(g, geom.xMin, lvl.snappedY, geom.xMax, lvl.snappedY, halo);
+      }
+      return;
+    }
+    case "parallelChannel": {
+      drawSegment(g, geom.top[0].x, geom.top[0].y, geom.top[1].x, geom.top[1].y, halo);
+      drawSegment(g, geom.bottom[0].x, geom.bottom[0].y, geom.bottom[1].x, geom.bottom[1].y, halo);
+      return;
+    }
+    case "longPosition":
+    case "shortPosition": {
+      // Halo the entry/SL/TP lines — the band fills already read as selected.
+      const xl = geom.rewardRect.xLeft;
+      const xr = geom.rewardRect.xRight;
+      drawSegment(g, xl, geom.entry.y, xr, geom.entry.y, halo);
+      drawSegment(g, xl, geom.sl.y, xr, geom.sl.y, halo);
+      drawSegment(g, xl, geom.tp.y, xr, geom.tp.y, halo);
+      return;
+    }
+    case "text":
+    case "icon": {
+      // Halo is moot for these — the marquee carries the selection look.
+      return;
+    }
+    case "callout": {
+      if (geom.leaderEnd !== null) {
+        drawSegment(g, geom.pin.x, geom.pin.y, geom.leaderEnd.x, geom.leaderEnd.y, halo);
+      }
+      return;
+    }
+    case "arrow": {
+      const v0 = geom.shaft[0];
+      const v1 = geom.shaft[1];
+      drawSegment(g, v0.x, v0.y, v1.x, v1.y, halo);
+      return;
+    }
+    case "dateRange": {
+      const xL = geom.xLeft;
+      const xR = geom.xRight;
+      drawSegment(g, xL, geom.yTop, xL, geom.yBottom, halo);
+      drawSegment(g, xR, geom.yTop, xR, geom.yBottom, halo);
+      return;
+    }
+    case "priceRange": {
+      drawSegment(g, geom.xLeft, geom.yTop, geom.xRight, geom.yTop, halo);
+      drawSegment(g, geom.xLeft, geom.yBottom, geom.xRight, geom.yBottom, halo);
+      return;
+    }
+    case "priceDateRange": {
+      const x = geom.xLeft;
+      const y = geom.yTop;
+      const w = geom.xRight - geom.xLeft;
+      const h = geom.yBottom - geom.yTop;
+      g.rect(x, y, w, h).stroke({ color: halo.color, alpha: halo.alpha, width: halo.width });
+      return;
+    }
+    case "pitchfork": {
+      const c0 = geom.centerline[0];
+      const c1 = geom.centerline[1];
+      drawSegment(g, c0.x, c0.y, c1.x, c1.y, halo);
+      drawSegment(g, geom.upperRail[0].x, geom.upperRail[0].y, geom.upperRail[1].x, geom.upperRail[1].y, halo);
+      drawSegment(g, geom.lowerRail[0].x, geom.lowerRail[0].y, geom.lowerRail[1].x, geom.lowerRail[1].y, halo);
+      return;
+    }
+    case "gannFan": {
+      for (const ray of geom.rays) {
+        drawSegment(g, ray.visible[0].x, ray.visible[0].y, ray.visible[1].x, ray.visible[1].y, halo);
+      }
+      return;
+    }
+    case "ellipse": {
+      if (geom.rx <= 0 || geom.ry <= 0) {
+        return;
+      }
+      g.ellipse(geom.cx, geom.cy, geom.rx, geom.ry).stroke({
+        color: halo.color,
+        alpha: halo.alpha,
+        width: halo.width,
+      });
+      return;
+    }
+    case "fibExtension": {
+      for (const lvl of geom.levels) {
+        if (!lvl.visible) {
+          continue;
+        }
+        drawSegment(g, geom.xMin, lvl.snappedY, geom.xMax, lvl.snappedY, halo);
+      }
+      return;
+    }
+    case "fibTimeZones": {
+      for (const zone of geom.zones) {
+        drawSegment(g, zone.snappedX, geom.y1, zone.snappedX, geom.y2, halo);
+      }
+      return;
+    }
+    case "fibFan": {
+      for (const ray of geom.rays) {
+        drawSegment(g, ray.visible[0].x, ray.visible[0].y, ray.visible[1].x, ray.visible[1].y, halo);
+      }
+      return;
+    }
+    case "fibArcs": {
+      for (const ring of geom.rings) {
+        if (!Number.isFinite(ring.r) || ring.r < 1 || ring.r > 4000) {
+          continue;
+        }
+        g.arc(geom.cx, geom.cy, ring.r, 0, Math.PI).stroke({
+          color: halo.color,
+          alpha: halo.alpha,
+          width: halo.width,
+        });
+      }
+      return;
+    }
+    case "brush": {
+      if (geom.points.length < 2) {
+        return;
+      }
+      const flat: number[] = [];
+      for (const p of geom.points) {
+        flat.push(p.x, p.y);
+      }
+      g.poly(flat, false).stroke({
+        color: halo.color,
+        alpha: halo.alpha,
+        width: halo.width,
+      });
+      return;
+    }
+  }
+}
+
 // ─── Handles ───────────────────────────────────────────────────────────────
 
-const HANDLE_RADIUS_PX = 6;
+/**
+ * Phase 13 Cycle D — handle radii bumped from 6 → 8 CSS-px (10 for the
+ * primary in multi-select), fill switched to `theme.selection` so it reads
+ * against any drawing color, stroke set to `theme.background` to provide a
+ * halo ring against bright accents. Closes the dark-theme contrast bug
+ * (cycle C.3 carry-over) where `fill = theme.background` on a near-black
+ * background made handles invisible.
+ */
+const HANDLE_RADIUS_SECONDARY_PX = 8;
+const HANDLE_RADIUS_PRIMARY_PX = 10;
 
 export class HandleContextCache {
   private readonly cache = new Map<string, GraphicsContext>();
 
-  get(variant: HandleVariant, theme: Theme, dpr: number): GraphicsContext {
-    const radius = HANDLE_RADIUS_PX / Math.max(1, dpr);
-    const fill = theme.background;
-    const stroke = variant === "active" ? theme.up : theme.frame;
-    const strokeWidth = variant === "hover" || variant === "active" ? 2 : 1;
-    const key = `${variant}|${String(fill)}|${String(stroke)}|${String(strokeWidth)}|${String(radius)}`;
+  get(variant: HandleVariant, theme: Theme, dpr: number, primary: boolean): GraphicsContext {
+    const baseRadius = primary ? HANDLE_RADIUS_PRIMARY_PX : HANDLE_RADIUS_SECONDARY_PX;
+    const radius = baseRadius / Math.max(1, dpr);
+    const fill = theme.selection;
+    const stroke = theme.background;
+    const strokeWidth = variant === "hover" || variant === "active" ? 2 : 1.5;
+    const fillAlpha = variant === "active" ? 1 : 0.95;
+    const key = `${variant}|${primary ? "p" : "s"}|${String(fill)}|${String(stroke)}|${String(strokeWidth)}|${String(radius)}|${String(fillAlpha)}`;
     const cached = this.cache.get(key);
     if (cached !== undefined) {
       return cached;
     }
     const ctx = new GraphicsContext()
       .circle(0, 0, radius)
-      .fill({ color: fill, alpha: 1 })
+      .fill({ color: fill, alpha: fillAlpha })
       .circle(0, 0, radius)
       .stroke({ color: stroke, alpha: 1, width: strokeWidth });
     this.cache.set(key, ctx);
@@ -702,6 +1124,12 @@ export interface HandleSpec {
   readonly x: number;
   readonly y: number;
   readonly variant: HandleVariant;
+  /**
+   * Phase 13 Cycle D — `true` when the spec belongs to the primary selection
+   * (single-select target or the multi-select primary). The cache returns a
+   * larger handle for primaries so multi-select stays legible.
+   */
+  readonly primary: boolean;
 }
 
 /**
@@ -729,7 +1157,7 @@ export function syncHandleGraphics(
       pool.push(g);
       parent.addChild(g);
     }
-    g.context = cache.get(spec.variant, theme, dpr);
+    g.context = cache.get(spec.variant, theme, dpr, spec.primary);
     g.position.set(spec.x, spec.y);
     g.visible = true;
   }
@@ -748,14 +1176,20 @@ export function syncHandleGraphics(
  * Cycle A simplification: rectangles render handles only at the two stored
  * anchor positions (cycle B can extend to derived corners + edge-midpoints).
  */
-/** Phase 13 Cycle B.2 — handle key superset. `'time-end'` is the position-tool right-edge puller. */
-export type HandleKey = number | "corner-tr" | "corner-bl" | "time-end";
+/**
+ * Phase 13 Cycle B.2 — handle key superset.
+ * - `'time-end'`: position-tool right-edge puller.
+ * - `'icon-size'` (Cycle D): icon resize handle at the glyph's bottom-right
+ *   corner. Drag toward / away from the anchor scales `drawing.size`.
+ */
+export type HandleKey = number | "corner-tr" | "corner-bl" | "time-end" | "icon-size";
 
 export function handleSpecsFor(
   geom: ScreenGeom,
   hoveredHandle: HandleKey | null,
   draggingHandle: HandleKey | null,
   plot: { readonly w: number; readonly h: number },
+  primary = true,
 ): readonly HandleSpec[] {
   const specs: HandleSpec[] = [];
   const tol = 8;
@@ -763,6 +1197,8 @@ export function handleSpecsFor(
     x >= -tol && x <= plot.w + tol && y >= -tol && y <= plot.h + tol;
   const variantFor = (key: HandleKey): HandleVariant =>
     draggingHandle === key ? "active" : hoveredHandle === key ? "hover" : "normal";
+  const mk = (key: HandleKey, x: number, y: number): HandleSpec =>
+    Object.freeze({ key, x, y, variant: variantFor(key), primary });
   switch (geom.kind) {
     case "trendline":
     case "fibRetracement":
@@ -772,10 +1208,10 @@ export function handleSpecsFor(
       const a0 = geom.anchors[0];
       const a1 = geom.anchors[1];
       if (inPlot(a0.x, a0.y)) {
-        specs.push(Object.freeze({ key: 0, x: a0.x, y: a0.y, variant: variantFor(0) }));
+        specs.push(mk(0, a0.x, a0.y));
       }
       if (inPlot(a1.x, a1.y)) {
-        specs.push(Object.freeze({ key: 1, x: a1.x, y: a1.y, variant: variantFor(1) }));
+        specs.push(mk(1, a1.x, a1.y));
       }
       return specs;
     }
@@ -784,7 +1220,7 @@ export function handleSpecsFor(
     case "horizontalRay": {
       const a = geom.anchor;
       if (inPlot(a.x, a.y)) {
-        specs.push(Object.freeze({ key: 0, x: a.x, y: a.y, variant: variantFor(0) }));
+        specs.push(mk(0, a.x, a.y));
       }
       return specs;
     }
@@ -793,13 +1229,13 @@ export function handleSpecsFor(
       const a1 = geom.anchors[1];
       const a2 = geom.anchors[2];
       if (inPlot(a0.x, a0.y)) {
-        specs.push(Object.freeze({ key: 0, x: a0.x, y: a0.y, variant: variantFor(0) }));
+        specs.push(mk(0, a0.x, a0.y));
       }
       if (inPlot(a1.x, a1.y)) {
-        specs.push(Object.freeze({ key: 1, x: a1.x, y: a1.y, variant: variantFor(1) }));
+        specs.push(mk(1, a1.x, a1.y));
       }
       if (inPlot(a2.x, a2.y)) {
-        specs.push(Object.freeze({ key: 2, x: a2.x, y: a2.y, variant: variantFor(2) }));
+        specs.push(mk(2, a2.x, a2.y));
       }
       return specs;
     }
@@ -809,35 +1245,33 @@ export function handleSpecsFor(
       // right edge (endX, sl.y) / (endX, tp.y); time-end puller midway down
       // the right edge.
       if (inPlot(geom.entry.x, geom.entry.y)) {
-        specs.push(Object.freeze({ key: 0, x: geom.entry.x, y: geom.entry.y, variant: variantFor(0) }));
+        specs.push(mk(0, geom.entry.x, geom.entry.y));
       }
       if (inPlot(geom.endX, geom.sl.y)) {
-        specs.push(Object.freeze({ key: 1, x: geom.endX, y: geom.sl.y, variant: variantFor(1) }));
+        specs.push(mk(1, geom.endX, geom.sl.y));
       }
       if (inPlot(geom.endX, geom.tp.y)) {
-        specs.push(Object.freeze({ key: 2, x: geom.endX, y: geom.tp.y, variant: variantFor(2) }));
+        specs.push(mk(2, geom.endX, geom.tp.y));
       }
       const timeEndY = (geom.sl.y + geom.tp.y) / 2;
       if (inPlot(geom.endX, timeEndY)) {
-        specs.push(Object.freeze({ key: "time-end", x: geom.endX, y: timeEndY, variant: variantFor("time-end") }));
+        specs.push(mk("time-end", geom.endX, timeEndY));
       }
       return specs;
     }
     case "text": {
       const a = geom.anchor;
       if (inPlot(a.x, a.y)) {
-        specs.push(Object.freeze({ key: 0, x: a.x, y: a.y, variant: variantFor(0) }));
+        specs.push(mk(0, a.x, a.y));
       }
       return specs;
     }
     case "callout": {
       if (inPlot(geom.pin.x, geom.pin.y)) {
-        specs.push(Object.freeze({ key: 0, x: geom.pin.x, y: geom.pin.y, variant: variantFor(0) }));
+        specs.push(mk(0, geom.pin.x, geom.pin.y));
       }
       if (inPlot(geom.labelCenter.x, geom.labelCenter.y)) {
-        specs.push(
-          Object.freeze({ key: 1, x: geom.labelCenter.x, y: geom.labelCenter.y, variant: variantFor(1) }),
-        );
+        specs.push(mk(1, geom.labelCenter.x, geom.labelCenter.y));
       }
       return specs;
     }
@@ -845,10 +1279,10 @@ export function handleSpecsFor(
       const a0 = geom.anchors[0];
       const a1 = geom.anchors[1];
       if (inPlot(a0.x, a0.y)) {
-        specs.push(Object.freeze({ key: 0, x: a0.x, y: a0.y, variant: variantFor(0) }));
+        specs.push(mk(0, a0.x, a0.y));
       }
       if (inPlot(a1.x, a1.y)) {
-        specs.push(Object.freeze({ key: 1, x: a1.x, y: a1.y, variant: variantFor(1) }));
+        specs.push(mk(1, a1.x, a1.y));
       }
       return specs;
     }
@@ -858,10 +1292,10 @@ export function handleSpecsFor(
       const a0 = geom.anchors[0];
       const a1 = geom.anchors[1];
       if (inPlot(a0.x, a0.y)) {
-        specs.push(Object.freeze({ key: 0, x: a0.x, y: a0.y, variant: variantFor(0) }));
+        specs.push(mk(0, a0.x, a0.y));
       }
       if (inPlot(a1.x, a1.y)) {
-        specs.push(Object.freeze({ key: 1, x: a1.x, y: a1.y, variant: variantFor(1) }));
+        specs.push(mk(1, a1.x, a1.y));
       }
       return specs;
     }
@@ -870,13 +1304,13 @@ export function handleSpecsFor(
       const a1 = geom.anchors[1];
       const a2 = geom.anchors[2];
       if (inPlot(a0.x, a0.y)) {
-        specs.push(Object.freeze({ key: 0, x: a0.x, y: a0.y, variant: variantFor(0) }));
+        specs.push(mk(0, a0.x, a0.y));
       }
       if (inPlot(a1.x, a1.y)) {
-        specs.push(Object.freeze({ key: 1, x: a1.x, y: a1.y, variant: variantFor(1) }));
+        specs.push(mk(1, a1.x, a1.y));
       }
       if (inPlot(a2.x, a2.y)) {
-        specs.push(Object.freeze({ key: 2, x: a2.x, y: a2.y, variant: variantFor(2) }));
+        specs.push(mk(2, a2.x, a2.y));
       }
       return specs;
     }
@@ -887,10 +1321,10 @@ export function handleSpecsFor(
       const a0 = geom.anchors[0];
       const a1 = geom.anchors[1];
       if (inPlot(a0.x, a0.y)) {
-        specs.push(Object.freeze({ key: 0, x: a0.x, y: a0.y, variant: variantFor(0) }));
+        specs.push(mk(0, a0.x, a0.y));
       }
       if (inPlot(a1.x, a1.y)) {
-        specs.push(Object.freeze({ key: 1, x: a1.x, y: a1.y, variant: variantFor(1) }));
+        specs.push(mk(1, a1.x, a1.y));
       }
       return specs;
     }
@@ -899,20 +1333,20 @@ export function handleSpecsFor(
       const a1 = geom.anchors[1];
       const a2 = geom.anchors[2];
       if (inPlot(a0.x, a0.y)) {
-        specs.push(Object.freeze({ key: 0, x: a0.x, y: a0.y, variant: variantFor(0) }));
+        specs.push(mk(0, a0.x, a0.y));
       }
       if (inPlot(a1.x, a1.y)) {
-        specs.push(Object.freeze({ key: 1, x: a1.x, y: a1.y, variant: variantFor(1) }));
+        specs.push(mk(1, a1.x, a1.y));
       }
       if (inPlot(a2.x, a2.y)) {
-        specs.push(Object.freeze({ key: 2, x: a2.x, y: a2.y, variant: variantFor(2) }));
+        specs.push(mk(2, a2.x, a2.y));
       }
       return specs;
     }
     case "fibTimeZones": {
       const a = geom.anchor;
       if (inPlot(a.x, a.y)) {
-        specs.push(Object.freeze({ key: 0, x: a.x, y: a.y, variant: variantFor(0) }));
+        specs.push(mk(0, a.x, a.y));
       }
       return specs;
     }
@@ -923,9 +1357,14 @@ export function handleSpecsFor(
       return specs;
     }
     case "icon": {
-      const a = geom.anchor;
-      if (inPlot(a.x, a.y)) {
-        specs.push(Object.freeze({ key: 0, x: a.x, y: a.y, variant: variantFor(0) }));
+      // Phase 13 Cycle D — icons skip the center handle (it would cover
+      // the glyph) but expose ONE resize handle at the bottom-right corner
+      // of the glyph's bbox. Dragging the handle scales `drawing.size`.
+      const half = geom.sizeCss / 2;
+      const rx = geom.anchor.x + half;
+      const ry = geom.anchor.y + half;
+      if (inPlot(rx, ry)) {
+        specs.push(mk("icon-size", rx, ry));
       }
       return specs;
     }

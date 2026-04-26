@@ -31,6 +31,7 @@ export const DarkTheme: Theme = {
   crosshairLine: 0x8b949e,
   crosshairTagBg: 0x1f2630,
   crosshairTagText: 0xc9d1d9,
+  selection: 0x58a6ff,
   fontFamily: DEFAULT_FONT_FAMILY,
   fontSize: DEFAULT_FONT_SIZE,
 };
@@ -62,6 +63,7 @@ export const LightTheme: Theme = {
   crosshairLine: 0x9098a1,
   crosshairTagBg: 0x24292f,
   crosshairTagText: 0xffffff,
+  selection: 0x2962ff,
   fontFamily: DEFAULT_FONT_FAMILY,
   fontSize: DEFAULT_FONT_SIZE,
 };

@@ -41,6 +41,7 @@ import {
   MAIN_PANE_ID,
   type BeginCreateOptions,
   type BrushDrawing,
+  type CalloutDrawing,
   type DisplayMode,
   type Drawing,
   type DrawingAnchor,
@@ -52,6 +53,7 @@ import {
   type DrawingStyle,
   type IconDrawing,
   type IconGlyph,
+  type TextDrawing,
 } from "./types.js";
 import { buildIconAtlas, ICON_CELL_CSS_PX, type IconAtlas } from "./IconAtlas.js";
 import { simplifyRdp, type SimplePoint } from "./rdp.js";
@@ -76,8 +78,12 @@ import {
   type PointerKind,
 } from "./hitTest.js";
 import { projectDrawing, unprojectPoint, type ScreenGeom } from "./project.js";
+import { padPreviewAnchors, PREVIEW_DRAWING_ID, shouldPreview } from "./preview.js";
+import { TextEditor, type MountArgs as TextEditorMountArgs } from "./TextEditor.js";
 import {
   HandleContextCache,
+  type SelectedKind,
+  geomBbox,
   handleSpecsFor,
   redrawDrawing,
   syncHandleGraphics,
@@ -326,6 +332,55 @@ export class DrawingsController {
   /** Phase 13 Cycle B.2 — generic per-drawing text pool for text/callout/range/position readouts. */
   private readonly textPools = new Map<DrawingId, DrawingTextPool>();
   private creating: CreatingState | null = null;
+  /**
+   * Phase 13 Cycle D — last cursor position in PLOT-LOCAL CSS px while
+   * `creating !== null`. Null when there's no active create-mode, when no
+   * pointer has been moved over the plot since `beginCreate`, or when the
+   * cursor leaves the plot. Drives the live ghost-preview render — the
+   * synthetic preview drawing pads `creating.placedAnchors` with the cursor
+   * unprojected to data space so kinds with N anchors get a complete shape
+   * before all N clicks have landed.
+   */
+  private cursorLocal: { x: number; y: number } | null = null;
+  /**
+   * Phase 13 Cycle D — pooled Graphics for the ghost preview. Lazily
+   * allocated on the first preview render; one instance per chart, parented
+   * to `drawingsLayer` so it lands inside the plot clip and gets faded
+   * uniformly via `g.alpha = 0.55`. Cleared (and hidden) when not actively
+   * previewing — never destroyed mid-life.
+   */
+  private previewGraphics: Graphics | null = null;
+  /**
+   * Phase 13 Cycle D — pooled label / text rendering for the live preview.
+   * Lazy-allocated. Driven from the same `computeLabelSpecs` /
+   * `computeTextSpecs` helpers used by committed drawings, so the live
+   * preview shows fib level prices, position R:R, range readouts, etc.
+   * (rather than falling back to a bare line shape).
+   */
+  private previewLabelPool: LabelPool | null = null;
+  private previewTextPool: DrawingTextPool | null = null;
+  /**
+   * Phase 13 Cycle D — marquee (rubber-band) multi-select state. Active
+   * while the user holds Ctrl/Cmd and drags from empty plot area. The
+   * dashed rect renders into `previewGraphics` (same Graphics; brush /
+   * marquee / synthetic-preview are mutually exclusive).
+   */
+  private marqueeState: {
+    pointerId: number;
+    startLocal: { x: number; y: number };
+    currentLocal: { x: number; y: number };
+    additive: boolean;
+    initialSelection: readonly DrawingId[];
+  } | null = null;
+  /**
+   * Phase 13 Cycle D — DOM-overlay text editor for `text` and `callout`
+   * drawings. One instance per chart; mount / unmount cycles as the user
+   * dblclicks or finishes a text/callout create. The editor element lives
+   * as a sibling of the canvas inside the host container so `getBounding-
+   * ClientRect` math + per-frame `transform: translate3d` keeps it pinned
+   * to the drawing's projected anchor.
+   */
+  private readonly textEditor: TextEditor;
   private dragging: DraggingState | null = null;
   /**
    * Phase 13 Cycle C.3 — active brush capture, parallel to `dragging`. Set
@@ -356,6 +411,41 @@ export class DrawingsController {
     this.handlesContainer.position.set(initialPlot.x, initialPlot.y);
     this.handleHitParent = { addChild: (g: Graphics): Graphics => this.handlesContainer.addChild(g) };
     this.newId = deps.newId ?? defaultNewId;
+    // Phase 13 Cycle D — text editor wired with controller-side commit /
+    // cancel callbacks. Commit writes through `update()` which fires
+    // `drawings:updated`; cancel removes the drawing only if it was empty
+    // (a freshly-placed text / callout that never received content).
+    this.textEditor = new TextEditor({
+      onCommit: (id, text): void => {
+        if (this.destroyed) {
+          return;
+        }
+        const d = this.drawings.get(id);
+        if (d === undefined) {
+          return;
+        }
+        if (d.kind === "text") {
+          this.updateInternal<TextDrawing>(id, { text });
+        } else if (d.kind === "callout") {
+          this.updateInternal<CalloutDrawing>(id, { text });
+        }
+      },
+      onCancel: (id): void => {
+        if (this.destroyed) {
+          return;
+        }
+        const d = this.drawings.get(id);
+        if (d === undefined) {
+          return;
+        }
+        // Cycle D — Esc on a freshly-placed empty text/callout removes it
+        // (matches "Esc cancels create" semantics for the typing flow).
+        // Editing an existing drawing leaves it intact.
+        if ((d.kind === "text" || d.kind === "callout") && d.text === "") {
+          this.removeInternal(id);
+        }
+      },
+    });
     this.storage = new StorageBinding({
       logger: deps.logger,
       applySnapshot: (snap): void => { this.applySnapshotInternal(snap); },
@@ -420,6 +510,24 @@ export class DrawingsController {
     const primaryStr = this.primarySelectedId === null ? null : String(this.primarySelectedId);
     const hit = hitTestDrawings(local.x, local.y, projected, primaryStr, tols);
     if (hit === null) {
+      // Phase 13 Cycle D — Ctrl/Cmd+drag on empty starts a marquee (rubber-
+      // band) multi-select. Click without drag will fall through and
+      // deselect on pointerup if the cursor never moved (we still accept
+      // the down so we can decide on move).
+      if (e.ctrlKey || e.metaKey) {
+        this.marqueeState = {
+          pointerId: e.pointerId,
+          startLocal: { x: local.x, y: local.y },
+          currentLocal: { x: local.x, y: local.y },
+          // Cmd/Ctrl is "additive" — preserve existing selection and union
+          // the marquee result. Pure-shift-or-no-modifier marquee would
+          // replace the selection (deferred until we add shift+drag).
+          additive: true,
+          initialSelection: Array.from(this.selectedIds),
+        };
+        this.deps.canvas.focus();
+        return true;
+      }
       // Empty area — deselect if anything was selected; otherwise let viewport pan.
       if (this.selectedIds.size > 0) {
         this.setSelected(null);
@@ -493,7 +601,13 @@ export class DrawingsController {
     // Render pass.
     for (const entry of projected) {
       const g = this.ensureGraphicsFor(entry.drawing.id);
-      redrawDrawing(g, entry.drawing, entry.geom, ctx.theme, ctx.dpr);
+      const isSelected = this.selectedIds.has(entry.drawing.id);
+      const selectedKind: SelectedKind = isSelected
+        ? entry.drawing.id === this.primarySelectedId
+          ? "primary"
+          : "secondary"
+        : null;
+      redrawDrawing(g, entry.drawing, entry.geom, ctx.theme, ctx.dpr, { selected: selectedKind });
       // Cycle C.3 — icon visuals are carried by a parallel Sprite.
       if (entry.drawing.kind === "icon" && entry.geom.kind === "icon") {
         this.syncIconSprite(entry.drawing, entry.geom, ctx);
@@ -563,12 +677,281 @@ export class DrawingsController {
       const isPrimary = sid === this.primarySelectedId;
       const draggingHandle = isPrimary && this.dragging?.id === drawing.id ? this.dragging.handleKey : null;
       const hoveredHandle = isPrimary && this.hoveredId === drawing.id ? this.hoveredHandle : null;
-      const specs = handleSpecsFor(geom, hoveredHandle, draggingHandle, { w: ctx.plotRect.w, h: ctx.plotRect.h });
+      const specs = handleSpecsFor(
+        geom,
+        hoveredHandle,
+        draggingHandle,
+        { w: ctx.plotRect.w, h: ctx.plotRect.h },
+        isPrimary,
+      );
       for (const s of specs) {
         allSpecs.push(s);
       }
     }
     syncHandleGraphics(this.handleGraphicsPool, allSpecs, this.handleCache, ctx.theme, ctx.dpr, this.handleHitParent);
+    // Phase 13 Cycle D — live ghost preview. Built AFTER committed drawings
+    // and handles so the ghost always sits on top of any existing drawing
+    // it overlaps. Uses a single pooled `previewGraphics` parented to
+    // `drawingsLayer`; cleared (and hidden) when not previewing.
+    this.renderPreview(ctx);
+    // Phase 13 Cycle D — keep the DOM text editor anchored to its drawing's
+    // current screen position. Run once per render so pinch / pan / zoom /
+    // theme-toggle all reposition without losing focus.
+    this.repositionTextEditor(projected, ctx.plotRect);
+  }
+
+  /**
+   * Phase 13 Cycle D — find the projected geom for the drawing currently
+   * being edited and translate the editor element to it. If the drawing
+   * has been removed externally, unmount the editor.
+   */
+  private repositionTextEditor(
+    projected: readonly { drawing: Drawing; geom: ScreenGeom }[],
+    plot: PlotRect,
+  ): void {
+    const editingId = this.textEditor.editingId();
+    if (editingId === null) {
+      return;
+    }
+    const entry = projected.find((p) => p.drawing.id === editingId);
+    if (entry === undefined) {
+      // Drawing vanished mid-edit — commit (preserves whatever they typed)
+      // so a programmatic remove during edit doesn't silently lose text.
+      this.textEditor.commit();
+      return;
+    }
+    const anchor = this.editorAnchorFromGeom(entry.geom);
+    if (anchor === null) {
+      return;
+    }
+    this.textEditor.repositionTo(plot.x + anchor.x, plot.y + anchor.y);
+  }
+
+  /**
+   * Phase 13 Cycle D — render the live ghost preview while in create-mode.
+   * Builds a synthetic `Drawing` from `creating.placedAnchors + cursor`
+   * (padded per-kind via `padPreviewAnchors`) and feeds it through
+   * `redrawDrawing` with `{ ghost: true }`. Skips when not in create-mode,
+   * when brush capture is active (brush has its own visualization), and
+   * when the cursor is non-finite.
+   */
+  private renderPreview(ctx: {
+    timeScale: TimeScale;
+    priceScale: PriceScale;
+    plotRect: PlotRect;
+    theme: Theme;
+    dpr: number;
+  }): void {
+    const creating = this.creating;
+    const cursorLocal = this.cursorLocal;
+    // Phase 13 Cycle D — marquee multi-select takes priority since it
+    // implies neither create-mode nor brush capture is active.
+    if (this.marqueeState !== null) {
+      this.renderMarqueePreview(ctx);
+      return;
+    }
+    // Phase 13 Cycle D — brush gets its own live-stroke render path. While
+    // the user is mid-drag, project the captured raw points to a polyline
+    // so the user can see the brush trail being drawn. Independent of the
+    // synthetic-drawing preview path used by other kinds.
+    if (this.brushCapture !== null) {
+      this.renderBrushCapturePreview(ctx);
+      return;
+    }
+    if (creating === null || cursorLocal === null || creating.kind === "brush") {
+      this.hidePreview();
+      return;
+    }
+    const projCtx = this.makeProjectionContext();
+    if (projCtx === null) {
+      this.hidePreview();
+      return;
+    }
+    const { time: rawTime, price: rawPrice } = unprojectPoint(projCtx, cursorLocal.x, cursorLocal.y);
+    const { time, price } = this.applyMagnetSnap(rawTime, rawPrice);
+    if (!Number.isFinite(time) || !Number.isFinite(price)) {
+      this.hidePreview();
+      return;
+    }
+    const cursorAnchor: DrawingAnchor = Object.freeze({
+      time: asTime(time),
+      price: asPrice(price),
+      paneId: MAIN_PANE_ID,
+    });
+    if (!shouldPreview(creating.kind, cursorAnchor)) {
+      this.hidePreview();
+      return;
+    }
+    const intervalMs = Number(ctx.timeScale.intervalDuration);
+    const padded = padPreviewAnchors(
+      creating.kind,
+      creating.placedAnchors,
+      cursorAnchor,
+      Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : undefined,
+    );
+    if (padded === null) {
+      this.hidePreview();
+      return;
+    }
+    // Synthesize a CreatingState with the padded anchors and feed it through
+    // the same builder used by committed creation. Stable id + z=0 so the
+    // controller's id / z counters don't bump per frame.
+    const synthetic: CreatingState = {
+      kind: creating.kind,
+      options: creating.options,
+      placedAnchors: padded.slice(),
+    };
+    const previewDrawing = this.buildDrawingFromCreating(synthetic, PREVIEW_DRAWING_ID, 0);
+    if (previewDrawing === null) {
+      this.hidePreview();
+      return;
+    }
+    const geom = projectDrawing(previewDrawing, projCtx);
+    const g = this.ensurePreviewGraphics();
+    redrawDrawing(g, previewDrawing, geom, ctx.theme, ctx.dpr, { ghost: true });
+    // Phase 13 Cycle D — drive the same label / text pools we drive for
+    // committed drawings so position R:R, range readouts, fib level prices
+    // are all live during preview. Pools live at PREVIEW_DRAWING_ID and
+    // are hidden / reused across frames.
+    const formatter = this.deps.priceFormatter?.() ?? ((v: number): string => v.toFixed(2));
+    const intervalDuration = Number(ctx.timeScale.intervalDuration);
+    const compact = ctx.plotRect.h < COMPACT_READOUT_HEIGHT_PX;
+    const labelSpecs = computeLabelSpecs(previewDrawing, geom, formatter);
+    if (labelSpecs !== null) {
+      const pool = this.ensurePreviewLabelPool();
+      pool.sync(labelSpecs, { theme: ctx.theme, plotWidth: ctx.plotRect.w });
+    } else if (this.previewLabelPool !== null) {
+      this.previewLabelPool.hideAll();
+    }
+    const textSpecs = computeTextSpecs(previewDrawing, geom, ctx, formatter, intervalDuration, compact);
+    if (textSpecs !== null) {
+      const pool = this.ensurePreviewTextPool();
+      pool.sync(textSpecs, ctx.theme);
+    } else if (this.previewTextPool !== null) {
+      this.previewTextPool.hideAll();
+    }
+  }
+
+  /**
+   * Phase 13 Cycle D — render the marquee selection rect (dashed, theme.selection
+   * outline + 0.08-alpha fill) directly into the preview Graphics. Drawn in
+   * plot-local coords; the layer is positioned at the plot origin.
+   */
+  private renderMarqueePreview(ctx: {
+    plotRect: PlotRect;
+    theme: Theme;
+    dpr: number;
+  }): void {
+    const m = this.marqueeState;
+    if (m === null) {
+      this.hidePreview();
+      return;
+    }
+    const x = Math.min(m.startLocal.x, m.currentLocal.x);
+    const y = Math.min(m.startLocal.y, m.currentLocal.y);
+    const w = Math.abs(m.currentLocal.x - m.startLocal.x);
+    const h = Math.abs(m.currentLocal.y - m.startLocal.y);
+    const g = this.ensurePreviewGraphics();
+    g.clear();
+    g.visible = true;
+    g.alpha = 1;
+    if (w >= 1 && h >= 1) {
+      g.rect(x, y, w, h).fill({ color: ctx.theme.selection, alpha: 0.08 });
+      const dprBucket = ctx.dpr <= 1 ? 1 : ctx.dpr <= 1.5 ? 1.5 : 2;
+      g.rect(x, y, w, h).stroke({
+        color: ctx.theme.selection,
+        alpha: 0.85,
+        width: 1 * dprBucket,
+      });
+    }
+    if (this.previewLabelPool !== null) {
+      this.previewLabelPool.hideAll();
+    }
+    if (this.previewTextPool !== null) {
+      this.previewTextPool.hideAll();
+    }
+  }
+
+  /**
+   * Phase 13 Cycle D — render the in-flight brush stroke as a polyline.
+   * The capture's `rawPoints` are already in plot-local CSS px so we
+   * simply transfer them to the preview Graphics. `g.alpha = 0.85` matches
+   * the synthetic-preview path. No materialization happens until
+   * `finishBrushCapture` runs.
+   */
+  private renderBrushCapturePreview(ctx: {
+    plotRect: PlotRect;
+    theme: Theme;
+    dpr: number;
+  }): void {
+    const cap = this.brushCapture;
+    if (cap === null || cap.rawPoints.length < 2) {
+      this.hidePreview();
+      return;
+    }
+    const g = this.ensurePreviewGraphics();
+    g.clear();
+    g.visible = true;
+    g.alpha = 0.85;
+    const dprBucket = ctx.dpr <= 1 ? 1 : ctx.dpr <= 1.5 ? 1.5 : 2;
+    const strokeWidth = (cap.creating.options.style?.stroke?.width ?? 1) * dprBucket;
+    const strokeColor = cap.creating.options.style?.stroke?.color ?? ctx.theme.line;
+    const flat: number[] = [];
+    for (const p of cap.rawPoints) {
+      flat.push(p.x, p.y);
+    }
+    g.poly(flat, false).stroke({
+      color: strokeColor,
+      alpha: 1,
+      width: strokeWidth,
+    });
+    if (this.previewLabelPool !== null) {
+      this.previewLabelPool.hideAll();
+    }
+    if (this.previewTextPool !== null) {
+      this.previewTextPool.hideAll();
+    }
+  }
+
+  private ensurePreviewLabelPool(): LabelPool {
+    if (this.previewLabelPool !== null) {
+      return this.previewLabelPool;
+    }
+    const pool = new LabelPool(this.deps.renderer.drawingsLayer);
+    this.previewLabelPool = pool;
+    return pool;
+  }
+
+  private ensurePreviewTextPool(): DrawingTextPool {
+    if (this.previewTextPool !== null) {
+      return this.previewTextPool;
+    }
+    const pool = new DrawingTextPool(this.deps.renderer.drawingsLayer);
+    this.previewTextPool = pool;
+    return pool;
+  }
+
+  private ensurePreviewGraphics(): Graphics {
+    if (this.previewGraphics !== null) {
+      return this.previewGraphics;
+    }
+    const g = new Graphics();
+    this.deps.renderer.drawingsLayer.addChild(g);
+    this.previewGraphics = g;
+    return g;
+  }
+
+  private hidePreview(): void {
+    if (this.previewGraphics !== null) {
+      this.previewGraphics.clear();
+      this.previewGraphics.visible = false;
+    }
+    if (this.previewLabelPool !== null) {
+      this.previewLabelPool.hideAll();
+    }
+    if (this.previewTextPool !== null) {
+      this.previewTextPool.hideAll();
+    }
   }
 
   destroy(): void {
@@ -600,6 +983,27 @@ export class DrawingsController {
       this.iconAtlas = null;
     }
     this.brushCapture = null;
+    // Phase 13 Cycle D — release the ghost-preview Graphics so the
+    // drawingsLayer doesn't keep a dangling child after destroy.
+    if (this.previewGraphics !== null) {
+      this.previewGraphics.parent?.removeChild(this.previewGraphics);
+      this.previewGraphics.destroy();
+      this.previewGraphics = null;
+    }
+    this.cursorLocal = null;
+    this.marqueeState = null;
+    if (this.previewLabelPool !== null) {
+      this.previewLabelPool.destroy();
+      this.previewLabelPool = null;
+    }
+    if (this.previewTextPool !== null) {
+      this.previewTextPool.destroy();
+      this.previewTextPool = null;
+    }
+    // Phase 13 Cycle D — drop the DOM editor (and any unsaved text). Use
+    // unmount rather than commit so destroy doesn't fire a no-listeners
+    // `drawings:updated` after teardown.
+    this.textEditor.destroy();
     for (const g of this.handleGraphicsPool) {
       g.parent?.removeChild(g);
       g.destroy();
@@ -823,6 +1227,9 @@ export class DrawingsController {
     }
     this.creating = null;
     this.brushCapture = null;
+    // Phase 13 Cycle D — clear ghost-preview state so the synthetic drawing
+    // doesn't render after Esc / cancel / programmatic abort.
+    this.cursorLocal = null;
     this.deps.invalidate();
   }
 
@@ -850,15 +1257,39 @@ export class DrawingsController {
     }
     const drawing = this.materializeDrawing(creating);
     this.creating = null;
+    // Phase 13 Cycle D — clear the ghost-preview cursor so the synthetic
+    // drawing doesn't briefly render after commit.
+    this.cursorLocal = null;
     if (drawing !== null) {
       this.addInternal(drawing);
       this.setSelected(drawing.id);
+      // Cycle D — auto-open editor immediately for newly-placed text /
+      // callout so the user can type without a separate dblclick. This
+      // closes Bug B (the "callout flag never shows" report — the empty
+      // text was never edited because the user had no path to do so).
+      if (drawing.kind === "text" || drawing.kind === "callout") {
+        this.mountTextEditorFor(drawing.id, drawing.text);
+      }
     }
   }
 
   private materializeDrawing(creating: CreatingState): Drawing | null {
     const id = this.newId();
     const z = creating.options.z ?? this.nextZ();
+    return this.buildDrawingFromCreating(creating, id, z);
+  }
+
+  /**
+   * Phase 13 Cycle D — pure-ish builder shared by `materializeDrawing` (which
+   * mints a fresh id + z) and the live ghost-preview path (which reuses a
+   * stable PREVIEW_ID + z=0). Caller is responsible for the id / z; this
+   * method has no side-effects on the controller's id / z counters.
+   */
+  private buildDrawingFromCreating(
+    creating: CreatingState,
+    id: DrawingId,
+    z: number,
+  ): Drawing | null {
     const style: DrawingStyle = creating.options.style ?? Object.freeze({});
     const meta = creating.options.meta;
     const baseCommonNoMeta = Object.freeze({
@@ -968,13 +1399,18 @@ export class DrawingsController {
       }
       case "longPosition":
       case "shortPosition": {
-        // Two clicks: entry, then far-right (defines endTime). SL/TP default
-        // to ±1% of entry per side; user adjusts via handles after create.
+        // Phase 13 Cycle D — click 2's PRICE now drives TP (not just the
+        // endTime) so the preview is vertically responsive to cursor
+        // movement and the committed drawing matches the user's intent.
+        // Pre-D behavior was a fixed ±2% band; D makes TP=cursor.price
+        // (clamped to the bullish/bearish side of entry) and SL stays at a
+        // ∓1% default until the user drags it. Breaking — pre-1.0.
         if (a[0] === undefined || a[1] === undefined) {
           return null;
         }
         const entryTime = a[0].time;
         const entryPrice = Number(a[0].price);
+        const click2Price = Number(a[1].price);
         const endTime = creating.options.endTime !== undefined
           ? asTime(creating.options.endTime)
           : a[1].time;
@@ -985,7 +1421,12 @@ export class DrawingsController {
         }
         const isLong = creating.kind === "longPosition";
         const slPrice = isLong ? entryPrice * 0.99 : entryPrice * 1.01;
-        const tpPrice = isLong ? entryPrice * 1.02 : entryPrice * 0.98;
+        // Clamp TP to the correct side of entry so SL<entry<TP (long) /
+        // TP<entry<SL (short) invariants hold even when the cursor is on
+        // the wrong side mid-create.
+        const tpPrice = isLong
+          ? Math.max(Number.isFinite(click2Price) ? click2Price : entryPrice * 1.02, entryPrice * 1.001)
+          : Math.min(Number.isFinite(click2Price) ? click2Price : entryPrice * 0.98, entryPrice * 0.999);
         const entry = a[0];
         const sl: DrawingAnchor = Object.freeze({ time: entryTime, price: asPrice(slPrice), paneId: entry.paneId });
         const tp: DrawingAnchor = Object.freeze({ time: entryTime, price: asPrice(tpPrice), paneId: entry.paneId });
@@ -1242,6 +1683,13 @@ export class DrawingsController {
     const existing = this.drawings.get(id);
     if (existing === undefined) {
       return false;
+    }
+    // Phase 13 Cycle D — if the removed drawing is currently being edited,
+    // unmount the editor (without committing — the drawing is gone, there's
+    // nothing to write the text to). Use `unmount` to skip the commit
+    // callback's `update()` path which would silently fail anyway.
+    if (this.textEditor.editingId() === id) {
+      this.textEditor.unmount();
     }
     this.drawings.delete(id);
     const g = this.graphicsByDrawing.get(id);
@@ -1576,6 +2024,26 @@ export class DrawingsController {
       this.continueDrag(e, local.x, local.y);
       return;
     }
+    // Phase 13 Cycle D — marquee drag in progress: just update endpoint +
+    // invalidate. Hit-testing happens on pointerup.
+    if (this.marqueeState !== null && this.marqueeState.pointerId === e.pointerId) {
+      this.marqueeState = {
+        ...this.marqueeState,
+        currentLocal: { x: local.x, y: local.y },
+      };
+      this.deps.invalidate();
+      return;
+    }
+    // Phase 13 Cycle D — track the cursor while in create-mode so the live
+    // ghost preview can render. Brush has its own capture path above; other
+    // kinds use this point to pad their placedAnchors via `padPreviewAnchors`.
+    if (this.creating !== null && this.creating.kind !== "brush") {
+      const prev = this.cursorLocal;
+      if (prev?.x !== local.x || prev.y !== local.y) {
+        this.cursorLocal = { x: local.x, y: local.y };
+        this.deps.invalidate();
+      }
+    }
     // Hover update for cursor + handle highlight.
     const tols = defaultTolerancesFor((e.pointerType as PointerKind | undefined) ?? "mouse", this.deps.currentDpr());
     const ctx = this.makeProjectionContext();
@@ -1688,6 +2156,32 @@ export class DrawingsController {
             this.deps.eventBus.emit("drawings:updated", { drawing: peerNext });
           }
         }
+      }
+      this.deps.invalidate();
+      return;
+    }
+    // Phase 13 Cycle D — icon resize handle changes `drawing.size`, not
+    // the anchor. Intercept BEFORE the anchor-mutating drag path.
+    if (
+      drag.mode === "handle" &&
+      drag.handleKey === "icon-size" &&
+      orig.kind === "icon"
+    ) {
+      const cursorPx = { x: localX, y: localY };
+      const anchorPx = {
+        x: Number(ctx.timeScale.timeToPixel(orig.anchors[0].time)),
+        y: Number(ctx.priceScale.valueToPixel(orig.anchors[0].price)),
+      };
+      const dx = cursorPx.x - anchorPx.x;
+      const dy = cursorPx.y - anchorPx.y;
+      // Distance from anchor → half-extent; clamp 8..200 so the icon stays
+      // grabbable + doesn't blow up the chart.
+      const newHalf = Math.max(4, Math.min(100, Math.max(Math.abs(dx), Math.abs(dy))));
+      const newSize = newHalf * 2;
+      const next = Object.freeze({ ...orig, size: newSize }) as Drawing;
+      this.drawings.set(drag.id, next);
+      if (this.bulkLoadDepth === 0) {
+        this.deps.eventBus.emit("drawings:updated", { drawing: next });
       }
       this.deps.invalidate();
       return;
@@ -1942,8 +2436,95 @@ export class DrawingsController {
       this.finishBrushCapture();
       return;
     }
+    // Phase 13 Cycle D — finalize marquee on its pointer up.
+    if (this.marqueeState !== null && this.marqueeState.pointerId === e.pointerId) {
+      this.finishMarquee();
+      return;
+    }
     this.endDragForPointer(e.pointerId);
   };
+
+  /**
+   * Phase 13 Cycle D — close out the marquee selection. Hit-tests every
+   * drawing's projected bbox against the marquee rect and selects the
+   * intersecting set. Additive (Ctrl/Cmd) unions with the pre-drag
+   * selection. Empty marquee (≤ 4 px diagonal — likely a click that
+   * registered as a drag) leaves the selection untouched.
+   */
+  private finishMarquee(): void {
+    const m = this.marqueeState;
+    if (m === null) {
+      return;
+    }
+    this.marqueeState = null;
+    const x0 = Math.min(m.startLocal.x, m.currentLocal.x);
+    const x1 = Math.max(m.startLocal.x, m.currentLocal.x);
+    const y0 = Math.min(m.startLocal.y, m.currentLocal.y);
+    const y1 = Math.max(m.startLocal.y, m.currentLocal.y);
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    if (Math.hypot(dx, dy) < 4) {
+      this.deps.invalidate();
+      return;
+    }
+    const ctx = this.makeProjectionContext();
+    if (ctx === null) {
+      this.deps.invalidate();
+      return;
+    }
+    const projected = this.projectAll(ctx);
+    const hits: DrawingId[] = [];
+    for (const entry of projected) {
+      if (!entry.drawing.visible || entry.drawing.locked) {
+        continue;
+      }
+      const b = geomBbox(entry.geom);
+      // AABB ∩ AABB — intersection if neither rect is fully outside the other.
+      if (b.xMin > x1 || b.xMax < x0 || b.yMin > y1 || b.yMax < y0) {
+        continue;
+      }
+      hits.push(entry.drawing.id);
+    }
+    const next = new Set<DrawingId>(m.additive ? m.initialSelection : []);
+    for (const h of hits) {
+      next.add(h);
+    }
+    const lastHit = hits.length > 0 ? hits[hits.length - 1] ?? null : null;
+    this.applySelectionSet(next, lastHit);
+    this.deps.invalidate();
+  }
+
+  /**
+   * Phase 13 Cycle D — replace the selection set wholesale (used by the
+   * marquee finish). Emits a single `drawings:selected` event. Falls
+   * through to `setSelected(null)` when `next` is empty.
+   */
+  private applySelectionSet(next: Set<DrawingId>, primaryHint: DrawingId | null): void {
+    if (next.size === 0) {
+      this.setSelected(null);
+      return;
+    }
+    this.selectedIds.clear();
+    for (const id of next) {
+      this.selectedIds.add(id);
+    }
+    const newPrimary =
+      primaryHint !== null && this.selectedIds.has(primaryHint)
+        ? primaryHint
+        : (this.selectedIds.values().next().value ?? null);
+    this.primarySelectedId = newPrimary;
+    if (this.bulkLoadDepth === 0 && !this.suppressSelectionEmit) {
+      const drawings: Drawing[] = [];
+      for (const id of this.selectedIds) {
+        const d = this.drawings.get(id);
+        if (d !== undefined) {
+          drawings.push(d);
+        }
+      }
+      const primary = newPrimary !== null ? this.drawings.get(newPrimary) ?? null : null;
+      this.deps.eventBus.emit("drawings:selected", { drawings, primary });
+    }
+  }
 
   /**
    * Internal — finalize the active drag for a given pointerId.  Returns
@@ -1988,6 +2569,15 @@ export class DrawingsController {
     if (this.destroyed) {
       return;
     }
+    // Phase 13 Cycle D — paste is allowed even with no selection (cross-
+    // chart paste from another tab). Copy / cut / nudge / delete still
+    // require an active selection.
+    const isMod = e.metaKey || e.ctrlKey;
+    if (isMod && (e.key === "v" || e.key === "V")) {
+      e.preventDefault();
+      void this.pasteFromClipboard();
+      return;
+    }
     if (this.selectedId === null && this.creating === null) {
       return;
     }
@@ -2010,9 +2600,16 @@ export class DrawingsController {
           e.preventDefault();
         }
         return;
+      case "c":
+      case "C":
+        if (isMod && this.selectedIds.size > 0) {
+          e.preventDefault();
+          void this.copySelectionToClipboard();
+        }
+        return;
       case "d":
       case "D":
-        if ((e.metaKey || e.ctrlKey) && this.selectedId !== null) {
+        if (isMod && this.selectedId !== null) {
           this.duplicateSelected();
           e.preventDefault();
         }
@@ -2030,6 +2627,111 @@ export class DrawingsController {
         return;
     }
   };
+
+  /**
+   * Phase 13 Cycle D — copy the current selection set to the system
+   * clipboard as JSON. Cross-chart / cross-tab paste works because the
+   * payload is plain JSON with a discriminator. Falls back to a no-op
+   * when `navigator.clipboard.writeText` rejects (no permission, etc.).
+   */
+  private async copySelectionToClipboard(): Promise<void> {
+    if (this.selectedIds.size === 0) {
+      return;
+    }
+    const drawings: Drawing[] = [];
+    for (const id of this.selectedIds) {
+      const d = this.drawings.get(id);
+      if (d !== undefined) {
+        drawings.push(d);
+      }
+    }
+    if (drawings.length === 0) {
+      return;
+    }
+    const payload = {
+      __carta: "drawings/v1" as const,
+      schemaVersion: 1 as const,
+      drawings,
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload));
+    } catch (err) {
+      this.deps.logger.warn("[carta] drawings: clipboard.writeText failed", err);
+    }
+  }
+
+  /**
+   * Phase 13 Cycle D — paste drawings from the system clipboard. Each
+   * pasted drawing gets a fresh id and a small time-offset (one bar
+   * interval) so it's visible next to (or just past) any existing copy.
+   * Silently no-ops on parse failure or empty clipboard so paste in a
+   * non-Carta context (Cmd+V from a text editor) doesn't throw.
+   */
+  private async pasteFromClipboard(): Promise<void> {
+    let raw: string;
+    try {
+      raw = await navigator.clipboard.readText();
+    } catch {
+      return;
+    }
+    if (raw === "") {
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      (parsed as { __carta?: unknown }).__carta !== "drawings/v1"
+    ) {
+      return;
+    }
+    const drawings = (parsed as { drawings?: readonly unknown[] }).drawings;
+    if (!Array.isArray(drawings) || drawings.length === 0) {
+      return;
+    }
+    const ts = this.makeProjectionContext()?.timeScale;
+    const intervalMs = ts === undefined ? 0 : Number(ts.intervalDuration);
+    const offset = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs * 4 : 0;
+    const pastedIds: DrawingId[] = [];
+    for (const d of drawings) {
+      if (typeof d !== "object" || d === null) {
+        continue;
+      }
+      const cloneRaw = JSON.parse(JSON.stringify(d)) as Record<string, unknown>;
+      cloneRaw.id = this.newId();
+      const anchors = cloneRaw.anchors;
+      if (Array.isArray(anchors) && offset > 0) {
+        for (const a of anchors) {
+          if (typeof a === "object" && a !== null) {
+            const aa = a as { time?: unknown };
+            if (typeof aa.time === "number" && Number.isFinite(aa.time)) {
+              aa.time += offset;
+            }
+          }
+        }
+      }
+      try {
+        this.facade.add(cloneRaw as unknown as Drawing);
+        pastedIds.push(asDrawingId(String(cloneRaw.id)));
+      } catch (err) {
+        this.deps.logger.warn("[carta] drawings: paste add failed", err);
+      }
+    }
+    // Select the paste so the user sees visual feedback.
+    if (pastedIds.length > 0) {
+      this.selectedIds.clear();
+      for (const id of pastedIds) {
+        this.selectedIds.add(id);
+      }
+      this.primarySelectedId = pastedIds[pastedIds.length - 1] ?? null;
+      this.deps.invalidate();
+    }
+  }
 
   private readonly onContextMenu = (e: MouseEvent): void => {
     if (this.destroyed) {
@@ -2076,7 +2778,83 @@ export class DrawingsController {
       return;
     }
     this.deps.eventBus.emit("drawing:edit", { drawing: hit.drawing });
+    // Phase 13 Cycle D — for text / callout drawings, also mount the
+    // in-chart DOM editor so the user can type without an external host
+    // wiring up its own modal. Hosts that already implement an editor can
+    // ignore this — the editor commits via `chart.drawings.update(id, { text })`
+    // which fires the same `drawings:updated` event the host's editor does.
+    if (hit.drawing.kind === "text" || hit.drawing.kind === "callout") {
+      this.mountTextEditorFor(hit.drawing.id, hit.drawing.text);
+    }
   };
+
+  /**
+   * Phase 13 Cycle D — mount the DOM text editor for a `text` or `callout`
+   * drawing. Resolves the host element + initial screen anchor, then hands
+   * off to `TextEditor.mount`. The first per-frame `repositionFromGeom`
+   * call from `render()` will refine the position; mounting here gives a
+   * good initial placement so the editor doesn't pop up at the wrong spot.
+   */
+  private mountTextEditorFor(id: DrawingId, initialText: string): void {
+    const host = this.deps.renderer.hostContainer;
+    if (host === null) {
+      // Headless / non-DOM host — fall back to the pre-existing
+      // `drawing:edit` event-only contract.
+      return;
+    }
+    const ctx = this.makeProjectionContext();
+    if (ctx === null) {
+      return;
+    }
+    const drawing = this.drawings.get(id);
+    if (drawing === undefined) {
+      return;
+    }
+    const geom = projectDrawing(drawing, ctx);
+    const plot = this.deps.plotRect();
+    const anchorScreen = this.editorAnchorFromGeom(geom);
+    if (anchorScreen === null) {
+      return;
+    }
+    // Phase 13 Cycle D — visual hint for the editor: callouts get the
+    // same pill colors + radius as the drawn bubble so the user perceives
+    // typing INSIDE the bubble. Plain text drawings get a neutral pill.
+    const theme = this.deps.currentTheme();
+    let bubble: TextEditorMountArgs["bubble"];
+    if (drawing.kind === "callout" && geom.kind === "callout") {
+      const fill = drawing.style.fill;
+      bubble = {
+        bgColor: cssHex(fill?.color ?? theme.crosshairTagBg),
+        textColor: cssHex(drawing.style.text?.color ?? theme.crosshairTagText),
+        borderColor: cssHex(drawing.style.stroke?.color ?? theme.line),
+        borderRadius: 4,
+        width: Math.max(60, geom.labelW - 4),
+        height: Math.max(20, geom.labelH - 4),
+      };
+    } else if (drawing.kind === "text") {
+      bubble = {
+        bgColor: cssHex(theme.crosshairTagBg),
+        textColor: cssHex(drawing.style.text?.color ?? theme.text),
+        borderColor: cssHex(theme.frame),
+        borderRadius: 3,
+      };
+    }
+    const mountArgs: TextEditorMountArgs = bubble === undefined
+      ? { id, initialText, host, x: plot.x + anchorScreen.x, y: plot.y + anchorScreen.y }
+      : { id, initialText, host, x: plot.x + anchorScreen.x, y: plot.y + anchorScreen.y, bubble };
+    this.textEditor.mount(mountArgs);
+  }
+
+  private editorAnchorFromGeom(geom: ScreenGeom): { x: number; y: number } | null {
+    if (geom.kind === "text") {
+      return { x: geom.anchor.x, y: geom.anchor.y };
+    }
+    if (geom.kind === "callout") {
+      // Anchor at the label corner so the user types into the bubble itself.
+      return { x: geom.labelX, y: geom.labelY };
+    }
+    return null;
+  }
 
   // ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -2196,7 +2974,10 @@ export class DrawingsController {
     // the rendered sprite reads at `geom.sizeCss` regardless of DPR bucket.
     const scale = geom.sizeCss / ICON_CELL_CSS_PX;
     sprite.scale.set(scale, scale);
-    sprite.tint = drawing.tint ?? ctx.theme.text;
+    // Phase 13 Cycle D — `drawing.style.stroke.color` (set by the styling
+    // popover) wins over `drawing.tint` (legacy host-supplied) so users
+    // can colour an icon via the same UI as every other drawing kind.
+    sprite.tint = drawing.style.stroke?.color ?? drawing.tint ?? ctx.theme.text;
     sprite.visible = drawing.visible;
   }
 
@@ -2424,6 +3205,9 @@ export class DrawingsController {
     }
     this.brushCapture = null;
     this.creating = null;
+    // Phase 13 Cycle D — drop ghost-preview cursor for symmetry with the
+    // other cancel paths.
+    this.cursorLocal = null;
     this.deps.invalidate();
   }
 
@@ -2558,6 +3342,11 @@ function nearestBarSampleTime(time: number, interval: number): number {
 
 function applyMagnetTimeOnly(time: number, interval: number, price: number): { time: number; price: number } {
   return { time: nearestBarSampleTime(time, interval), price };
+}
+
+/** Phase 13 Cycle D — `0xRRGGBB` → `'#rrggbb'` for inline DOM styling. */
+function cssHex(n: number): string {
+  return "#" + n.toString(16).padStart(6, "0");
 }
 
 function requiredAnchorsFor(kind: DrawingKind): number {

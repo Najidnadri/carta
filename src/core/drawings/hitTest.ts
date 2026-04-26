@@ -84,7 +84,7 @@ export function defaultTolerancesFor(pointerType: PointerKind, dpr: number): Hit
 }
 
 /** Phase 13 Cycle B.2 — handle key superset. `'time-end'` is the position-tool right-edge puller. */
-export type HandleKey = number | "corner-tr" | "corner-bl" | "time-end";
+export type HandleKey = number | "corner-tr" | "corner-bl" | "time-end" | "icon-size";
 
 export interface HitResult {
   readonly drawing: Drawing;
@@ -299,8 +299,13 @@ function hitHandle(
       return null;
     }
     case "icon": {
-      const a = geom.anchor;
-      return within(px, py, a.x, a.y, tol) ? 0 : null;
+      // Phase 13 Cycle D — icons expose ONE handle: the bottom-right
+      // resize corner. Center hit goes to the body (drag = move).
+      const half = geom.sizeCss / 2;
+      if (within(px, py, geom.anchor.x + half, geom.anchor.y + half, tol)) {
+        return "icon-size";
+      }
+      return null;
     }
   }
 }

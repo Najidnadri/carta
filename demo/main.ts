@@ -1495,6 +1495,167 @@ async function main(): Promise<void> {
       trackedPositionId = String(primary.id);
     }
     updatePnlPanel();
+    // Cycle D — sync the styling popover with the new selection.
+    syncStylePanelToSelection();
+  });
+
+  // ── Phase 13 Cycle D — drawing style popover ─────────────────────────────
+  // Opens when a drawing is selected; reads/writes its `style` via
+  // `chart.drawings.update(id, { style })`. Demo-only; the library stays
+  // headless. Skipped if the popover element is missing from the page.
+  const stylePanel = document.getElementById("drawing-style-panel");
+  const styleStrokeHex = document.getElementById("style-stroke-hex") as HTMLInputElement | null;
+  const styleStrokeWidth = document.getElementById("style-stroke-width") as HTMLSelectElement | null;
+  const styleStrokeStyle = document.getElementById("style-stroke-style") as HTMLSelectElement | null;
+  const styleFillHex = document.getElementById("style-fill-hex") as HTMLInputElement | null;
+  const styleFillAlpha = document.getElementById("style-fill-alpha") as HTMLInputElement | null;
+  const styleFillAlphaReadout = document.getElementById("style-fill-alpha-readout");
+  const styleFillRow = document.getElementById("style-fill-row");
+  const styleFillAlphaRow = document.getElementById("style-fill-alpha-row");
+  const styleSwatches = document.getElementById("style-stroke-swatches");
+  const styleClose = document.getElementById("style-close");
+  // Trader-favoured 12-swatch palette: theme accents + traffic-light pair +
+  // 4 grays + 3 high-saturation hues for emphasis.
+  const STYLE_PRESET_COLORS = [
+    "#26a69a", "#ef5350", "#58a6ff", "#ffd60a",
+    "#f78166", "#bc8cff", "#ffffff", "#c9d1d9",
+    "#8b949e", "#484f58", "#1f2630", "#0e1116",
+  ];
+  if (styleSwatches !== null) {
+    for (const hex of STYLE_PRESET_COLORS) {
+      const sw = document.createElement("button");
+      sw.type = "button";
+      sw.title = hex;
+      sw.dataset.color = hex;
+      sw.style.cssText = `width:22px;height:22px;border-radius:3px;border:1px solid var(--button-border);background:${hex};cursor:pointer;padding:0;`;
+      sw.addEventListener("click", () => {
+        if (styleStrokeHex !== null) {
+          styleStrokeHex.value = hex;
+        }
+        applyCurrentStyle();
+      });
+      styleSwatches.appendChild(sw);
+    }
+  }
+  // Kinds whose style supports a fill — drives the fill row visibility.
+  const FILL_CAPABLE_KINDS = new Set([
+    "rectangle", "ellipse", "parallelChannel", "callout",
+    "dateRange", "priceRange", "priceDateRange",
+  ]);
+  function hexToInt(hex: string): number | null {
+    const m = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim());
+    if (m === null) {
+      return null;
+    }
+    return parseInt(m[1] ?? "", 16);
+  }
+  function intToHex(n: number): string {
+    return "#" + n.toString(16).padStart(6, "0");
+  }
+  function readSelectedDrawingId(): string | null {
+    return chart?.drawings.getPrimarySelectedId() ?? null;
+  }
+  function syncStylePanelToSelection(): void {
+    if (chart === null || stylePanel === null) {
+      return;
+    }
+    const id = readSelectedDrawingId();
+    if (id === null) {
+      stylePanel.dataset.open = "false";
+      stylePanel.style.display = "none";
+      return;
+    }
+    const d = chart.drawings.getById(id);
+    if (d === null) {
+      stylePanel.dataset.open = "false";
+      stylePanel.style.display = "none";
+      return;
+    }
+    stylePanel.dataset.open = "true";
+    stylePanel.style.display = "flex";
+    if (styleStrokeHex !== null) {
+      styleStrokeHex.value = d.style.stroke?.color !== undefined ? intToHex(d.style.stroke.color) : "";
+    }
+    if (styleStrokeWidth !== null) {
+      styleStrokeWidth.value = String(d.style.stroke?.width ?? 1);
+    }
+    if (styleStrokeStyle !== null) {
+      styleStrokeStyle.value = d.style.stroke?.style ?? "solid";
+    }
+    const fillCapable = FILL_CAPABLE_KINDS.has(d.kind);
+    if (styleFillRow !== null) {
+      styleFillRow.style.display = fillCapable ? "flex" : "none";
+    }
+    if (styleFillAlphaRow !== null) {
+      styleFillAlphaRow.style.display = fillCapable ? "flex" : "none";
+    }
+    if (fillCapable && styleFillHex !== null) {
+      styleFillHex.value = d.style.fill?.color !== undefined ? intToHex(d.style.fill.color) : "";
+    }
+    if (fillCapable && styleFillAlpha !== null) {
+      styleFillAlpha.value = String(d.style.fill?.alpha ?? 0.2);
+    }
+    if (fillCapable && styleFillAlphaReadout !== null) {
+      styleFillAlphaReadout.textContent = (d.style.fill?.alpha ?? 0.2).toFixed(2);
+    }
+  }
+  function applyCurrentStyle(): void {
+    if (chart === null) {
+      return;
+    }
+    const id = readSelectedDrawingId();
+    if (id === null) {
+      return;
+    }
+    const d = chart.drawings.getById(id);
+    if (d === null) {
+      return;
+    }
+    const strokeColorHex = styleStrokeHex?.value ?? "";
+    const strokeColor = hexToInt(strokeColorHex);
+    const strokeWidthNum = Number(styleStrokeWidth?.value ?? 1);
+    const strokeStyleVal = styleStrokeStyle?.value;
+    const validStyle = strokeStyleVal === "solid" || strokeStyleVal === "dashed" || strokeStyleVal === "dotted"
+      ? strokeStyleVal
+      : "solid";
+    const stroke: { color?: number; width?: number; style?: "solid" | "dashed" | "dotted" } = {
+      width: Number.isFinite(strokeWidthNum) ? strokeWidthNum : 1,
+      style: validStyle,
+    };
+    if (strokeColor !== null) {
+      stroke.color = strokeColor;
+    }
+    const fillCapable = FILL_CAPABLE_KINDS.has(d.kind);
+    let fill: { color: number; alpha: number } | undefined;
+    if (fillCapable) {
+      const fillHexVal = styleFillHex?.value.trim() ?? "";
+      const fillColor = hexToInt(fillHexVal);
+      const fillAlphaNum = Number(styleFillAlpha?.value ?? 0.2);
+      if (fillColor !== null) {
+        fill = { color: fillColor, alpha: Number.isFinite(fillAlphaNum) ? fillAlphaNum : 0.2 };
+      }
+    }
+    const newStyle: { stroke: typeof stroke; fill?: typeof fill } = { stroke };
+    if (fill !== undefined) {
+      newStyle.fill = fill;
+    }
+    // Use a `as` cast at the demo boundary — host code is allowed minor
+    // looseness; controller's `update` accepts a partial drawing patch.
+    chart.drawings.update(id, { style: newStyle } as Parameters<typeof chart.drawings.update>[1]);
+    if (styleFillAlphaReadout !== null && fill !== undefined) {
+      styleFillAlphaReadout.textContent = fill.alpha.toFixed(2);
+    }
+  }
+  styleStrokeHex?.addEventListener("change", applyCurrentStyle);
+  styleStrokeWidth?.addEventListener("change", applyCurrentStyle);
+  styleStrokeStyle?.addEventListener("change", applyCurrentStyle);
+  styleFillHex?.addEventListener("change", applyCurrentStyle);
+  styleFillAlpha?.addEventListener("input", applyCurrentStyle);
+  styleClose?.addEventListener("click", () => {
+    if (stylePanel !== null) {
+      stylePanel.dataset.open = "false";
+      stylePanel.style.display = "none";
+    }
   });
 
   // Phase 13 Cycle B.3 — drawing context menu (long-press + right-click).
@@ -1515,6 +1676,41 @@ async function main(): Promise<void> {
       return;
     }
     ctxMenuTarget = drawingId;
+    // Phase 13 Cycle D — relabel "Toggle lock" / "Bring to front" buttons
+    // to reflect the current drawing's state so the user always sees the
+    // ACTION the click will perform, not a generic toggle name.
+    if (chart !== null) {
+      const d = chart.drawings.getById(drawingId);
+      if (d !== null) {
+        const lockBtn = ctxMenu.querySelector<HTMLButtonElement>('button[data-action="lock"]');
+        if (lockBtn !== null) {
+          lockBtn.textContent = d.locked ? "Unlock" : "Lock";
+        }
+        const zBtn = ctxMenu.querySelector<HTMLButtonElement>('button[data-action="bring-front"]');
+        if (zBtn !== null) {
+          const all = chart.drawings.list();
+          let maxZ = -Infinity;
+          let minZ = Infinity;
+          for (const dx of all) {
+            if (dx.z > maxZ) {
+              maxZ = dx.z;
+            }
+            if (dx.z < minZ) {
+              minZ = dx.z;
+            }
+          }
+          // If this drawing is already at the front (maxZ), the action
+          // becomes "Bring to back" and vice versa.
+          if (d.z === maxZ && d.z !== minZ) {
+            zBtn.textContent = "Bring to back";
+            zBtn.dataset.zAction = "back";
+          } else {
+            zBtn.textContent = "Bring to front";
+            zBtn.dataset.zAction = "front";
+          }
+        }
+      }
+    }
     // Clamp to viewport so the menu doesn't overflow on phone-sized screens.
     const w = ctxMenu.offsetWidth || 160;
     const h = ctxMenu.offsetHeight || 160;
@@ -1557,13 +1753,21 @@ async function main(): Promise<void> {
         }
       } else if (action === "bring-front") {
         const all = chart.drawings.list();
-        let maxZ = 0;
+        let maxZ = -Infinity;
+        let minZ = Infinity;
         for (const dx of all) {
           if (dx.z > maxZ) {
             maxZ = dx.z;
           }
+          if (dx.z < minZ) {
+            minZ = dx.z;
+          }
         }
-        chart.drawings.update(id, { z: maxZ + 1 });
+        const direction = btn.dataset.zAction === "back" ? "back" : "front";
+        const newZ = direction === "back"
+          ? (Number.isFinite(minZ) ? minZ - 1 : 0)
+          : (Number.isFinite(maxZ) ? maxZ + 1 : 0);
+        chart.drawings.update(id, { z: newZ });
       }
       closeCtxMenu();
     });

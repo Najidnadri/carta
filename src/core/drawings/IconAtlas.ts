@@ -13,7 +13,7 @@
  * DPR change, so no new event subscription is needed.
  */
 
-import { Rectangle, Texture, TextureSource } from "pixi.js";
+import { CanvasSource, Rectangle, Texture, type TextureSource } from "pixi.js";
 import { DEFAULT_ICON_GLYPHS, type IconGlyph } from "./types.js";
 
 /** CSS-px size of a single atlas cell — matches the default `IconDrawing.size`. */
@@ -207,7 +207,7 @@ export function buildIconAtlas(dpr: number): IconAtlas {
   const ctx = canvas.getContext("2d");
   if (ctx === null) {
     // jsdom or sandboxed runtime without 2d support — bail with empty atlas.
-    const source = new TextureSource({ resource: canvas, scaleMode: "linear" });
+    const source = new CanvasSource({ resource: canvas, scaleMode: "linear" });
     const textures = new Map<IconGlyph, Texture>();
     return {
       source,
@@ -230,7 +230,11 @@ export function buildIconAtlas(dpr: number): IconAtlas {
     const drawer = GLYPH_DRAWERS[glyph];
     drawer(ctx, i * cellPx, 0, cellPx);
   }
-  const source = new TextureSource({
+  // Phase 13 Cycle D fix — `TextureSource` with a HTMLCanvasElement resource
+  // does NOT trigger GPU upload in PixiJS v8. Use `CanvasSource` (which
+  // wraps the canvas as a texture-uploadable resource) so the procedurally-
+  // drawn glyph silhouettes actually show up on screen.
+  const source = new CanvasSource({
     resource: canvas,
     scaleMode: "linear",
     width: canvas.width,

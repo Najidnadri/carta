@@ -122,9 +122,24 @@ export class Renderer {
     // `overscroll-behavior` only takes effect on scroll containers — a
     // <canvas> is not one, so apply it to the host's container element.
     options.container.style.overscrollBehavior = "contain";
+    // Phase 13 Cycle D — DOM-overlay siblings (text editor, styling panel)
+    // need to be positioned relative to the container, so guarantee the
+    // container is a positioning context.
+    if (options.container.style.position === "" || options.container.style.position === "static") {
+      options.container.style.position = "relative";
+    }
     options.container.appendChild(app.canvas);
-    return new Renderer(app);
+    const r = new Renderer(app);
+    r.hostContainer = options.container;
+    return r;
   }
+
+  /**
+   * Phase 13 Cycle D — host container exposed for DOM-overlay siblings
+   * (text editor, future styling panel). Set by `Renderer.create` and read
+   * by `DrawingsController` when mounting / repositioning the editor.
+   */
+  hostContainer: HTMLElement | null = null;
 
   /**
    * Update the renderer's resolution (DPR) and resize. Used by the chart's

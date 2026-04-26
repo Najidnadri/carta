@@ -285,6 +285,15 @@ export interface Theme {
   readonly crosshairTagBg: number;
   readonly crosshairTagText: number;
 
+  // ─── Drawings ────────────────────────────────────────────────
+  /**
+   * Selection accent — used by the drawings layer for the dashed bbox
+   * marquee, anchor handle fill, and body halo on selected drawings. Hosts
+   * that bind `theme.up` to "bullish" should set this to a separate accent
+   * (e.g. blue) so selection isn't confused with bullish coloring.
+   */
+  readonly selection: number;
+
   // ─── Typography ──────────────────────────────────────────────
   /**
    * CSS font-family stack used for axis labels, crosshair tags, and marker
