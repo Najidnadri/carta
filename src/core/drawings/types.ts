@@ -39,9 +39,24 @@ export type DrawingKind =
   | "arrow"
   | "dateRange"
   | "priceRange"
-  | "priceDateRange";
+  | "priceDateRange"
+  // ─── Phase 13 Cycle C.1 — exotic geometry tools ────────────────────────
+  | "pitchfork"
+  | "gannFan"
+  | "ellipse";
 
 export type HorizontalRayDirection = "left" | "right";
+
+/**
+ * Phase 13 Cycle C.1 — pitchfork variant. Three sibling kinds that share
+ * anchor count, hit-test, render — they differ only in how the centreline
+ * base is computed from `(pivot, reaction1, reaction2)`:
+ *
+ *   - `'andrews'`: base = midpoint of (reaction1, reaction2).
+ *   - `'schiff'`: base = (pivot.time, midpoint of reaction prices).
+ *   - `'modifiedSchiff'`: base = (midpoint of reaction times, midpoint of reaction prices).
+ */
+export type PitchforkVariant = "andrews" | "schiff" | "modifiedSchiff";
 
 /**
  * Phase 13 Cycle B.2 — display mode for position-tool readouts.
@@ -222,6 +237,42 @@ export interface PriceDateRangeDrawing extends DrawingCommon {
   readonly anchors: readonly [DrawingAnchor, DrawingAnchor];
 }
 
+// ─── Phase 13 Cycle C.1 — exotic geometry tools ────────────────────────────
+
+/**
+ * Pitchfork — 3-anchor: `[pivot, reaction1, reaction2]`. The centreline runs
+ * from `pivot` through a `variant`-dependent base point; the upper and lower
+ * rails run parallel to the centreline through `reaction1` and `reaction2`.
+ * `style.extend` defaults to `'right'` (forward-looking trader convention).
+ */
+export interface PitchforkDrawing extends DrawingCommon {
+  readonly kind: "pitchfork";
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor, DrawingAnchor];
+  readonly variant: PitchforkVariant;
+}
+
+/**
+ * Gann fan — 2-anchor: `[pivot, direction]`. Emits 9 rays from `pivot` at
+ * Gann slopes `{1/8, 1/4, 1/3, 1/2, 1/1, 2/1, 3/1, 4/1, 8/1}` measured in
+ * price-time space (ratio-locked under pan/zoom). The 1×1 line passes
+ * through `direction`; the other slopes are integer multiples / divisors.
+ * `style.extend` defaults to `'right'`.
+ */
+export interface GannFanDrawing extends DrawingCommon {
+  readonly kind: "gannFan";
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor];
+}
+
+/**
+ * Ellipse / circle — opposite-corner bbox anchor. `[a, b]` define the
+ * axis-aligned bounding rectangle; the ellipse is inscribed. `rx == ry`
+ * produces a circle. Rotation is out of scope for v1.
+ */
+export interface EllipseDrawing extends DrawingCommon {
+  readonly kind: "ellipse";
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor];
+}
+
 export type Drawing =
   | TrendlineDrawing
   | HorizontalLineDrawing
@@ -239,7 +290,10 @@ export type Drawing =
   | ArrowDrawing
   | DateRangeDrawing
   | PriceRangeDrawing
-  | PriceDateRangeDrawing;
+  | PriceDateRangeDrawing
+  | PitchforkDrawing
+  | GannFanDrawing
+  | EllipseDrawing;
 
 /** Default fib levels. Matches TradingView defaults. */
 export const DEFAULT_FIB_LEVELS: readonly FibLevel[] = Object.freeze([
@@ -336,4 +390,7 @@ export interface BeginCreateOptions {
    * `entryTime + 12 * intervalDuration` (legacy 3-click flow).
    */
   readonly endTime?: number;
+  // ─── Phase 13 Cycle C.1 ───
+  /** Pitchfork variant. Defaults to `'andrews'`. Ignored for non-pitchfork kinds. */
+  readonly variant?: PitchforkVariant;
 }

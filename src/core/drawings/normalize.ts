@@ -13,7 +13,7 @@
  */
 
 import { asTime } from "../../types.js";
-import type { Drawing, DrawingStyle, FibLevel, DisplayMode } from "./types.js";
+import type { Drawing, DrawingStyle, FibLevel, DisplayMode, PitchforkVariant } from "./types.js";
 import { DEFAULT_FIB_LEVELS } from "./types.js";
 
 export interface NormalizeResult {
@@ -31,6 +31,11 @@ interface RawShape {
   qty?: number | null;
   tickSize?: number | null;
   text?: string | null;
+  variant?: string | null;
+}
+
+function isValidPitchforkVariant(s: unknown): s is PitchforkVariant {
+  return s === "andrews" || s === "schiff" || s === "modifiedSchiff";
 }
 
 function isFinitePositive(n: unknown): n is number {
@@ -84,6 +89,27 @@ export function normalizeDrawingDefaults(d: Drawing, intervalMs: number): Normal
         text: textFill ? "" : d.text,
       }),
       warn: null,
+    };
+  }
+
+  if (d.kind === "pitchfork") {
+    const rawVariant = (d as unknown as { variant?: unknown }).variant;
+    const variantMissing = rawVariant === undefined || rawVariant === null;
+    const variantValid = isValidPitchforkVariant(rawVariant);
+    const variant: PitchforkVariant = variantValid ? rawVariant : "andrews";
+    if (!styleFill && variantValid) {
+      return { drawing: d, warn: null };
+    }
+    const warn = !variantMissing && !variantValid
+      ? `pitchfork unknown variant ${String(rawVariant)} — defaulted to 'andrews'`
+      : null;
+    return {
+      drawing: Object.freeze({
+        ...d,
+        style: baseStyle,
+        variant,
+      }),
+      warn,
     };
   }
 

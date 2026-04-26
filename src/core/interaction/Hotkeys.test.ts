@@ -132,7 +132,7 @@ describe("installHotkeys", () => {
     expect(emitted.length).toBe(0);
   });
 
-  it("RECOMMENDED_HOTKEY_BINDINGS table contains all cycle-A + cycle-B kinds", () => {
+  it("RECOMMENDED_HOTKEY_BINDINGS table contains all cycle-A + cycle-B + cycle-C.1 kinds", () => {
     const values = Object.values(RECOMMENDED_HOTKEY_BINDINGS);
     expect(new Set(values)).toEqual(new Set([
       "trendline",
@@ -152,6 +152,10 @@ describe("installHotkeys", () => {
       "dateRange",
       "priceRange",
       "priceDateRange",
+      // Cycle C.1
+      "pitchfork",
+      "gannFan",
+      "ellipse",
     ]));
   });
 

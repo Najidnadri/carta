@@ -927,6 +927,39 @@ export class DrawingsController {
           anchors: Object.freeze([a[0], a[1]] as const),
         });
       }
+      // ─── Phase 13 Cycle C.1 ───
+      case "pitchfork": {
+        if (a[0] === undefined || a[1] === undefined || a[2] === undefined) {
+          return null;
+        }
+        const variant = creating.options.variant ?? "andrews";
+        return Object.freeze({
+          ...baseCommon,
+          kind: "pitchfork" as const,
+          anchors: Object.freeze([a[0], a[1], a[2]] as const),
+          variant,
+        });
+      }
+      case "gannFan": {
+        if (a[0] === undefined || a[1] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "gannFan" as const,
+          anchors: Object.freeze([a[0], a[1]] as const),
+        });
+      }
+      case "ellipse": {
+        if (a[0] === undefined || a[1] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "ellipse" as const,
+          anchors: Object.freeze([a[0], a[1]] as const),
+        });
+      }
     }
   }
 
@@ -2005,6 +2038,8 @@ function requiredAnchorsFor(kind: DrawingKind): number {
     case "dateRange":
     case "priceRange":
     case "priceDateRange":
+    case "gannFan":
+    case "ellipse":
       return 2;
     case "horizontalLine":
     case "verticalLine":
@@ -2012,6 +2047,7 @@ function requiredAnchorsFor(kind: DrawingKind): number {
     case "text":
       return 1;
     case "parallelChannel":
+    case "pitchfork":
       return 3;
   }
 }
@@ -2028,6 +2064,8 @@ function withAnchors(orig: Drawing, anchors: readonly DrawingAnchor[]): Drawing 
     case "dateRange":
     case "priceRange":
     case "priceDateRange":
+    case "gannFan":
+    case "ellipse":
       if (anchors[0] === undefined || anchors[1] === undefined) {
         return orig;
       }
@@ -2041,6 +2079,7 @@ function withAnchors(orig: Drawing, anchors: readonly DrawingAnchor[]): Drawing 
       }
       return Object.freeze({ ...orig, anchors: Object.freeze([anchors[0]] as const) });
     case "parallelChannel":
+    case "pitchfork":
       if (anchors[0] === undefined || anchors[1] === undefined || anchors[2] === undefined) {
         return orig;
       }
@@ -2097,6 +2136,8 @@ function cloneDrawingWithOffset(d: Drawing, intervalMs: number, newId: DrawingId
     case "dateRange":
     case "priceRange":
     case "priceDateRange":
+    case "gannFan":
+    case "ellipse":
       return Object.freeze({
         ...d,
         id: newId,
@@ -2112,6 +2153,16 @@ function cloneDrawingWithOffset(d: Drawing, intervalMs: number, newId: DrawingId
         anchors: Object.freeze([shift(d.anchors[0])] as const),
       });
     case "parallelChannel":
+      return Object.freeze({
+        ...d,
+        id: newId,
+        anchors: Object.freeze([
+          shift(d.anchors[0]),
+          shift(d.anchors[1]),
+          shift(d.anchors[2]),
+        ] as const),
+      });
+    case "pitchfork":
       return Object.freeze({
         ...d,
         id: newId,
@@ -2300,6 +2351,9 @@ function computeTextSpecs(
     case "horizontalRay":
     case "parallelChannel":
     case "arrow":
+    case "pitchfork":
+    case "gannFan":
+    case "ellipse":
       // No text readouts for these kinds (fib has its own pool).
       return null;
   }
@@ -2431,7 +2485,10 @@ function firstAnchorScreenPoint(geom: ScreenGeom): { x: number; y: number } | nu
     case "dateRange":
     case "priceRange":
     case "priceDateRange":
-    case "parallelChannel": {
+    case "parallelChannel":
+    case "pitchfork":
+    case "gannFan":
+    case "ellipse": {
       const a = geom.anchors[0];
       return { x: a.x, y: a.y };
     }

@@ -171,4 +171,128 @@ describe("parseSnapshot", () => {
       expect(got.direction).toBe("right");
     }
   });
+
+  it("Cycle C.1 — round-trips pitchfork / gannFan / ellipse", () => {
+    const pitchfork = {
+      id: "pf-1",
+      kind: "pitchfork",
+      schemaVersion: 1,
+      style: { stroke: { color: 0xff8800 } },
+      locked: false,
+      visible: true,
+      z: 1,
+      variant: "schiff",
+      anchors: [
+        { time: 0, price: 100, paneId: "main" },
+        { time: 30_000, price: 120, paneId: "main" },
+        { time: 30_000, price: 80, paneId: "main" },
+      ],
+    };
+    const gannFan = {
+      id: "g-1",
+      kind: "gannFan",
+      schemaVersion: 1,
+      style: {},
+      locked: false,
+      visible: true,
+      z: 2,
+      anchors: [
+        { time: 0, price: 100, paneId: "main" },
+        { time: 60_000, price: 110, paneId: "main" },
+      ],
+    };
+    const ellipse = {
+      id: "e-1",
+      kind: "ellipse",
+      schemaVersion: 1,
+      style: { stroke: { color: 0x4488ff } },
+      locked: false,
+      visible: true,
+      z: 3,
+      anchors: [
+        { time: 0, price: 100, paneId: "main" },
+        { time: 60_000, price: 50, paneId: "main" },
+      ],
+    };
+    const snap = { schemaVersion: 1 as const, drawings: [pitchfork, gannFan, ellipse] };
+    const parsed = parseSnapshot(snap);
+    expect(parsed.snapshot.drawings.length).toBe(3);
+    expect(parsed.droppedCount).toBe(0);
+    expect(parsed.snapshot.drawings.map((d) => d.kind)).toEqual([
+      "pitchfork",
+      "gannFan",
+      "ellipse",
+    ]);
+    const pf = parsed.snapshot.drawings[0];
+    if (pf?.kind === "pitchfork") {
+      expect(pf.variant).toBe("schiff");
+    }
+  });
+
+  it("Cycle C.1 — pitchfork unknown variant defaults to 'andrews'", () => {
+    const pitchfork = {
+      id: "pf-bad",
+      kind: "pitchfork",
+      schemaVersion: 1,
+      style: {},
+      locked: false,
+      visible: true,
+      z: 0,
+      variant: "doesNotExist",
+      anchors: [
+        { time: 0, price: 100, paneId: "main" },
+        { time: 30_000, price: 120, paneId: "main" },
+        { time: 30_000, price: 80, paneId: "main" },
+      ],
+    };
+    const r = parseDrawing(pitchfork);
+    expect(r?.kind).toBe("pitchfork");
+    if (r?.kind === "pitchfork") {
+      expect(r.variant).toBe("andrews");
+    }
+  });
+
+  it("Cycle C.1 — pitchfork drops on NaN price", () => {
+    const r = parseDrawing({
+      id: "pf-nan",
+      kind: "pitchfork",
+      schemaVersion: 1,
+      style: {},
+      locked: false,
+      visible: true,
+      z: 0,
+      variant: "andrews",
+      anchors: [
+        { time: 0, price: NaN, paneId: "main" },
+        { time: 30_000, price: 120, paneId: "main" },
+        { time: 30_000, price: 80, paneId: "main" },
+      ],
+    });
+    expect(r).toBeNull();
+  });
+
+  it("Cycle C.1 — gannFan / ellipse drop on missing anchor count", () => {
+    const gShort = parseDrawing({
+      id: "g-bad",
+      kind: "gannFan",
+      schemaVersion: 1,
+      style: {},
+      locked: false,
+      visible: true,
+      z: 0,
+      anchors: [{ time: 0, price: 100, paneId: "main" }],
+    });
+    expect(gShort).toBeNull();
+    const eShort = parseDrawing({
+      id: "e-bad",
+      kind: "ellipse",
+      schemaVersion: 1,
+      style: {},
+      locked: false,
+      visible: true,
+      z: 0,
+      anchors: [{ time: 0, price: 100, paneId: "main" }],
+    });
+    expect(eShort).toBeNull();
+  });
 });

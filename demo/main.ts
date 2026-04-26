@@ -1177,7 +1177,7 @@ async function main(): Promise<void> {
     });
   }
 
-  // ── Phase 13 — drawings toolbar (16 tools + magnet + clear / save / load) ────
+  // ── Phase 13 — drawings toolbar (20 tools + magnet + clear / save / load) ────
   const DRAWING_KINDS = [
     "trendline",
     "horizontalLine",
@@ -1197,8 +1197,20 @@ async function main(): Promise<void> {
     "dateRange",
     "priceRange",
     "priceDateRange",
+    // Phase 13 Cycle C.1
+    "pitchfork",
+    "gannFan",
+    "ellipse",
   ] as const;
   type DrawingKindName = typeof DRAWING_KINDS[number];
+
+  // Phase 13 Cycle C.1 — pitchfork variant selector reads from the dropdown
+  // before each beginCreate('pitchfork', { variant }).
+  const pitchforkVariantSelect = document.getElementById("pitchfork-variant") as HTMLSelectElement | null;
+  const readPitchforkVariant = (): "andrews" | "schiff" | "modifiedSchiff" => {
+    const v = pitchforkVariantSelect?.value;
+    return v === "schiff" || v === "modifiedSchiff" ? v : "andrews";
+  };
 
   const updateDrawingToolButtons = (): void => {
     const isCreating = chart?.drawings.isCreating() ?? false;
@@ -1219,6 +1231,8 @@ async function main(): Promise<void> {
       }
       if (chart.drawings.isCreating()) {
         chart.drawings.cancelCreate();
+      } else if (k === "pitchfork") {
+        chart.drawings.beginCreate("pitchfork", { variant: readPitchforkVariant() });
       } else {
         chart.drawings.beginCreate(k);
       }

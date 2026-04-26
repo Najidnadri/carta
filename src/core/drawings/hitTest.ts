@@ -9,11 +9,14 @@ import type {
   ArrowGeom,
   CalloutGeom,
   DateRangeGeom,
+  EllipseGeom,
   ExtendedLineGeom,
   FibRetracementGeom,
+  GannFanGeom,
   HorizontalLineGeom,
   HorizontalRayGeom,
   ParallelChannelGeom,
+  PitchforkGeom,
   PositionGeom,
   PriceDateRangeGeom,
   PriceRangeGeom,
@@ -245,6 +248,28 @@ function hitHandle(
       }
       return null;
     }
+    case "pitchfork": {
+      if (within(px, py, geom.anchors[0].x, geom.anchors[0].y, tol)) {
+        return 0;
+      }
+      if (within(px, py, geom.anchors[1].x, geom.anchors[1].y, tol)) {
+        return 1;
+      }
+      if (within(px, py, geom.anchors[2].x, geom.anchors[2].y, tol)) {
+        return 2;
+      }
+      return null;
+    }
+    case "gannFan":
+    case "ellipse": {
+      if (within(px, py, geom.anchors[0].x, geom.anchors[0].y, tol)) {
+        return 0;
+      }
+      if (within(px, py, geom.anchors[1].x, geom.anchors[1].y, tol)) {
+        return 1;
+      }
+      return null;
+    }
   }
 }
 
@@ -293,6 +318,12 @@ function hitGeom(
       return hitPriceRange(geom, px, py, tol);
     case "priceDateRange":
       return hitPriceDateRange(geom, px, py, tol);
+    case "pitchfork":
+      return hitPitchfork(geom, px, py, tol);
+    case "gannFan":
+      return hitGannFan(geom, px, py, tol);
+    case "ellipse":
+      return hitEllipse(geom, px, py, tol);
   }
 }
 
@@ -533,6 +564,97 @@ function pointInPolygon(
     }
   }
   return inside;
+}
+
+// ─── Phase 13 Cycle C.1 — exotic geometry hit-tests ────────────────────────
+
+function hitPitchfork(geom: PitchforkGeom, px: number, py: number, tol: number): "line" | null {
+  const bb = geom.bbox;
+  if (px < bb.xMin - tol || px > bb.xMax + tol || py < bb.yMin - tol || py > bb.yMax + tol) {
+    return null;
+  }
+  const cd = pointToSegmentDistance(
+    px,
+    py,
+    geom.centerline[0].x,
+    geom.centerline[0].y,
+    geom.centerline[1].x,
+    geom.centerline[1].y,
+  );
+  if (cd <= tol) {
+    return "line";
+  }
+  const ud = pointToSegmentDistance(
+    px,
+    py,
+    geom.upperRail[0].x,
+    geom.upperRail[0].y,
+    geom.upperRail[1].x,
+    geom.upperRail[1].y,
+  );
+  if (ud <= tol) {
+    return "line";
+  }
+  const ld = pointToSegmentDistance(
+    px,
+    py,
+    geom.lowerRail[0].x,
+    geom.lowerRail[0].y,
+    geom.lowerRail[1].x,
+    geom.lowerRail[1].y,
+  );
+  if (ld <= tol) {
+    return "line";
+  }
+  return null;
+}
+
+function hitGannFan(geom: GannFanGeom, px: number, py: number, tol: number): "line" | null {
+  const bb = geom.bbox;
+  if (px < bb.xMin - tol || px > bb.xMax + tol || py < bb.yMin - tol || py > bb.yMax + tol) {
+    return null;
+  }
+  for (const ray of geom.rays) {
+    const d = pointToSegmentDistance(
+      px,
+      py,
+      ray.visible[0].x,
+      ray.visible[0].y,
+      ray.visible[1].x,
+      ray.visible[1].y,
+    );
+    if (d <= tol) {
+      return "line";
+    }
+  }
+  return null;
+}
+
+function hitEllipse(geom: EllipseGeom, px: number, py: number, tol: number): "border" | "body" | null {
+  if (geom.rx <= 0 || geom.ry <= 0) {
+    return null;
+  }
+  // Bbox prefilter (with tolerance band).
+  if (px < geom.xMin - tol || px > geom.xMax + tol) {
+    return null;
+  }
+  if (py < geom.yMin - tol || py > geom.yMax + tol) {
+    return null;
+  }
+  const nx = (px - geom.cx) / geom.rx;
+  const ny = (py - geom.cy) / geom.ry;
+  const norm = nx * nx + ny * ny;
+  // Border: norm ≈ 1. Use a band scaled by `tol / min(rx, ry)` so the
+  // tolerance reads in pixels consistently regardless of ellipse size.
+  const minR = Math.min(geom.rx, geom.ry);
+  const bandHalf = tol / Math.max(1, minR);
+  if (norm >= (1 - bandHalf) ** 2 && norm <= (1 + bandHalf) ** 2) {
+    return "border";
+  }
+  if (norm < 1) {
+    return "body";
+  }
+  return null;
 }
 
 function hitFib(geom: FibRetracementGeom, px: number, py: number, tol: number): "line" | null {

@@ -20,11 +20,14 @@ import type {
   ArrowGeom,
   CalloutGeom,
   DateRangeGeom,
+  EllipseGeom,
   ExtendedLineGeom,
   FibRetracementGeom,
+  GannFanGeom,
   HorizontalLineGeom,
   HorizontalRayGeom,
   ParallelChannelGeom,
+  PitchforkGeom,
   PositionGeom,
   PriceDateRangeGeom,
   PriceRangeGeom,
@@ -374,6 +377,66 @@ function drawPriceDateRange(
   }
 }
 
+// ─── Phase 13 Cycle C.1 — exotic geometry renderers ────────────────────────
+
+function drawPitchfork(g: Graphics, geom: PitchforkGeom, drawing: Drawing, theme: Theme, dpr: number): void {
+  const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
+  // Centreline at full alpha; rails slightly fainter so the centreline reads
+  // as the median (matches TradingView).
+  const railStroke: ResolvedStroke = Object.freeze({
+    color: stroke.color,
+    alpha: stroke.alpha * 0.85,
+    width: stroke.width,
+    style: stroke.style,
+  });
+  const c0 = geom.centerline[0];
+  const c1 = geom.centerline[1];
+  drawSegment(g, c0.x, c0.y, c1.x, c1.y, stroke);
+  const u0 = geom.upperRail[0];
+  const u1 = geom.upperRail[1];
+  drawSegment(g, u0.x, u0.y, u1.x, u1.y, railStroke);
+  const l0 = geom.lowerRail[0];
+  const l1 = geom.lowerRail[1];
+  drawSegment(g, l0.x, l0.y, l1.x, l1.y, railStroke);
+}
+
+function drawGannFan(g: Graphics, geom: GannFanGeom, drawing: Drawing, theme: Theme, dpr: number): void {
+  const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
+  for (const ray of geom.rays) {
+    // 1×1 line gets full stroke; other slopes slightly faded so the 1×1 reads as primary.
+    const isUnity = ray.slope === 1;
+    const rayStroke: ResolvedStroke = isUnity
+      ? stroke
+      : Object.freeze({
+          color: stroke.color,
+          alpha: stroke.alpha * 0.7,
+          width: stroke.width,
+          style: stroke.style,
+        });
+    drawSegment(g, ray.visible[0].x, ray.visible[0].y, ray.visible[1].x, ray.visible[1].y, rayStroke);
+  }
+}
+
+function drawEllipse(g: Graphics, geom: EllipseGeom, drawing: Drawing, theme: Theme, dpr: number): void {
+  // Degenerate radii — render nothing without throwing.
+  if (geom.rx <= 0 || geom.ry <= 0) {
+    return;
+  }
+  const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
+  const fill = drawing.style.fill;
+  if (fill !== undefined) {
+    g.ellipse(geom.cx, geom.cy, geom.rx, geom.ry).fill({
+      color: fill.color,
+      alpha: fill.alpha ?? 0.18,
+    });
+  }
+  g.ellipse(geom.cx, geom.cy, geom.rx, geom.ry).stroke({
+    color: stroke.color,
+    alpha: stroke.alpha,
+    width: stroke.width,
+  });
+}
+
 export function redrawDrawing(
   g: Graphics,
   drawing: Drawing,
@@ -436,6 +499,15 @@ export function redrawDrawing(
       return;
     case "priceDateRange":
       drawPriceDateRange(g, geom, drawing, theme, dpr);
+      return;
+    case "pitchfork":
+      drawPitchfork(g, geom, drawing, theme, dpr);
+      return;
+    case "gannFan":
+      drawGannFan(g, geom, drawing, theme, dpr);
+      return;
+    case "ellipse":
+      drawEllipse(g, geom, drawing, theme, dpr);
       return;
   }
 }
@@ -632,6 +704,33 @@ export function handleSpecsFor(
     case "dateRange":
     case "priceRange":
     case "priceDateRange": {
+      const a0 = geom.anchors[0];
+      const a1 = geom.anchors[1];
+      if (inPlot(a0.x, a0.y)) {
+        specs.push(Object.freeze({ key: 0, x: a0.x, y: a0.y, variant: variantFor(0) }));
+      }
+      if (inPlot(a1.x, a1.y)) {
+        specs.push(Object.freeze({ key: 1, x: a1.x, y: a1.y, variant: variantFor(1) }));
+      }
+      return specs;
+    }
+    case "pitchfork": {
+      const a0 = geom.anchors[0];
+      const a1 = geom.anchors[1];
+      const a2 = geom.anchors[2];
+      if (inPlot(a0.x, a0.y)) {
+        specs.push(Object.freeze({ key: 0, x: a0.x, y: a0.y, variant: variantFor(0) }));
+      }
+      if (inPlot(a1.x, a1.y)) {
+        specs.push(Object.freeze({ key: 1, x: a1.x, y: a1.y, variant: variantFor(1) }));
+      }
+      if (inPlot(a2.x, a2.y)) {
+        specs.push(Object.freeze({ key: 2, x: a2.x, y: a2.y, variant: variantFor(2) }));
+      }
+      return specs;
+    }
+    case "gannFan":
+    case "ellipse": {
       const a0 = geom.anchors[0];
       const a1 = geom.anchors[1];
       if (inPlot(a0.x, a0.y)) {

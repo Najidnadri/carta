@@ -17,14 +17,17 @@ import type {
   CalloutDrawing,
   DateRangeDrawing,
   Drawing,
+  EllipseDrawing,
   ExtendedLineDrawing,
   ExtendMode,
   FibLevel,
   FibRetracementDrawing,
+  GannFanDrawing,
   HorizontalLineDrawing,
   HorizontalRayDrawing,
   LongPositionDrawing,
   ParallelChannelDrawing,
+  PitchforkDrawing,
   PriceDateRangeDrawing,
   PriceRangeDrawing,
   RayDrawing,
@@ -34,6 +37,7 @@ import type {
   TrendlineDrawing,
   VerticalLineDrawing,
 } from "./types.js";
+import { computePitchforkCenterlineBase, GANN_FAN_SLOPES } from "./pitchfork.js";
 
 export interface ScreenPoint {
   readonly x: number;
@@ -212,6 +216,51 @@ export interface PriceDateRangeGeom {
   readonly badgeAnchor: ScreenPoint;
 }
 
+// ─── Phase 13 Cycle C.1 — exotic geometry geoms ────────────────────────────
+
+export interface PitchforkGeom {
+  readonly kind: "pitchfork";
+  /** Original anchors `(pivot, reaction1, reaction2)` projected. */
+  readonly anchors: readonly [ScreenPoint, ScreenPoint, ScreenPoint];
+  /** Centreline visible segment (clipped + optionally extended per `style.extend`). */
+  readonly centerline: readonly [ScreenPoint, ScreenPoint];
+  /** Upper rail (parallel to centreline, through `reaction1`). */
+  readonly upperRail: readonly [ScreenPoint, ScreenPoint];
+  /** Lower rail (parallel to centreline, through `reaction2`). */
+  readonly lowerRail: readonly [ScreenPoint, ScreenPoint];
+  readonly bbox: { readonly xMin: number; readonly xMax: number; readonly yMin: number; readonly yMax: number };
+}
+
+export interface GannRayGeom {
+  /** Slope multiple this ray represents (1×8 → 0.125 etc.; 1×1 → 1; 8×1 → 8). */
+  readonly slope: number;
+  /** Visible (clipped + extended) segment in screen space. */
+  readonly visible: readonly [ScreenPoint, ScreenPoint];
+}
+
+export interface GannFanGeom {
+  readonly kind: "gannFan";
+  readonly anchors: readonly [ScreenPoint, ScreenPoint];
+  /** 9 rays from the pivot at the configured Gann slopes. Empty if pivot/direction degenerate. */
+  readonly rays: readonly GannRayGeom[];
+  readonly bbox: { readonly xMin: number; readonly xMax: number; readonly yMin: number; readonly yMax: number };
+}
+
+export interface EllipseGeom {
+  readonly kind: "ellipse";
+  readonly anchors: readonly [ScreenPoint, ScreenPoint];
+  /** Centre in screen px. */
+  readonly cx: number;
+  readonly cy: number;
+  /** Half-width / half-height in screen px (always non-negative). */
+  readonly rx: number;
+  readonly ry: number;
+  readonly xMin: number;
+  readonly xMax: number;
+  readonly yMin: number;
+  readonly yMax: number;
+}
+
 export type ScreenGeom =
   | TrendlineGeom
   | HorizontalLineGeom
@@ -228,7 +277,10 @@ export type ScreenGeom =
   | ArrowGeom
   | DateRangeGeom
   | PriceRangeGeom
-  | PriceDateRangeGeom;
+  | PriceDateRangeGeom
+  | PitchforkGeom
+  | GannFanGeom
+  | EllipseGeom;
 
 export interface ProjectionContext {
   readonly timeScale: TimeScale;
@@ -788,6 +840,154 @@ function projectPriceDateRange(d: PriceDateRangeDrawing, ctx: ProjectionContext)
   });
 }
 
+// ─── Phase 13 Cycle C.1 — exotic geometry projectors ───────────────────────
+
+function resolveExtendDefault(extend: ExtendMode | undefined, fallback: ExtendMode): ExtendMode {
+  return extend ?? fallback;
+}
+
+function projectPitchfork(d: PitchforkDrawing, ctx: ProjectionContext): PitchforkGeom {
+  const pivot = d.anchors[0];
+  const r1 = d.anchors[1];
+  const r2 = d.anchors[2];
+  const base = computePitchforkCenterlineBase(
+    d.variant,
+    { time: Number(pivot.time), price: Number(pivot.price) },
+    { time: Number(r1.time), price: Number(r1.price) },
+    { time: Number(r2.time), price: Number(r2.price) },
+  );
+  const pPx = projectAnchor(ctx.timeScale, ctx.priceScale, Number(pivot.time), Number(pivot.price));
+  const r1Px = projectAnchor(ctx.timeScale, ctx.priceScale, Number(r1.time), Number(r1.price));
+  const r2Px = projectAnchor(ctx.timeScale, ctx.priceScale, Number(r2.time), Number(r2.price));
+  const basePx = projectAnchor(ctx.timeScale, ctx.priceScale, base.time, base.price);
+  // Centreline direction vector in screen space.
+  const dx = basePx.x - pPx.x;
+  const dy = basePx.y - pPx.y;
+  // Upper / lower rail anchors: same direction, translated by (r{1,2} - pivot).
+  const upperA: ScreenPoint = Object.freeze({ x: r1Px.x, y: r1Px.y });
+  const upperB: ScreenPoint = Object.freeze({ x: r1Px.x + dx, y: r1Px.y + dy });
+  const lowerA: ScreenPoint = Object.freeze({ x: r2Px.x, y: r2Px.y });
+  const lowerB: ScreenPoint = Object.freeze({ x: r2Px.x + dx, y: r2Px.y + dy });
+  const extend = resolveExtendDefault(d.style.extend, "right");
+  const centerline = extendSegment(pPx, basePx, extend, ctx.plotRect);
+  const upperRail = extendSegment(upperA, upperB, extend, ctx.plotRect);
+  const lowerRail = extendSegment(lowerA, lowerB, extend, ctx.plotRect);
+  const xs = [
+    centerline[0].x,
+    centerline[1].x,
+    upperRail[0].x,
+    upperRail[1].x,
+    lowerRail[0].x,
+    lowerRail[1].x,
+    pPx.x,
+    r1Px.x,
+    r2Px.x,
+  ];
+  const ys = [
+    centerline[0].y,
+    centerline[1].y,
+    upperRail[0].y,
+    upperRail[1].y,
+    lowerRail[0].y,
+    lowerRail[1].y,
+    pPx.y,
+    r1Px.y,
+    r2Px.y,
+  ];
+  return Object.freeze({
+    kind: "pitchfork" as const,
+    anchors: Object.freeze([pPx, r1Px, r2Px] as const),
+    centerline,
+    upperRail,
+    lowerRail,
+    bbox: Object.freeze({
+      xMin: Math.min(...xs),
+      xMax: Math.max(...xs),
+      yMin: Math.min(...ys),
+      yMax: Math.max(...ys),
+    }),
+  });
+}
+
+function projectGannFan(d: GannFanDrawing, ctx: ProjectionContext): GannFanGeom {
+  const pivot = d.anchors[0];
+  const dir = d.anchors[1];
+  const pivotT = Number(pivot.time);
+  const pivotP = Number(pivot.price);
+  const dirT = Number(dir.time);
+  const dirP = Number(dir.price);
+  const pPx = projectAnchor(ctx.timeScale, ctx.priceScale, pivotT, pivotP);
+  const dPx = projectAnchor(ctx.timeScale, ctx.priceScale, dirT, dirP);
+  const dt = dirT - pivotT;
+  const dp = dirP - pivotP;
+  const rays: GannRayGeom[] = [];
+  let xMin = pPx.x;
+  let xMax = pPx.x;
+  let yMin = pPx.y;
+  let yMax = pPx.y;
+  // Degenerate: zero-vector or non-finite — emit empty fan.
+  if (
+    !Number.isFinite(dt) ||
+    !Number.isFinite(dp) ||
+    Math.abs(dt) < 1e-12 ||
+    Math.abs(dp) < 1e-12
+  ) {
+    return Object.freeze({
+      kind: "gannFan" as const,
+      anchors: Object.freeze([pPx, dPx] as const),
+      rays: Object.freeze([] as readonly GannRayGeom[]),
+      bbox: Object.freeze({ xMin, xMax, yMin, yMax }),
+    });
+  }
+  const extend = resolveExtendDefault(d.style.extend, "right");
+  const sgnT = Math.sign(dt);
+  const baseSlope = dp / dt; // 1×1 ratio in price/time space.
+  for (const mult of GANN_FAN_SLOPES) {
+    const slopePT = baseSlope * mult; // price per time for this ray.
+    // Direction-target time: same sign as `dt` so the ray points "forward".
+    const targetT = pivotT + sgnT * Math.abs(dt);
+    const targetP = pivotP + slopePT * (targetT - pivotT);
+    const targetPx = projectAnchor(ctx.timeScale, ctx.priceScale, targetT, targetP);
+    const visible = extendSegment(pPx, targetPx, extend, ctx.plotRect);
+    rays.push(Object.freeze({ slope: mult, visible }));
+    xMin = Math.min(xMin, visible[0].x, visible[1].x);
+    xMax = Math.max(xMax, visible[0].x, visible[1].x);
+    yMin = Math.min(yMin, visible[0].y, visible[1].y);
+    yMax = Math.max(yMax, visible[0].y, visible[1].y);
+  }
+  return Object.freeze({
+    kind: "gannFan" as const,
+    anchors: Object.freeze([pPx, dPx] as const),
+    rays: Object.freeze(rays),
+    bbox: Object.freeze({ xMin, xMax, yMin, yMax }),
+  });
+}
+
+function projectEllipse(d: EllipseDrawing, ctx: ProjectionContext): EllipseGeom {
+  const a = projectAnchor(ctx.timeScale, ctx.priceScale, Number(d.anchors[0].time), Number(d.anchors[0].price));
+  const b = projectAnchor(ctx.timeScale, ctx.priceScale, Number(d.anchors[1].time), Number(d.anchors[1].price));
+  const xMin = Math.min(a.x, b.x);
+  const xMax = Math.max(a.x, b.x);
+  const yMin = Math.min(a.y, b.y);
+  const yMax = Math.max(a.y, b.y);
+  const cx = (xMin + xMax) / 2;
+  const cy = (yMin + yMax) / 2;
+  const rx = (xMax - xMin) / 2;
+  const ry = (yMax - yMin) / 2;
+  return Object.freeze({
+    kind: "ellipse" as const,
+    anchors: Object.freeze([a, b] as const),
+    cx,
+    cy,
+    rx,
+    ry,
+    xMin,
+    xMax,
+    yMin,
+    yMax,
+  });
+}
+
 export function projectDrawing(d: Drawing, ctx: ProjectionContext): ScreenGeom {
   switch (d.kind) {
     case "trendline":
@@ -823,6 +1023,12 @@ export function projectDrawing(d: Drawing, ctx: ProjectionContext): ScreenGeom {
       return projectPriceRange(d, ctx);
     case "priceDateRange":
       return projectPriceDateRange(d, ctx);
+    case "pitchfork":
+      return projectPitchfork(d, ctx);
+    case "gannFan":
+      return projectGannFan(d, ctx);
+    case "ellipse":
+      return projectEllipse(d, ctx);
   }
 }
 

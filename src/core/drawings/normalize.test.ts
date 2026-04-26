@@ -282,4 +282,64 @@ describe("normalizeDrawingDefaults — Cycle B.3 partial-add tolerance", () => {
       expect(drawing!.style).toEqual({});
     }
   });
+
+  // ─── Phase 13 Cycle C.1 ───
+  it("pitchfork missing variant → defaults to 'andrews' silently", () => {
+    const partial = {
+      id: "pf-bare" as Drawing["id"],
+      kind: "pitchfork",
+      locked: false,
+      visible: true,
+      z: 0,
+      schemaVersion: 1,
+      anchors: [ANCHOR_A, ANCHOR_B, ANCHOR_A],
+    } as unknown as Drawing;
+    const { drawing, warn } = normalizeDrawingDefaults(partial, INTERVAL_MS);
+    expect(drawing?.kind).toBe("pitchfork");
+    if (drawing?.kind === "pitchfork") {
+      expect(drawing.variant).toBe("andrews");
+      expect(drawing.style).toEqual({});
+    }
+    // Missing variant: not a "warn-and-fix" case — there's no signal that the
+    // host meant something else. Treat as silent default.
+    expect(warn).toBeNull();
+  });
+
+  it("pitchfork invalid variant → defaults to 'andrews' with a warn", () => {
+    const partial = {
+      id: "pf-bad" as Drawing["id"],
+      kind: "pitchfork",
+      locked: false,
+      visible: true,
+      z: 0,
+      schemaVersion: 1,
+      style: {},
+      variant: "schiffMod",
+      anchors: [ANCHOR_A, ANCHOR_B, ANCHOR_A],
+    } as unknown as Drawing;
+    const { drawing, warn } = normalizeDrawingDefaults(partial, INTERVAL_MS);
+    expect(drawing?.kind).toBe("pitchfork");
+    if (drawing?.kind === "pitchfork") {
+      expect(drawing.variant).toBe("andrews");
+    }
+    expect(warn).toMatch(/pitchfork unknown variant/);
+  });
+
+  it("gannFan / ellipse fill missing style with empty object", () => {
+    for (const kind of ["gannFan", "ellipse"] as const) {
+      const partial = {
+        id: `c-${kind}` as Drawing["id"],
+        kind,
+        locked: false,
+        visible: true,
+        z: 0,
+        schemaVersion: 1,
+        anchors: [ANCHOR_A, ANCHOR_B],
+      } as unknown as Drawing;
+      const { drawing, warn } = normalizeDrawingDefaults(partial, INTERVAL_MS);
+      expect(warn).toBeNull();
+      expect(drawing).not.toBeNull();
+      expect(drawing!.style).toEqual({});
+    }
+  });
 });

@@ -19,10 +19,12 @@ import type {
   DrawingStroke,
   DrawingStyle,
   DrawingTextStyle,
+  EllipseDrawing,
   ExtendedLineDrawing,
   ExtendMode,
   FibLevel,
   FibRetracementDrawing,
+  GannFanDrawing,
   HorizontalLineDrawing,
   HorizontalRayDirection,
   HorizontalRayDrawing,
@@ -30,6 +32,8 @@ import type {
   LongPositionDrawing,
   PaneId,
   ParallelChannelDrawing,
+  PitchforkDrawing,
+  PitchforkVariant,
   PriceDateRangeDrawing,
   PriceRangeDrawing,
   RayDrawing,
@@ -631,6 +635,64 @@ function parsePriceDateRange(raw: Record<string, unknown>): PriceDateRangeDrawin
   });
 }
 
+// ─── Phase 13 Cycle C.1 — exotic geometry parsers ──────────────────────────
+
+function parsePitchforkVariant(raw: unknown): PitchforkVariant {
+  return raw === "schiff" || raw === "modifiedSchiff" ? raw : "andrews";
+}
+
+function parsePitchfork(raw: Record<string, unknown>): PitchforkDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parseTripleAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "pitchfork" as const,
+    anchors,
+    variant: parsePitchforkVariant(raw.variant),
+    schemaVersion: 1 as const,
+  });
+}
+
+function parseGannFan(raw: Record<string, unknown>): GannFanDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parsePairAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "gannFan" as const,
+    anchors,
+    schemaVersion: 1 as const,
+  });
+}
+
+function parseEllipse(raw: Record<string, unknown>): EllipseDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parsePairAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "ellipse" as const,
+    anchors,
+    schemaVersion: 1 as const,
+  });
+}
+
 const PARSERS: Readonly<Record<DrawingKind, (raw: Record<string, unknown>) => Drawing | null>> = {
   trendline: parseTrendline,
   horizontalLine: parseHorizontal,
@@ -649,6 +711,9 @@ const PARSERS: Readonly<Record<DrawingKind, (raw: Record<string, unknown>) => Dr
   dateRange: parseDateRange,
   priceRange: parsePriceRange,
   priceDateRange: parsePriceDateRange,
+  pitchfork: parsePitchfork,
+  gannFan: parseGannFan,
+  ellipse: parseEllipse,
 };
 
 const KNOWN_KINDS: ReadonlySet<DrawingKind> = new Set([
@@ -669,6 +734,9 @@ const KNOWN_KINDS: ReadonlySet<DrawingKind> = new Set([
   "dateRange",
   "priceRange",
   "priceDateRange",
+  "pitchfork",
+  "gannFan",
+  "ellipse",
 ]);
 
 function isKnownKind(s: string): s is DrawingKind {

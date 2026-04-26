@@ -164,10 +164,12 @@ export type {
   DrawingStroke,
   DrawingStyle,
   DrawingTextStyle,
+  EllipseDrawing,
   ExtendedLineDrawing,
   ExtendMode,
   FibLevel,
   FibRetracementDrawing,
+  GannFanDrawing,
   HorizontalLineDrawing,
   HorizontalRayDirection,
   HorizontalRayDrawing,
@@ -175,6 +177,8 @@ export type {
   LongPositionDrawing,
   PaneId,
   ParallelChannelDrawing,
+  PitchforkDrawing,
+  PitchforkVariant,
   PriceDateRangeDrawing,
   PriceRangeDrawing,
   RayDrawing,
@@ -185,3 +189,10 @@ export type {
   TrendlineDrawing,
   VerticalLineDrawing,
 } from "./core/drawings/types.js";
+export type {
+  EllipseGeom,
+  GannFanGeom,
+  GannRayGeom,
+  PitchforkGeom,
+} from "./core/drawings/project.js";
+export { computePitchforkCenterlineBase, GANN_FAN_SLOPES } from "./core/drawings/pitchfork.js";

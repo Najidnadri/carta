@@ -26,6 +26,9 @@
  *   Alt+D → dateRange
  *   Alt+M → priceRange (m for "measure")
  *   Alt+K → priceDateRange
+ *   Alt+Shift+P → pitchfork  (Alt+P is parallelChannel)
+ *   Alt+Shift+G → gannFan    (Alt+G is horizontalRay)
+ *   Alt+O → ellipse
  *
  * Filters: `event.repeat`, IME composition, and keydowns delivered while an
  * `<input>`/`<textarea>`/`contenteditable` is focused. Hosts can `preventDefault`
@@ -78,6 +81,10 @@ export const RECOMMENDED_HOTKEY_BINDINGS: Readonly<Record<string, KeyboardHotkey
   d: "dateRange",
   m: "priceRange",
   k: "priceDateRange",
+  // Phase 13 Cycle C.1
+  "shift+p": "pitchfork",
+  "shift+g": "gannFan",
+  o: "ellipse",
 });
 
 export interface InstallHotkeysOptions {
