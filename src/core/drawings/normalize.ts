@@ -14,7 +14,13 @@
 
 import { asTime } from "../../types.js";
 import type { Drawing, DrawingStyle, FibLevel, DisplayMode, PitchforkVariant } from "./types.js";
-import { DEFAULT_FIB_LEVELS } from "./types.js";
+import {
+  DEFAULT_FIB_ARC_LEVELS,
+  DEFAULT_FIB_EXTENSION_LEVELS,
+  DEFAULT_FIB_FAN_LEVELS,
+  DEFAULT_FIB_LEVELS,
+  DEFAULT_FIB_TIME_ZONE_OFFSETS,
+} from "./types.js";
 
 export interface NormalizeResult {
   readonly drawing: Drawing | null;
@@ -26,6 +32,7 @@ const DEFAULT_END_TIME_BARS = 12;
 interface RawShape {
   style?: DrawingStyle | null;
   levels?: readonly FibLevel[] | null;
+  offsets?: readonly number[] | null;
   endTime?: number | null;
   displayMode?: string | null;
   qty?: number | null;
@@ -33,6 +40,47 @@ interface RawShape {
   text?: string | null;
   variant?: string | null;
 }
+
+/**
+ * Phase 13 Cycle C.2 — runtime boundary check that all anchor times / prices
+ * are finite. The parser path drops NaN at parse-time; this closes the gap
+ * for hosts that build drawings as plain JS objects bypassing TS and call
+ * `chart.drawings.add({...})` directly. Applied to fib variants (C.2) and
+ * retroactively to C.1 kinds (pitchfork / gannFan / ellipse) — closes the
+ * S-1 carry-over from C.1.
+ */
+function hasFiniteAnchors(d: Drawing): boolean {
+  const anchors = (d as unknown as { anchors?: readonly { time?: unknown; price?: unknown }[] }).anchors;
+  if (!Array.isArray(anchors)) {
+    return false;
+  }
+  for (const a of anchors) {
+    if (a === null || typeof a !== "object") {
+      return false;
+    }
+    const t = (a as { time?: unknown }).time;
+    const p = (a as { price?: unknown }).price;
+    if (typeof t !== "number" || !Number.isFinite(t)) {
+      return false;
+    }
+    if (typeof p !== "number" || !Number.isFinite(p)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const KINDS_REQUIRING_FINITE_ANCHORS: ReadonlySet<Drawing["kind"]> = new Set([
+  // Cycle C.1 — closes the S-1 carry-over.
+  "pitchfork",
+  "gannFan",
+  "ellipse",
+  // Cycle C.2.
+  "fibExtension",
+  "fibTimeZones",
+  "fibFan",
+  "fibArcs",
+]);
 
 function isValidPitchforkVariant(s: unknown): s is PitchforkVariant {
   return s === "andrews" || s === "schiff" || s === "modifiedSchiff";
@@ -53,6 +101,11 @@ function isValidDisplayMode(s: unknown): s is DisplayMode {
  *                 require `endTime` from the host.
  */
 export function normalizeDrawingDefaults(d: Drawing, intervalMs: number): NormalizeResult {
+  // Cycle C.2 — finite-anchor boundary check for kinds whose projection
+  // would otherwise produce phantom (0,0)-anchored shapes (S-1 carry-over).
+  if (KINDS_REQUIRING_FINITE_ANCHORS.has(d.kind) && !hasFiniteAnchors(d)) {
+    return { drawing: null, warn: `${d.kind} non-finite anchor time/price` };
+  }
   const view = d as unknown as RawShape;
   const styleFill = view.style === undefined || view.style === null;
   const baseStyle: DrawingStyle = styleFill ? Object.freeze({} as DrawingStyle) : d.style;
@@ -68,6 +121,70 @@ export function normalizeDrawingDefaults(d: Drawing, intervalMs: number): Normal
         ...d,
         style: baseStyle,
         levels: levelsFill ? DEFAULT_FIB_LEVELS : d.levels,
+      }),
+      warn: null,
+    };
+  }
+
+  if (d.kind === "fibExtension") {
+    const levelsFill =
+      view.levels === undefined || view.levels === null || !Array.isArray(view.levels);
+    if (!styleFill && !levelsFill) {
+      return { drawing: d, warn: null };
+    }
+    return {
+      drawing: Object.freeze({
+        ...d,
+        style: baseStyle,
+        levels: levelsFill ? DEFAULT_FIB_EXTENSION_LEVELS : d.levels,
+      }),
+      warn: null,
+    };
+  }
+
+  if (d.kind === "fibFan") {
+    const levelsFill =
+      view.levels === undefined || view.levels === null || !Array.isArray(view.levels);
+    if (!styleFill && !levelsFill) {
+      return { drawing: d, warn: null };
+    }
+    return {
+      drawing: Object.freeze({
+        ...d,
+        style: baseStyle,
+        levels: levelsFill ? DEFAULT_FIB_FAN_LEVELS : d.levels,
+      }),
+      warn: null,
+    };
+  }
+
+  if (d.kind === "fibArcs") {
+    const levelsFill =
+      view.levels === undefined || view.levels === null || !Array.isArray(view.levels);
+    if (!styleFill && !levelsFill) {
+      return { drawing: d, warn: null };
+    }
+    return {
+      drawing: Object.freeze({
+        ...d,
+        style: baseStyle,
+        levels: levelsFill ? DEFAULT_FIB_ARC_LEVELS : d.levels,
+      }),
+      warn: null,
+    };
+  }
+
+  if (d.kind === "fibTimeZones") {
+    const offsetsFill =
+      view.offsets === undefined || view.offsets === null || !Array.isArray(view.offsets);
+    if (!styleFill && !offsetsFill) {
+      return { drawing: d, warn: null };
+    }
+    return {
+      drawing: Object.freeze({
+        ...d,
+        style: baseStyle,
+        offsets: offsetsFill ? DEFAULT_FIB_TIME_ZONE_OFFSETS : d.offsets,
       }),
       warn: null,
     };
@@ -101,7 +218,7 @@ export function normalizeDrawingDefaults(d: Drawing, intervalMs: number): Normal
       return { drawing: d, warn: null };
     }
     const warn = !variantMissing && !variantValid
-      ? `pitchfork unknown variant ${String(rawVariant)} — defaulted to 'andrews'`
+      ? `pitchfork unknown variant ${typeof rawVariant === "string" ? rawVariant : typeof rawVariant} — defaulted to 'andrews'`
       : null;
     return {
       drawing: Object.freeze({

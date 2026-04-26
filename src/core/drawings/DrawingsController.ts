@@ -32,7 +32,11 @@ import {
 } from "../../types.js";
 import {
   asDrawingId,
+  DEFAULT_FIB_ARC_LEVELS,
+  DEFAULT_FIB_EXTENSION_LEVELS,
+  DEFAULT_FIB_FAN_LEVELS,
   DEFAULT_FIB_LEVELS,
+  DEFAULT_FIB_TIME_ZONE_OFFSETS,
   MAIN_PANE_ID,
   type BeginCreateOptions,
   type DisplayMode,
@@ -59,7 +63,7 @@ import type {
   ShortPositionDrawing,
 } from "./types.js";
 import { applyMagnet } from "./magnet.js";
-import { FibLabelPool } from "./FibLabelPool.js";
+import { LabelPool, type LabelSpec } from "./LabelPool.js";
 import {
   defaultTolerancesFor,
   hitTestDrawings,
@@ -224,7 +228,7 @@ export class DrawingsController {
   private readonly deps: DrawingsControllerDeps;
   private readonly drawings = new Map<DrawingId, Drawing>();
   private readonly graphicsByDrawing = new Map<DrawingId, Graphics>();
-  private readonly fibLabelPools = new Map<DrawingId, FibLabelPool>();
+  private readonly labelPools = new Map<DrawingId, LabelPool>();
   private readonly handleGraphicsPool: Graphics[] = [];
   private readonly handleCache = new HandleContextCache();
   private readonly handlesContainer: Container;
@@ -393,20 +397,16 @@ export class DrawingsController {
       const g = this.ensureGraphicsFor(entry.drawing.id);
       redrawDrawing(g, entry.drawing, entry.geom, ctx.theme, ctx.dpr);
       seen.add(entry.drawing.id);
-      if (entry.drawing.kind === "fibRetracement" && entry.geom.kind === "fibRetracement") {
-        const pool = this.ensureFibLabelPool(entry.drawing.id);
+      const labelSpecs = computeLabelSpecs(entry.drawing, entry.geom, formatter);
+      if (labelSpecs !== null) {
+        const pool = this.ensureLabelPool(entry.drawing.id);
         if (entry.drawing.visible) {
-          pool.sync(entry.geom.levels, {
-            theme: ctx.theme,
-            priceFormatter: formatter,
-            showPrices: entry.drawing.showPrices,
-            showPercents: entry.drawing.showPercents,
-            xRight: entry.geom.xMax,
-            plotWidth: ctx.plotRect.w,
-          });
+          pool.sync(labelSpecs, { theme: ctx.theme, plotWidth: ctx.plotRect.w });
         } else {
           pool.hideAll();
         }
+      } else if (this.labelPools.has(entry.drawing.id)) {
+        this.labelPools.get(entry.drawing.id)?.hideAll();
       }
       const textSpecs = finalSpecs.get(entry.drawing.id);
       if (textSpecs !== undefined) {
@@ -427,7 +427,7 @@ export class DrawingsController {
         g.visible = false;
       }
     }
-    for (const [id, pool] of this.fibLabelPools) {
+    for (const [id, pool] of this.labelPools) {
       if (!seen.has(id)) {
         pool.hideAll();
       }
@@ -486,10 +486,10 @@ export class DrawingsController {
     }
     this.handleGraphicsPool.length = 0;
     this.handleCache.destroy();
-    for (const pool of this.fibLabelPools.values()) {
+    for (const pool of this.labelPools.values()) {
       pool.destroy();
     }
-    this.fibLabelPools.clear();
+    this.labelPools.clear();
     for (const pool of this.textPools.values()) {
       pool.destroy();
     }
@@ -960,6 +960,53 @@ export class DrawingsController {
           anchors: Object.freeze([a[0], a[1]] as const),
         });
       }
+      // ─── Phase 13 Cycle C.2 ───
+      case "fibExtension": {
+        if (a[0] === undefined || a[1] === undefined || a[2] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "fibExtension" as const,
+          anchors: Object.freeze([a[0], a[1], a[2]] as const),
+          levels: creating.options.levels ?? DEFAULT_FIB_EXTENSION_LEVELS,
+          showPrices: creating.options.showPrices !== false,
+          showPercents: creating.options.showPercents !== false,
+        });
+      }
+      case "fibTimeZones": {
+        if (a[0] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "fibTimeZones" as const,
+          anchors: Object.freeze([a[0]] as const),
+          offsets: DEFAULT_FIB_TIME_ZONE_OFFSETS,
+        });
+      }
+      case "fibFan": {
+        if (a[0] === undefined || a[1] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "fibFan" as const,
+          anchors: Object.freeze([a[0], a[1]] as const),
+          levels: creating.options.levels ?? DEFAULT_FIB_FAN_LEVELS,
+        });
+      }
+      case "fibArcs": {
+        if (a[0] === undefined || a[1] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "fibArcs" as const,
+          anchors: Object.freeze([a[0], a[1]] as const),
+          levels: creating.options.levels ?? DEFAULT_FIB_ARC_LEVELS,
+        });
+      }
     }
   }
 
@@ -1020,10 +1067,10 @@ export class DrawingsController {
       g.destroy();
       this.graphicsByDrawing.delete(id);
     }
-    const pool = this.fibLabelPools.get(id);
+    const pool = this.labelPools.get(id);
     if (pool !== undefined) {
       pool.destroy();
-      this.fibLabelPools.delete(id);
+      this.labelPools.delete(id);
     }
     const tpool = this.textPools.get(id);
     if (tpool !== undefined) {
@@ -1816,11 +1863,11 @@ export class DrawingsController {
     return g;
   }
 
-  private ensureFibLabelPool(id: DrawingId): FibLabelPool {
-    let pool = this.fibLabelPools.get(id);
+  private ensureLabelPool(id: DrawingId): LabelPool {
+    let pool = this.labelPools.get(id);
     if (pool === undefined) {
-      pool = new FibLabelPool(this.handlesContainer);
-      this.fibLabelPools.set(id, pool);
+      pool = new LabelPool(this.handlesContainer);
+      this.labelPools.set(id, pool);
     }
     return pool;
   }
@@ -2040,14 +2087,18 @@ function requiredAnchorsFor(kind: DrawingKind): number {
     case "priceDateRange":
     case "gannFan":
     case "ellipse":
+    case "fibFan":
+    case "fibArcs":
       return 2;
     case "horizontalLine":
     case "verticalLine":
     case "horizontalRay":
     case "text":
+    case "fibTimeZones":
       return 1;
     case "parallelChannel":
     case "pitchfork":
+    case "fibExtension":
       return 3;
   }
 }
@@ -2066,6 +2117,8 @@ function withAnchors(orig: Drawing, anchors: readonly DrawingAnchor[]): Drawing 
     case "priceDateRange":
     case "gannFan":
     case "ellipse":
+    case "fibFan":
+    case "fibArcs":
       if (anchors[0] === undefined || anchors[1] === undefined) {
         return orig;
       }
@@ -2074,12 +2127,14 @@ function withAnchors(orig: Drawing, anchors: readonly DrawingAnchor[]): Drawing 
     case "verticalLine":
     case "horizontalRay":
     case "text":
+    case "fibTimeZones":
       if (anchors[0] === undefined) {
         return orig;
       }
       return Object.freeze({ ...orig, anchors: Object.freeze([anchors[0]] as const) });
     case "parallelChannel":
     case "pitchfork":
+    case "fibExtension":
       if (anchors[0] === undefined || anchors[1] === undefined || anchors[2] === undefined) {
         return orig;
       }
@@ -2138,6 +2193,8 @@ function cloneDrawingWithOffset(d: Drawing, intervalMs: number, newId: DrawingId
     case "priceDateRange":
     case "gannFan":
     case "ellipse":
+    case "fibFan":
+    case "fibArcs":
       return Object.freeze({
         ...d,
         id: newId,
@@ -2147,6 +2204,7 @@ function cloneDrawingWithOffset(d: Drawing, intervalMs: number, newId: DrawingId
     case "verticalLine":
     case "horizontalRay":
     case "text":
+    case "fibTimeZones":
       return Object.freeze({
         ...d,
         id: newId,
@@ -2163,6 +2221,16 @@ function cloneDrawingWithOffset(d: Drawing, intervalMs: number, newId: DrawingId
         ] as const),
       });
     case "pitchfork":
+      return Object.freeze({
+        ...d,
+        id: newId,
+        anchors: Object.freeze([
+          shift(d.anchors[0]),
+          shift(d.anchors[1]),
+          shift(d.anchors[2]),
+        ] as const),
+      });
+    case "fibExtension":
       return Object.freeze({
         ...d,
         id: newId,
@@ -2189,6 +2257,84 @@ function cloneDrawingWithOffset(d: Drawing, intervalMs: number, newId: DrawingId
 
 function cloneForSnapshot(d: Drawing): Drawing {
   return d;
+}
+
+/**
+ * Phase 13 Cycle C.2 — `LabelSpec[]` for kinds that route through `LabelPool`
+ * (fib retracement / extension / time zones / fan). Returns `null` for kinds
+ * that don't carry pooled labels. Specs encode placement mode + position; the
+ * pool resolves the pixel-clamped final coordinates.
+ */
+function computeLabelSpecs(
+  drawing: Drawing,
+  geom: ScreenGeom,
+  priceFormatter: PriceFormatter,
+): readonly LabelSpec[] | null {
+  if (drawing.kind === "fibRetracement" && geom.kind === "fibRetracement") {
+    return buildFibLevelSpecs(geom.levels, geom.xMax, drawing.showPrices, drawing.showPercents, priceFormatter);
+  }
+  if (drawing.kind === "fibExtension" && geom.kind === "fibExtension") {
+    return buildFibLevelSpecs(geom.levels, geom.xMax, drawing.showPrices, drawing.showPercents, priceFormatter);
+  }
+  if (drawing.kind === "fibTimeZones" && geom.kind === "fibTimeZones") {
+    const specs: LabelSpec[] = [];
+    for (const zone of geom.zones) {
+      specs.push(Object.freeze({
+        placement: "top-of-x" as const,
+        text: String(zone.offset),
+        x: zone.snappedX,
+        y: 2,
+      }));
+    }
+    return specs;
+  }
+  if (drawing.kind === "fibFan" && geom.kind === "fibFan") {
+    const specs: LabelSpec[] = [];
+    for (const ray of geom.rays) {
+      const end = ray.visible[1];
+      specs.push(Object.freeze({
+        placement: "end-of-ray" as const,
+        text: `${(ray.level * 100).toFixed(1)}%`,
+        x: end.x,
+        y: end.y,
+      }));
+    }
+    return specs;
+  }
+  return null;
+}
+
+function buildFibLevelSpecs(
+  levels: readonly { readonly value: number; readonly snappedY: number; readonly visible: boolean; readonly price: number }[],
+  xRight: number,
+  showPrices: boolean,
+  showPercents: boolean,
+  priceFormatter: PriceFormatter,
+): readonly LabelSpec[] {
+  const specs: LabelSpec[] = [];
+  for (const lvl of levels) {
+    if (!lvl.visible) {
+      continue;
+    }
+    const parts: string[] = [];
+    if (showPercents) {
+      parts.push(`${(lvl.value * 100).toFixed(1)}%`);
+    }
+    if (showPrices) {
+      parts.push(priceFormatter(lvl.price));
+    }
+    const text = parts.join(" ");
+    if (text.length === 0) {
+      continue;
+    }
+    specs.push(Object.freeze({
+      placement: "right-of-x" as const,
+      text,
+      xRight,
+      y: lvl.snappedY,
+    }));
+  }
+  return specs;
 }
 
 /**
@@ -2354,6 +2500,10 @@ function computeTextSpecs(
     case "pitchfork":
     case "gannFan":
     case "ellipse":
+    case "fibExtension":
+    case "fibTimeZones":
+    case "fibFan":
+    case "fibArcs":
       // No text readouts for these kinds (fib has its own pool).
       return null;
   }
@@ -2488,7 +2638,10 @@ function firstAnchorScreenPoint(geom: ScreenGeom): { x: number; y: number } | nu
     case "parallelChannel":
     case "pitchfork":
     case "gannFan":
-    case "ellipse": {
+    case "ellipse":
+    case "fibExtension":
+    case "fibFan":
+    case "fibArcs": {
       const a = geom.anchors[0];
       return { x: a.x, y: a.y };
     }
@@ -2496,6 +2649,7 @@ function firstAnchorScreenPoint(geom: ScreenGeom): { x: number; y: number } | nu
     case "verticalLine":
     case "horizontalRay":
     case "text":
+    case "fibTimeZones":
       return { x: geom.anchor.x, y: geom.anchor.y };
     case "callout":
       return { x: geom.pin.x, y: geom.pin.y };

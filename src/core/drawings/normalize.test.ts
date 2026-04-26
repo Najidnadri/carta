@@ -343,3 +343,144 @@ describe("normalizeDrawingDefaults — Cycle B.3 partial-add tolerance", () => {
     }
   });
 });
+
+describe("normalizeDrawingDefaults — Cycle C.2 NaN-anchor boundary", () => {
+  const NAN_ANCHOR = {
+    time: asTime(NaN),
+    price: asPrice(100),
+    paneId: "main" as Drawing["anchors"][0]["paneId"],
+  };
+  const NAN_PRICE_ANCHOR = {
+    time: asTime(0),
+    price: asPrice(NaN),
+    paneId: "main" as Drawing["anchors"][0]["paneId"],
+  };
+
+  it("drops fibExtension with NaN anchor time", () => {
+    const bad = {
+      id: "fe-nan" as Drawing["id"],
+      kind: "fibExtension",
+      locked: false,
+      visible: true,
+      z: 0,
+      schemaVersion: 1,
+      anchors: [NAN_ANCHOR, ANCHOR_A, ANCHOR_B],
+      levels: [{ value: 0 }, { value: 1 }],
+      showPrices: true,
+      showPercents: true,
+    } as unknown as Drawing;
+    const { drawing, warn } = normalizeDrawingDefaults(bad, INTERVAL_MS);
+    expect(drawing).toBeNull();
+    expect(warn).toContain("non-finite");
+  });
+
+  it("drops fibTimeZones with NaN anchor price", () => {
+    const bad = {
+      id: "ftz-nan" as Drawing["id"],
+      kind: "fibTimeZones",
+      locked: false,
+      visible: true,
+      z: 0,
+      schemaVersion: 1,
+      anchors: [NAN_PRICE_ANCHOR],
+      offsets: [1, 2, 3],
+    } as unknown as Drawing;
+    const { drawing, warn } = normalizeDrawingDefaults(bad, INTERVAL_MS);
+    expect(drawing).toBeNull();
+    expect(warn).toContain("non-finite");
+  });
+
+  it("drops fibFan with NaN anchor", () => {
+    const bad = {
+      id: "ff-nan" as Drawing["id"],
+      kind: "fibFan",
+      locked: false,
+      visible: true,
+      z: 0,
+      schemaVersion: 1,
+      anchors: [NAN_ANCHOR, ANCHOR_A],
+      levels: [{ value: 1 }],
+    } as unknown as Drawing;
+    const { drawing, warn } = normalizeDrawingDefaults(bad, INTERVAL_MS);
+    expect(drawing).toBeNull();
+    expect(warn).toContain("non-finite");
+  });
+
+  it("drops fibArcs with NaN anchor", () => {
+    const bad = {
+      id: "fa-nan" as Drawing["id"],
+      kind: "fibArcs",
+      locked: false,
+      visible: true,
+      z: 0,
+      schemaVersion: 1,
+      anchors: [NAN_ANCHOR, ANCHOR_A],
+      levels: [{ value: 1 }],
+    } as unknown as Drawing;
+    const { drawing, warn } = normalizeDrawingDefaults(bad, INTERVAL_MS);
+    expect(drawing).toBeNull();
+    expect(warn).toContain("non-finite");
+  });
+
+  it("retroactively drops pitchfork with NaN anchor (C.1 S-1 carry-over)", () => {
+    const bad = {
+      id: "pf-nan" as Drawing["id"],
+      kind: "pitchfork",
+      locked: false,
+      visible: true,
+      z: 0,
+      schemaVersion: 1,
+      anchors: [ANCHOR_A, NAN_ANCHOR, ANCHOR_B],
+      variant: "andrews",
+    } as unknown as Drawing;
+    const { drawing, warn } = normalizeDrawingDefaults(bad, INTERVAL_MS);
+    expect(drawing).toBeNull();
+    expect(warn).toContain("non-finite");
+  });
+
+  it("retroactively drops gannFan with NaN anchor (C.1 S-1 carry-over)", () => {
+    const bad = {
+      id: "gf-nan" as Drawing["id"],
+      kind: "gannFan",
+      locked: false,
+      visible: true,
+      z: 0,
+      schemaVersion: 1,
+      anchors: [NAN_ANCHOR, ANCHOR_B],
+    } as unknown as Drawing;
+    const { drawing, warn } = normalizeDrawingDefaults(bad, INTERVAL_MS);
+    expect(drawing).toBeNull();
+    expect(warn).toContain("non-finite");
+  });
+
+  it("retroactively drops ellipse with NaN anchor (C.1 S-1 carry-over)", () => {
+    const bad = {
+      id: "el-nan" as Drawing["id"],
+      kind: "ellipse",
+      locked: false,
+      visible: true,
+      z: 0,
+      schemaVersion: 1,
+      anchors: [NAN_PRICE_ANCHOR, ANCHOR_B],
+    } as unknown as Drawing;
+    const { drawing, warn } = normalizeDrawingDefaults(bad, INTERVAL_MS);
+    expect(drawing).toBeNull();
+    expect(warn).toContain("non-finite");
+  });
+
+  it("does NOT drop trendline with NaN anchor (cycle-A kinds remain unguarded)", () => {
+    const partial = {
+      id: "t-nan" as Drawing["id"],
+      kind: "trendline",
+      locked: false,
+      visible: true,
+      z: 0,
+      schemaVersion: 1,
+      anchors: [NAN_ANCHOR, ANCHOR_B],
+    } as unknown as Drawing;
+    const { drawing } = normalizeDrawingDefaults(partial, INTERVAL_MS);
+    // Trendline path didn't gain the finite-anchor guard in C.2; it remains
+    // host-responsibility for now.  Document via test.
+    expect(drawing).not.toBeNull();
+  });
+});

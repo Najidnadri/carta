@@ -1201,6 +1201,11 @@ async function main(): Promise<void> {
     "pitchfork",
     "gannFan",
     "ellipse",
+    // Phase 13 Cycle C.2
+    "fibExtension",
+    "fibTimeZones",
+    "fibFan",
+    "fibArcs",
   ] as const;
   type DrawingKindName = typeof DRAWING_KINDS[number];
 

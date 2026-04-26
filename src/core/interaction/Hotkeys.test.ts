@@ -87,7 +87,8 @@ describe("installHotkeys", () => {
     const target = makeTarget(store);
     const { chart, emitted, beginCalls } = makeChart();
     installHotkeys(chart, { target });
-    store.handler!(new KeyboardEvent("keydown", { key: "z", altKey: true }));
+    // 'q' is not in the recommended bindings table.
+    store.handler!(new KeyboardEvent("keydown", { key: "q", altKey: true }));
     expect(emitted.length).toBe(1);
     expect((emitted[0]?.payload as KeyboardHotkeyPayload).binding).toBeNull();
     expect(beginCalls).toEqual([]);
@@ -156,6 +157,11 @@ describe("installHotkeys", () => {
       "pitchfork",
       "gannFan",
       "ellipse",
+      // Cycle C.2
+      "fibExtension",
+      "fibTimeZones",
+      "fibFan",
+      "fibArcs",
     ]));
   });
 

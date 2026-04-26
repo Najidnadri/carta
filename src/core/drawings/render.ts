@@ -22,7 +22,11 @@ import type {
   DateRangeGeom,
   EllipseGeom,
   ExtendedLineGeom,
+  FibArcsGeom,
+  FibExtensionGeom,
+  FibFanGeom,
   FibRetracementGeom,
+  FibTimeZonesGeom,
   GannFanGeom,
   HorizontalLineGeom,
   HorizontalRayGeom,
@@ -437,6 +441,68 @@ function drawEllipse(g: Graphics, geom: EllipseGeom, drawing: Drawing, theme: Th
   });
 }
 
+// ─── Phase 13 Cycle C.2 — fib variant renderers ────────────────────────────
+
+function drawFibExtension(g: Graphics, geom: FibExtensionGeom, drawing: Drawing, theme: Theme, dpr: number): void {
+  const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
+  // Connector through the 3 anchors so users can see the impulse + extension legs.
+  const a0 = geom.anchors[0];
+  const a1 = geom.anchors[1];
+  const a2 = geom.anchors[2];
+  g.moveTo(a0.x, a0.y).lineTo(a1.x, a1.y).stroke({
+    color: stroke.color,
+    alpha: stroke.alpha * 0.55,
+    width: Math.max(1, stroke.width * 0.8),
+  });
+  g.moveTo(a1.x, a1.y).lineTo(a2.x, a2.y).stroke({
+    color: stroke.color,
+    alpha: stroke.alpha * 0.55,
+    width: Math.max(1, stroke.width * 0.8),
+  });
+  for (const lvl of geom.levels) {
+    if (!lvl.visible) {
+      continue;
+    }
+    g.moveTo(geom.xMin, lvl.snappedY).lineTo(geom.xMax, lvl.snappedY).stroke({
+      color: lvl.color ?? stroke.color,
+      alpha: lvl.alpha ?? stroke.alpha,
+      width: stroke.width,
+    });
+  }
+}
+
+function drawFibTimeZones(g: Graphics, geom: FibTimeZonesGeom, drawing: Drawing, theme: Theme, dpr: number): void {
+  const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
+  for (const zone of geom.zones) {
+    g.moveTo(zone.snappedX, geom.y1).lineTo(zone.snappedX, geom.y2).stroke({
+      color: stroke.color,
+      alpha: stroke.alpha,
+      width: stroke.width,
+    });
+  }
+}
+
+function drawFibFan(g: Graphics, geom: FibFanGeom, drawing: Drawing, theme: Theme, dpr: number): void {
+  const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
+  for (const ray of geom.rays) {
+    drawSegment(g, ray.visible[0].x, ray.visible[0].y, ray.visible[1].x, ray.visible[1].y, stroke);
+  }
+}
+
+function drawFibArcs(g: Graphics, geom: FibArcsGeom, drawing: Drawing, theme: Theme, dpr: number): void {
+  const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
+  for (const ring of geom.rings) {
+    if (!Number.isFinite(ring.r) || ring.r < 1 || ring.r > 4000) {
+      continue;
+    }
+    g.arc(geom.cx, geom.cy, ring.r, 0, Math.PI).stroke({
+      color: stroke.color,
+      alpha: stroke.alpha,
+      width: stroke.width,
+    });
+  }
+}
+
 export function redrawDrawing(
   g: Graphics,
   drawing: Drawing,
@@ -508,6 +574,18 @@ export function redrawDrawing(
       return;
     case "ellipse":
       drawEllipse(g, geom, drawing, theme, dpr);
+      return;
+    case "fibExtension":
+      drawFibExtension(g, geom, drawing, theme, dpr);
+      return;
+    case "fibTimeZones":
+      drawFibTimeZones(g, geom, drawing, theme, dpr);
+      return;
+    case "fibFan":
+      drawFibFan(g, geom, drawing, theme, dpr);
+      return;
+    case "fibArcs":
+      drawFibArcs(g, geom, drawing, theme, dpr);
       return;
   }
 }
@@ -730,7 +808,9 @@ export function handleSpecsFor(
       return specs;
     }
     case "gannFan":
-    case "ellipse": {
+    case "ellipse":
+    case "fibFan":
+    case "fibArcs": {
       const a0 = geom.anchors[0];
       const a1 = geom.anchors[1];
       if (inPlot(a0.x, a0.y)) {
@@ -738,6 +818,28 @@ export function handleSpecsFor(
       }
       if (inPlot(a1.x, a1.y)) {
         specs.push(Object.freeze({ key: 1, x: a1.x, y: a1.y, variant: variantFor(1) }));
+      }
+      return specs;
+    }
+    case "fibExtension": {
+      const a0 = geom.anchors[0];
+      const a1 = geom.anchors[1];
+      const a2 = geom.anchors[2];
+      if (inPlot(a0.x, a0.y)) {
+        specs.push(Object.freeze({ key: 0, x: a0.x, y: a0.y, variant: variantFor(0) }));
+      }
+      if (inPlot(a1.x, a1.y)) {
+        specs.push(Object.freeze({ key: 1, x: a1.x, y: a1.y, variant: variantFor(1) }));
+      }
+      if (inPlot(a2.x, a2.y)) {
+        specs.push(Object.freeze({ key: 2, x: a2.x, y: a2.y, variant: variantFor(2) }));
+      }
+      return specs;
+    }
+    case "fibTimeZones": {
+      const a = geom.anchor;
+      if (inPlot(a.x, a.y)) {
+        specs.push(Object.freeze({ key: 0, x: a.x, y: a.y, variant: variantFor(0) }));
       }
       return specs;
     }

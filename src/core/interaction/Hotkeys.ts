@@ -29,6 +29,10 @@
  *   Alt+Shift+P → pitchfork  (Alt+P is parallelChannel)
  *   Alt+Shift+G → gannFan    (Alt+G is horizontalRay)
  *   Alt+O → ellipse
+ *   Alt+Shift+F → fibExtension  (Alt+F is fibRetracement)
+ *   Alt+Z → fibTimeZones
+ *   Alt+J → fibFan
+ *   Alt+C → fibArcs
  *
  * Filters: `event.repeat`, IME composition, and keydowns delivered while an
  * `<input>`/`<textarea>`/`contenteditable` is focused. Hosts can `preventDefault`
@@ -85,6 +89,11 @@ export const RECOMMENDED_HOTKEY_BINDINGS: Readonly<Record<string, KeyboardHotkey
   "shift+p": "pitchfork",
   "shift+g": "gannFan",
   o: "ellipse",
+  // Phase 13 Cycle C.2
+  "shift+f": "fibExtension",
+  z: "fibTimeZones",
+  j: "fibFan",
+  c: "fibArcs",
 });
 
 export interface InstallHotkeysOptions {

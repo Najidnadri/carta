@@ -94,8 +94,15 @@ export { parseSnapshot, parseDrawing } from "./core/drawings/parsers.js";
 export type { ParseSnapshotResult } from "./core/drawings/parsers.js";
 export { applyMagnet, nearestBarTime } from "./core/drawings/magnet.js";
 export type { MagnetSnapResult } from "./core/drawings/magnet.js";
-export { FibLabelPool } from "./core/drawings/FibLabelPool.js";
-export type { FibLabelSyncContext } from "./core/drawings/FibLabelPool.js";
+export { LabelPool } from "./core/drawings/LabelPool.js";
+export type {
+  EndOfRayLabelSpec,
+  LabelPlacement,
+  LabelSpec,
+  LabelSyncContext,
+  RightOfXLabelSpec,
+  TopOfXLabelSpec,
+} from "./core/drawings/LabelPool.js";
 export { DrawingTextPool, DEFAULT_TEXT_ATLAS_SEED } from "./core/drawings/DrawingTextPool.js";
 export type { DrawingTextSpec } from "./core/drawings/DrawingTextPool.js";
 export {
@@ -137,7 +144,11 @@ export {
 export type { ClampOptions, ResultWindow, WindowSnapshot } from "./core/viewport/ViewportMath.js";
 export * from "./types.js";
 export {
+  DEFAULT_FIB_ARC_LEVELS,
+  DEFAULT_FIB_EXTENSION_LEVELS,
+  DEFAULT_FIB_FAN_LEVELS,
   DEFAULT_FIB_LEVELS,
+  DEFAULT_FIB_TIME_ZONE_OFFSETS,
   MAIN_PANE_ID,
   asDrawingId,
   asPaneId,
@@ -167,8 +178,12 @@ export type {
   EllipseDrawing,
   ExtendedLineDrawing,
   ExtendMode,
+  FibArcsDrawing,
+  FibExtensionDrawing,
+  FibFanDrawing,
   FibLevel,
   FibRetracementDrawing,
+  FibTimeZonesDrawing,
   GannFanDrawing,
   HorizontalLineDrawing,
   HorizontalRayDirection,
@@ -191,6 +206,13 @@ export type {
 } from "./core/drawings/types.js";
 export type {
   EllipseGeom,
+  FibArcRingGeom,
+  FibArcsGeom,
+  FibExtensionGeom,
+  FibFanGeom,
+  FibFanRayGeom,
+  FibTimeZoneGeom,
+  FibTimeZonesGeom,
   GannFanGeom,
   GannRayGeom,
   PitchforkGeom,

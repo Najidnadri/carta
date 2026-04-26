@@ -20,8 +20,12 @@ import type {
   EllipseDrawing,
   ExtendedLineDrawing,
   ExtendMode,
+  FibArcsDrawing,
+  FibExtensionDrawing,
+  FibFanDrawing,
   FibLevel,
   FibRetracementDrawing,
+  FibTimeZonesDrawing,
   GannFanDrawing,
   HorizontalLineDrawing,
   HorizontalRayDrawing,
@@ -261,6 +265,67 @@ export interface EllipseGeom {
   readonly yMax: number;
 }
 
+// ─── Phase 13 Cycle C.2 — fib variant geoms ─────────────────────────────────
+
+export interface FibExtensionGeom {
+  readonly kind: "fibExtension";
+  readonly anchors: readonly [ScreenPoint, ScreenPoint, ScreenPoint];
+  readonly xMin: number;
+  readonly xMax: number;
+  readonly levels: readonly FibLevelGeom[];
+  readonly bbox: { readonly xMin: number; readonly xMax: number; readonly yMin: number; readonly yMax: number };
+}
+
+export interface FibTimeZoneGeom {
+  /** Bar offset this zone represents (positive integer). */
+  readonly offset: number;
+  readonly x: number;
+  readonly snappedX: number;
+  /** Time the zone projects to in ms epoch (origin + offset * intervalMs). */
+  readonly time: number;
+}
+
+export interface FibTimeZonesGeom {
+  readonly kind: "fibTimeZones";
+  readonly anchor: ScreenPoint;
+  readonly zones: readonly FibTimeZoneGeom[];
+  /** `true` when the chart's `intervalDuration` was non-positive — caller renders origin handle only and may emit a warn. */
+  readonly intervalMissing: boolean;
+  readonly y1: number;
+  readonly y2: number;
+  readonly bbox: { readonly xMin: number; readonly xMax: number; readonly yMin: number; readonly yMax: number };
+}
+
+export interface FibFanRayGeom {
+  readonly level: number;
+  readonly visible: readonly [ScreenPoint, ScreenPoint];
+}
+
+export interface FibFanGeom {
+  readonly kind: "fibFan";
+  readonly anchors: readonly [ScreenPoint, ScreenPoint];
+  readonly rays: readonly FibFanRayGeom[];
+  readonly bbox: { readonly xMin: number; readonly xMax: number; readonly yMin: number; readonly yMax: number };
+}
+
+export interface FibArcRingGeom {
+  readonly level: number;
+  /** Screen-space radius for this ring = `r * level`. */
+  readonly r: number;
+}
+
+export interface FibArcsGeom {
+  readonly kind: "fibArcs";
+  readonly anchors: readonly [ScreenPoint, ScreenPoint];
+  /** Screen-space center (anchor A projected). */
+  readonly cx: number;
+  readonly cy: number;
+  /** Screen-space radius `‖proj(B) − proj(A)‖`. Recomputed every frame — never cached. */
+  readonly r: number;
+  readonly rings: readonly FibArcRingGeom[];
+  readonly bbox: { readonly xMin: number; readonly xMax: number; readonly yMin: number; readonly yMax: number };
+}
+
 export type ScreenGeom =
   | TrendlineGeom
   | HorizontalLineGeom
@@ -280,7 +345,11 @@ export type ScreenGeom =
   | PriceDateRangeGeom
   | PitchforkGeom
   | GannFanGeom
-  | EllipseGeom;
+  | EllipseGeom
+  | FibExtensionGeom
+  | FibTimeZonesGeom
+  | FibFanGeom
+  | FibArcsGeom;
 
 export interface ProjectionContext {
   readonly timeScale: TimeScale;
@@ -988,6 +1057,170 @@ function projectEllipse(d: EllipseDrawing, ctx: ProjectionContext): EllipseGeom 
   });
 }
 
+// ─── Phase 13 Cycle C.2 — fib variant projectors ──────────────────────────
+
+function projectFibExtension(d: FibExtensionDrawing, ctx: ProjectionContext): FibExtensionGeom {
+  const aPrice = Number(d.anchors[0].price);
+  const bPrice = Number(d.anchors[1].price);
+  const cPrice = Number(d.anchors[2].price);
+  const a = projectAnchor(ctx.timeScale, ctx.priceScale, Number(d.anchors[0].time), aPrice);
+  const b = projectAnchor(ctx.timeScale, ctx.priceScale, Number(d.anchors[1].time), bPrice);
+  const c = projectAnchor(ctx.timeScale, ctx.priceScale, Number(d.anchors[2].time), cPrice);
+  const xMin = Math.min(a.x, b.x, c.x);
+  const xMax = Math.max(a.x, b.x, c.x);
+  const span = bPrice - aPrice;
+  const finite = Number.isFinite(span) && Number.isFinite(cPrice);
+  const levels: FibLevelGeom[] = [];
+  let yMin = Math.min(a.y, b.y, c.y);
+  let yMax = Math.max(a.y, b.y, c.y);
+  for (const lvl of d.levels) {
+    const visible = lvl.visible !== false;
+    if (!finite) {
+      levels.push(makeLevel(lvl, c.y, cPrice, visible));
+      continue;
+    }
+    const price = cPrice + lvl.value * span;
+    const yPx = Number(ctx.priceScale.valueToPixel(price));
+    const safeY = Number.isFinite(yPx) ? yPx : c.y;
+    yMin = Math.min(yMin, safeY);
+    yMax = Math.max(yMax, safeY);
+    levels.push(makeLevel(lvl, safeY, price, visible));
+  }
+  const anchors: readonly [ScreenPoint, ScreenPoint, ScreenPoint] = Object.freeze([a, b, c] as const);
+  return Object.freeze({
+    kind: "fibExtension" as const,
+    anchors,
+    xMin,
+    xMax,
+    levels: Object.freeze(levels),
+    bbox: Object.freeze({ xMin, xMax, yMin, yMax }),
+  });
+}
+
+function projectFibTimeZones(d: FibTimeZonesDrawing, ctx: ProjectionContext): FibTimeZonesGeom {
+  const originTime = Number(d.anchors[0].time);
+  const originPrice = Number(d.anchors[0].price);
+  const anchor = projectAnchor(ctx.timeScale, ctx.priceScale, originTime, originPrice);
+  const intervalMs = Number(ctx.timeScale.intervalDuration);
+  const intervalOk = Number.isFinite(intervalMs) && intervalMs > 0;
+  const zones: FibTimeZoneGeom[] = [];
+  let xMin = anchor.x;
+  let xMax = anchor.x;
+  if (intervalOk && Number.isFinite(originTime)) {
+    for (const offset of d.offsets) {
+      if (!Number.isFinite(offset) || offset <= 0 || !Number.isInteger(offset)) {
+        continue;
+      }
+      const time = originTime + offset * intervalMs;
+      const xPx = Number(ctx.timeScale.timeToPixel(time as never));
+      const safeX = Number.isFinite(xPx) ? xPx : anchor.x;
+      const snappedX = pixelSnap(safeX);
+      zones.push(Object.freeze({ offset, x: safeX, snappedX, time }));
+      xMin = Math.min(xMin, safeX);
+      xMax = Math.max(xMax, safeX);
+    }
+  }
+  const y1 = 0;
+  const y2 = ctx.plotRect.h;
+  return Object.freeze({
+    kind: "fibTimeZones" as const,
+    anchor,
+    zones: Object.freeze(zones),
+    intervalMissing: !intervalOk,
+    y1,
+    y2,
+    bbox: Object.freeze({ xMin, xMax, yMin: y1, yMax: y2 }),
+  });
+}
+
+function projectFibFan(d: FibFanDrawing, ctx: ProjectionContext): FibFanGeom {
+  const aTime = Number(d.anchors[0].time);
+  const aPrice = Number(d.anchors[0].price);
+  const bTime = Number(d.anchors[1].time);
+  const bPrice = Number(d.anchors[1].price);
+  const aPx = projectAnchor(ctx.timeScale, ctx.priceScale, aTime, aPrice);
+  const bPx = projectAnchor(ctx.timeScale, ctx.priceScale, bTime, bPrice);
+  const dt = bTime - aTime;
+  const dp = bPrice - aPrice;
+  const rays: FibFanRayGeom[] = [];
+  let xMin = aPx.x;
+  let xMax = aPx.x;
+  let yMin = aPx.y;
+  let yMax = aPx.y;
+  if (
+    Number.isFinite(dt) &&
+    Number.isFinite(dp) &&
+    Math.abs(dt) >= 1e-12 &&
+    Math.abs(dp) >= 1e-12
+  ) {
+    for (const lvl of d.levels) {
+      if (lvl.visible === false) {
+        continue;
+      }
+      const yPrice = aPrice + lvl.value * dp;
+      const targetPx = projectAnchor(ctx.timeScale, ctx.priceScale, bTime, yPrice);
+      const visible = extendSegment(aPx, targetPx, "right", ctx.plotRect);
+      rays.push(Object.freeze({ level: lvl.value, visible }));
+      xMin = Math.min(xMin, visible[0].x, visible[1].x);
+      xMax = Math.max(xMax, visible[0].x, visible[1].x);
+      yMin = Math.min(yMin, visible[0].y, visible[1].y);
+      yMax = Math.max(yMax, visible[0].y, visible[1].y);
+    }
+  }
+  return Object.freeze({
+    kind: "fibFan" as const,
+    anchors: Object.freeze([aPx, bPx] as const),
+    rays: Object.freeze(rays),
+    bbox: Object.freeze({ xMin, xMax, yMin, yMax }),
+  });
+}
+
+function projectFibArcs(d: FibArcsDrawing, ctx: ProjectionContext): FibArcsGeom {
+  const aPx = projectAnchor(
+    ctx.timeScale,
+    ctx.priceScale,
+    Number(d.anchors[0].time),
+    Number(d.anchors[0].price),
+  );
+  const bPx = projectAnchor(
+    ctx.timeScale,
+    ctx.priceScale,
+    Number(d.anchors[1].time),
+    Number(d.anchors[1].price),
+  );
+  const dx = bPx.x - aPx.x;
+  const dy = bPx.y - aPx.y;
+  const r = Number.isFinite(dx) && Number.isFinite(dy) ? Math.hypot(dx, dy) : 0;
+  const rings: FibArcRingGeom[] = [];
+  let rMax = 0;
+  for (const lvl of d.levels) {
+    if (lvl.visible === false) {
+      continue;
+    }
+    const ringR = r * lvl.value;
+    rings.push(Object.freeze({ level: lvl.value, r: ringR }));
+    if (ringR > rMax) {
+      rMax = ringR;
+    }
+  }
+  // Bbox covers the bottom half-arcs only: x ∈ [cx - rMax, cx + rMax],
+  // y ∈ [cy, cy + rMax]. Caller's bbox prefilter must respect the half.
+  return Object.freeze({
+    kind: "fibArcs" as const,
+    anchors: Object.freeze([aPx, bPx] as const),
+    cx: aPx.x,
+    cy: aPx.y,
+    r,
+    rings: Object.freeze(rings),
+    bbox: Object.freeze({
+      xMin: aPx.x - rMax,
+      xMax: aPx.x + rMax,
+      yMin: aPx.y,
+      yMax: aPx.y + rMax,
+    }),
+  });
+}
+
 export function projectDrawing(d: Drawing, ctx: ProjectionContext): ScreenGeom {
   switch (d.kind) {
     case "trendline":
@@ -1029,6 +1262,14 @@ export function projectDrawing(d: Drawing, ctx: ProjectionContext): ScreenGeom {
       return projectGannFan(d, ctx);
     case "ellipse":
       return projectEllipse(d, ctx);
+    case "fibExtension":
+      return projectFibExtension(d, ctx);
+    case "fibTimeZones":
+      return projectFibTimeZones(d, ctx);
+    case "fibFan":
+      return projectFibFan(d, ctx);
+    case "fibArcs":
+      return projectFibArcs(d, ctx);
   }
 }
 

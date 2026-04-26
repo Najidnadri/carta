@@ -43,7 +43,12 @@ export type DrawingKind =
   // ─── Phase 13 Cycle C.1 — exotic geometry tools ────────────────────────
   | "pitchfork"
   | "gannFan"
-  | "ellipse";
+  | "ellipse"
+  // ─── Phase 13 Cycle C.2 — fib variants ─────────────────────────────────
+  | "fibExtension"
+  | "fibTimeZones"
+  | "fibFan"
+  | "fibArcs";
 
 export type HorizontalRayDirection = "left" | "right";
 
@@ -273,6 +278,66 @@ export interface EllipseDrawing extends DrawingCommon {
   readonly anchors: readonly [DrawingAnchor, DrawingAnchor];
 }
 
+// ─── Phase 13 Cycle C.2 — fib variants ─────────────────────────────────────
+
+/**
+ * Fibonacci extension — 3-anchor: `[a, b, c]`.
+ *  - `(a, b)` defines the impulse leg span.
+ *  - `c` is the extension origin (typical pullback low for an uptrend).
+ *
+ * Each level renders at price `c.price + level * (b.price - a.price)`. The
+ * x-extent of level lines spans `min..max` of the 3 anchor times. Same label
+ * placement convention as `fibRetracement` (`'right-of-x'`).
+ */
+export interface FibExtensionDrawing extends DrawingCommon {
+  readonly kind: "fibExtension";
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor, DrawingAnchor];
+  readonly levels: readonly FibLevel[];
+  readonly showPrices: boolean;
+  readonly showPercents: boolean;
+}
+
+/**
+ * Fibonacci time zones — 1-anchor + chart's `intervalDuration`. Vertical
+ * lines render at bar offsets in `offsets` (default Fibonacci sequence).
+ * `offsets[i]` projects to `origin.time + offsets[i] * intervalDuration`.
+ * The origin (offset = 0) is **not** drawn by default — the anchor handle
+ * already marks it.
+ */
+export interface FibTimeZonesDrawing extends DrawingCommon {
+  readonly kind: "fibTimeZones";
+  readonly anchors: readonly [DrawingAnchor];
+  readonly offsets: readonly number[];
+}
+
+/**
+ * Fibonacci fan — 2-anchor: `[a, b]`. Rays emanate from `a` through
+ * `(b.time, a.price + level * (b.price - a.price))` for each level. Same
+ * `extendSegment` clipping as Gann fan.
+ */
+export interface FibFanDrawing extends DrawingCommon {
+  readonly kind: "fibFan";
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor];
+  readonly levels: readonly FibLevel[];
+}
+
+/**
+ * Fibonacci arcs — 2-anchor: `[a, b]`. `a` is the arc center; the radius is
+ * computed in **screen space** as `‖proj(b) − proj(a)‖` per frame, then each
+ * ring renders at `r * level`. Half-arcs (bottom hemisphere) — TradingView
+ * convention. Levels containing `0` skip naturally via the `r < 1` guard.
+ *
+ * Projection is asymmetric: anchors live in data space, but the radius
+ * transitions through screen space each frame. The invariant "A is at the
+ * arc center, B is on the level-1 ring" holds because both are recomputed
+ * from the same projection per frame.
+ */
+export interface FibArcsDrawing extends DrawingCommon {
+  readonly kind: "fibArcs";
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor];
+  readonly levels: readonly FibLevel[];
+}
+
 export type Drawing =
   | TrendlineDrawing
   | HorizontalLineDrawing
@@ -293,7 +358,11 @@ export type Drawing =
   | PriceDateRangeDrawing
   | PitchforkDrawing
   | GannFanDrawing
-  | EllipseDrawing;
+  | EllipseDrawing
+  | FibExtensionDrawing
+  | FibTimeZonesDrawing
+  | FibFanDrawing
+  | FibArcsDrawing;
 
 /** Default fib levels. Matches TradingView defaults. */
 export const DEFAULT_FIB_LEVELS: readonly FibLevel[] = Object.freeze([
@@ -304,6 +373,50 @@ export const DEFAULT_FIB_LEVELS: readonly FibLevel[] = Object.freeze([
   Object.freeze({ value: 0.618 }),
   Object.freeze({ value: 0.786 }),
   Object.freeze({ value: 1 }),
+]);
+
+/**
+ * Default fib-extension levels. Subset of TradingView's full set, chosen to
+ * minimize label collision on default viewports. Hosts override via
+ * `BeginCreateOptions.levels`.
+ */
+export const DEFAULT_FIB_EXTENSION_LEVELS: readonly FibLevel[] = Object.freeze([
+  Object.freeze({ value: 0 }),
+  Object.freeze({ value: 0.382 }),
+  Object.freeze({ value: 0.618 }),
+  Object.freeze({ value: 1 }),
+  Object.freeze({ value: 1.272 }),
+  Object.freeze({ value: 1.618 }),
+  Object.freeze({ value: 2.618 }),
+]);
+
+/** Default fib-fan levels — canonical 5-ray TradingView set. */
+export const DEFAULT_FIB_FAN_LEVELS: readonly FibLevel[] = Object.freeze([
+  Object.freeze({ value: 0 }),
+  Object.freeze({ value: 0.382 }),
+  Object.freeze({ value: 0.5 }),
+  Object.freeze({ value: 0.618 }),
+  Object.freeze({ value: 1 }),
+]);
+
+/** Default fib-arc levels — 8 rings, TradingView convention. */
+export const DEFAULT_FIB_ARC_LEVELS: readonly FibLevel[] = Object.freeze([
+  Object.freeze({ value: 0.236 }),
+  Object.freeze({ value: 0.382 }),
+  Object.freeze({ value: 0.5 }),
+  Object.freeze({ value: 0.618 }),
+  Object.freeze({ value: 0.786 }),
+  Object.freeze({ value: 1 }),
+  Object.freeze({ value: 1.272 }),
+  Object.freeze({ value: 1.618 }),
+]);
+
+/**
+ * Default fib-time-zones offsets — Fibonacci sequence starting at 1. Offset 0
+ * is intentionally omitted (the anchor handle marks the origin).
+ */
+export const DEFAULT_FIB_TIME_ZONE_OFFSETS: readonly number[] = Object.freeze([
+  1, 2, 3, 5, 8, 13, 21, 34, 55, 89,
 ]);
 
 // ─── Persistence ───────────────────────────────────────────────────────────

@@ -11,7 +11,11 @@ import type {
   DateRangeGeom,
   EllipseGeom,
   ExtendedLineGeom,
+  FibArcsGeom,
+  FibExtensionGeom,
+  FibFanGeom,
   FibRetracementGeom,
+  FibTimeZonesGeom,
   GannFanGeom,
   HorizontalLineGeom,
   HorizontalRayGeom,
@@ -261,7 +265,9 @@ function hitHandle(
       return null;
     }
     case "gannFan":
-    case "ellipse": {
+    case "ellipse":
+    case "fibFan":
+    case "fibArcs": {
       if (within(px, py, geom.anchors[0].x, geom.anchors[0].y, tol)) {
         return 0;
       }
@@ -269,6 +275,22 @@ function hitHandle(
         return 1;
       }
       return null;
+    }
+    case "fibExtension": {
+      if (within(px, py, geom.anchors[0].x, geom.anchors[0].y, tol)) {
+        return 0;
+      }
+      if (within(px, py, geom.anchors[1].x, geom.anchors[1].y, tol)) {
+        return 1;
+      }
+      if (within(px, py, geom.anchors[2].x, geom.anchors[2].y, tol)) {
+        return 2;
+      }
+      return null;
+    }
+    case "fibTimeZones": {
+      const a = geom.anchor;
+      return within(px, py, a.x, a.y, tol) ? 0 : null;
     }
   }
 }
@@ -324,6 +346,14 @@ function hitGeom(
       return hitGannFan(geom, px, py, tol);
     case "ellipse":
       return hitEllipse(geom, px, py, tol);
+    case "fibExtension":
+      return hitFibExtension(geom, px, py, tol);
+    case "fibTimeZones":
+      return hitFibTimeZones(geom, px, py, tol);
+    case "fibFan":
+      return hitFibFan(geom, px, py, tol);
+    case "fibArcs":
+      return hitFibArcs(geom, px, py, tol);
   }
 }
 
@@ -676,4 +706,86 @@ function hitFib(geom: FibRetracementGeom, px: number, py: number, tol: number): 
     }
   }
   return bestDy <= tol ? "line" : null;
+}
+
+// ─── Phase 13 Cycle C.2 — fib variant hit-tests ────────────────────────────
+
+function hitFibExtension(geom: FibExtensionGeom, px: number, py: number, tol: number): "line" | null {
+  const bb = geom.bbox;
+  if (px < bb.xMin - tol || px > bb.xMax + tol) {
+    return null;
+  }
+  if (py < bb.yMin - tol || py > bb.yMax + tol) {
+    return null;
+  }
+  // Level lines span `xMin..xMax`; gate on horizontal extent.
+  if (px < geom.xMin - tol || px > geom.xMax + tol) {
+    return null;
+  }
+  let bestDy = Infinity;
+  for (const lvl of geom.levels) {
+    if (!lvl.visible) {
+      continue;
+    }
+    const dy = Math.abs(py - lvl.snappedY);
+    if (dy < bestDy) {
+      bestDy = dy;
+    }
+  }
+  return bestDy <= tol ? "line" : null;
+}
+
+function hitFibTimeZones(geom: FibTimeZonesGeom, px: number, py: number, tol: number): "line" | null {
+  if (py < geom.y1 - tol || py > geom.y2 + tol) {
+    return null;
+  }
+  for (const zone of geom.zones) {
+    if (Math.abs(px - zone.snappedX) <= tol) {
+      return "line";
+    }
+  }
+  return null;
+}
+
+function hitFibFan(geom: FibFanGeom, px: number, py: number, tol: number): "line" | null {
+  const bb = geom.bbox;
+  if (px < bb.xMin - tol || px > bb.xMax + tol || py < bb.yMin - tol || py > bb.yMax + tol) {
+    return null;
+  }
+  for (const ray of geom.rays) {
+    const d = pointToSegmentDistance(
+      px,
+      py,
+      ray.visible[0].x,
+      ray.visible[0].y,
+      ray.visible[1].x,
+      ray.visible[1].y,
+    );
+    if (d <= tol) {
+      return "line";
+    }
+  }
+  return null;
+}
+
+function hitFibArcs(geom: FibArcsGeom, px: number, py: number, tol: number): "line" | null {
+  // Bottom-half-arc: reject points clearly above the center.
+  const dy = py - geom.cy;
+  if (dy < -tol) {
+    return null;
+  }
+  const bb = geom.bbox;
+  if (px < bb.xMin - tol || px > bb.xMax + tol || py > bb.yMax + tol) {
+    return null;
+  }
+  const d = Math.hypot(px - geom.cx, dy);
+  for (const ring of geom.rings) {
+    if (!Number.isFinite(ring.r) || ring.r < 1 || ring.r > 4000) {
+      continue;
+    }
+    if (Math.abs(d - ring.r) <= tol) {
+      return "line";
+    }
+  }
+  return null;
 }

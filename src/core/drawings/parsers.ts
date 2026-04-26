@@ -22,8 +22,12 @@ import type {
   EllipseDrawing,
   ExtendedLineDrawing,
   ExtendMode,
+  FibArcsDrawing,
+  FibExtensionDrawing,
+  FibFanDrawing,
   FibLevel,
   FibRetracementDrawing,
+  FibTimeZonesDrawing,
   GannFanDrawing,
   HorizontalLineDrawing,
   HorizontalRayDirection,
@@ -693,6 +697,118 @@ function parseEllipse(raw: Record<string, unknown>): EllipseDrawing | null {
   });
 }
 
+// ─── Phase 13 Cycle C.2 — fib variant parsers ──────────────────────────────
+
+function parseFibLevels(raw: unknown): readonly FibLevel[] | null {
+  if (!Array.isArray(raw)) {
+    return null;
+  }
+  const levels: FibLevel[] = [];
+  for (const l of raw) {
+    const parsed = parseFibLevel(l);
+    if (parsed !== null) {
+      levels.push(parsed);
+    }
+  }
+  return Object.freeze(levels);
+}
+
+function parseFibExtension(raw: Record<string, unknown>): FibExtensionDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parseTripleAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  const levels = parseFibLevels(raw.levels);
+  if (levels === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "fibExtension" as const,
+    anchors,
+    levels,
+    showPrices: raw.showPrices !== false,
+    showPercents: raw.showPercents !== false,
+    schemaVersion: 1 as const,
+  });
+}
+
+function parseFibTimeZones(raw: Record<string, unknown>): FibTimeZonesDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parseSingleAnchor(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  const offsetsRaw = raw.offsets;
+  if (!Array.isArray(offsetsRaw)) {
+    return null;
+  }
+  const offsets: number[] = [];
+  for (const o of offsetsRaw) {
+    if (typeof o === "number" && Number.isFinite(o) && Number.isInteger(o) && o > 0) {
+      offsets.push(o);
+    }
+  }
+  return Object.freeze({
+    ...c,
+    kind: "fibTimeZones" as const,
+    anchors,
+    offsets: Object.freeze(offsets),
+    schemaVersion: 1 as const,
+  });
+}
+
+function parseFibFan(raw: Record<string, unknown>): FibFanDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parsePairAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  const levels = parseFibLevels(raw.levels);
+  if (levels === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "fibFan" as const,
+    anchors,
+    levels,
+    schemaVersion: 1 as const,
+  });
+}
+
+function parseFibArcs(raw: Record<string, unknown>): FibArcsDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parsePairAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  const levels = parseFibLevels(raw.levels);
+  if (levels === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "fibArcs" as const,
+    anchors,
+    levels,
+    schemaVersion: 1 as const,
+  });
+}
+
 const PARSERS: Readonly<Record<DrawingKind, (raw: Record<string, unknown>) => Drawing | null>> = {
   trendline: parseTrendline,
   horizontalLine: parseHorizontal,
@@ -714,6 +830,10 @@ const PARSERS: Readonly<Record<DrawingKind, (raw: Record<string, unknown>) => Dr
   pitchfork: parsePitchfork,
   gannFan: parseGannFan,
   ellipse: parseEllipse,
+  fibExtension: parseFibExtension,
+  fibTimeZones: parseFibTimeZones,
+  fibFan: parseFibFan,
+  fibArcs: parseFibArcs,
 };
 
 const KNOWN_KINDS: ReadonlySet<DrawingKind> = new Set([
@@ -737,6 +857,10 @@ const KNOWN_KINDS: ReadonlySet<DrawingKind> = new Set([
   "pitchfork",
   "gannFan",
   "ellipse",
+  "fibExtension",
+  "fibTimeZones",
+  "fibFan",
+  "fibArcs",
 ]);
 
 function isKnownKind(s: string): s is DrawingKind {
