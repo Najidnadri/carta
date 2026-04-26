@@ -1,4 +1,4 @@
-import type { Interval, Theme, Time } from "../../types.js";
+import type { Interval, MagnetMode, Theme, Time } from "../../types.js";
 
 export interface ConfigStateSnapshot {
   readonly startTime: Time;
@@ -7,6 +7,8 @@ export interface ConfigStateSnapshot {
   readonly width: number;
   readonly height: number;
   readonly theme: Theme;
+  /** Drawing-tools magnet mode. Defaults to `'off'`. Phase 13 Cycle B1. */
+  readonly magnet: MagnetMode;
 }
 
 /**
@@ -47,5 +49,12 @@ export class ConfigState {
       return this;
     }
     return new ConfigState({ ...this.snapshot, theme });
+  }
+
+  withMagnet(magnet: MagnetMode): ConfigState {
+    if (magnet === this.snapshot.magnet) {
+      return this;
+    }
+    return new ConfigState({ ...this.snapshot, magnet });
   }
 }

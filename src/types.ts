@@ -6,6 +6,7 @@
 import type {
   DrawingContextMenuPayload,
   DrawingEditPayload,
+  DrawingKind,
   DrawingsChangedPayload,
   DrawingsRemovedPayload,
   DrawingsSelectedPayload,
@@ -180,6 +181,44 @@ export interface TrackingModeOptions {
   readonly price?: Price;
 }
 
+// ─── Magnet ────────────────────────────────────────────────────────────────
+/**
+ * Magnet snap mode for drawing creation + edit. `'off'` = no snap; `'weak'`
+ * snaps anchor.price to the nearest of `{high, low}` of the bar at the
+ * snapped time; `'strong'` snaps to the nearest of `{open, high, low, close}`.
+ *
+ * Time always snaps to bar centre when magnet is non-off (mirrors the
+ * crosshair's existing X-snap). When the chart has no `ohlc` channel
+ * registered, magnet is a no-op (price returns input unchanged).
+ */
+export type MagnetMode = "off" | "weak" | "strong";
+
+// ─── Keyboard hotkeys ──────────────────────────────────────────────────────
+/**
+ * `keyboard:hotkey` payload. Fires for any `Alt+letter` keydown at the
+ * document scope (excluding `event.repeat`, IME composition, and keydowns
+ * delivered while an `<input>`/`<textarea>`/`contenteditable` is focused).
+ *
+ * `binding` resolves to the recommended drawing tool when the key matches
+ * the published Carta convention (`Alt+T/H/V/F/R` and the three line-family
+ * extensions); otherwise it is `null` so hosts can extend.
+ */
+export type KeyboardHotkeyBinding = DrawingKind;
+
+export interface KeyboardHotkeyPayload {
+  /** The lowercased letter (`'t'`, `'h'`, …). */
+  readonly key: string;
+  readonly modifiers: {
+    readonly alt: boolean;
+    readonly ctrl: boolean;
+    readonly meta: boolean;
+    readonly shift: boolean;
+  };
+  /** The drawing kind the recommended-binding table maps `key` to, or `null`. */
+  readonly binding: KeyboardHotkeyBinding | null;
+  readonly originalEvent: KeyboardEvent;
+}
+
 /**
  * Event map for `chart.on` / `off` / `once`. Keys are stable string literals,
  * payload types propagate so handlers get full TS inference.
@@ -197,6 +236,7 @@ export interface CartaEventMap extends Record<string, unknown> {
   readonly "drawings:selected": DrawingsSelectedPayload;
   readonly "drawing:edit": DrawingEditPayload;
   readonly "drawing:contextmenu": DrawingContextMenuPayload;
+  readonly "keyboard:hotkey": KeyboardHotkeyPayload;
 }
 
 export type EventKey = keyof CartaEventMap;

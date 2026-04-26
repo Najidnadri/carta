@@ -15,12 +15,17 @@ import type {
   DrawingStroke,
   DrawingStyle,
   DrawingTextStyle,
+  ExtendedLineDrawing,
   ExtendMode,
   FibLevel,
   FibRetracementDrawing,
   HorizontalLineDrawing,
+  HorizontalRayDirection,
+  HorizontalRayDrawing,
   JsonValue,
   PaneId,
+  ParallelChannelDrawing,
+  RayDrawing,
   RectangleDrawing,
   StrokeStyle,
   TrendlineDrawing,
@@ -363,12 +368,101 @@ function parseFib(raw: Record<string, unknown>): FibRetracementDrawing | null {
   });
 }
 
+function parseTripleAnchors(raw: unknown): readonly [DrawingAnchor, DrawingAnchor, DrawingAnchor] | null {
+  if (!Array.isArray(raw) || raw.length !== 3) {
+    return null;
+  }
+  const a = parseAnchor(raw[0]);
+  const b = parseAnchor(raw[1]);
+  const c = parseAnchor(raw[2]);
+  if (a === null || b === null || c === null) {
+    return null;
+  }
+  return Object.freeze([a, b, c] as const);
+}
+
+function parseRay(raw: Record<string, unknown>): RayDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parsePairAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "ray" as const,
+    anchors,
+    schemaVersion: 1 as const,
+  });
+}
+
+function parseExtendedLine(raw: Record<string, unknown>): ExtendedLineDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parsePairAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "extendedLine" as const,
+    anchors,
+    schemaVersion: 1 as const,
+  });
+}
+
+function parseHorizontalRay(raw: Record<string, unknown>): HorizontalRayDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parseSingleAnchor(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  const directionRaw = raw.direction;
+  const direction: HorizontalRayDirection =
+    directionRaw === "left" || directionRaw === "right" ? directionRaw : "right";
+  return Object.freeze({
+    ...c,
+    kind: "horizontalRay" as const,
+    anchors,
+    direction,
+    schemaVersion: 1 as const,
+  });
+}
+
+function parseParallelChannel(raw: Record<string, unknown>): ParallelChannelDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parseTripleAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "parallelChannel" as const,
+    anchors,
+    schemaVersion: 1 as const,
+  });
+}
+
 const PARSERS: Readonly<Record<DrawingKind, (raw: Record<string, unknown>) => Drawing | null>> = {
   trendline: parseTrendline,
   horizontalLine: parseHorizontal,
   verticalLine: parseVertical,
   rectangle: parseRectangle,
   fibRetracement: parseFib,
+  ray: parseRay,
+  extendedLine: parseExtendedLine,
+  horizontalRay: parseHorizontalRay,
+  parallelChannel: parseParallelChannel,
 };
 
 const KNOWN_KINDS: ReadonlySet<DrawingKind> = new Set([
@@ -377,6 +471,10 @@ const KNOWN_KINDS: ReadonlySet<DrawingKind> = new Set([
   "verticalLine",
   "rectangle",
   "fibRetracement",
+  "ray",
+  "extendedLine",
+  "horizontalRay",
+  "parallelChannel",
 ]);
 
 function isKnownKind(s: string): s is DrawingKind {

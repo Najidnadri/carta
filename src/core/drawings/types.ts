@@ -27,7 +27,13 @@ export type DrawingKind =
   | "horizontalLine"
   | "verticalLine"
   | "rectangle"
-  | "fibRetracement";
+  | "fibRetracement"
+  | "ray"
+  | "extendedLine"
+  | "horizontalRay"
+  | "parallelChannel";
+
+export type HorizontalRayDirection = "left" | "right";
 
 export type StrokeStyle = "solid" | "dashed" | "dotted";
 export type ExtendMode = "none" | "left" | "right" | "both";
@@ -112,12 +118,45 @@ export interface FibRetracementDrawing extends DrawingCommon {
   readonly showPercents: boolean;
 }
 
+export interface RayDrawing extends DrawingCommon {
+  readonly kind: "ray";
+  /** [origin, direction-point]. Visible from `anchors[0]` extended through `anchors[1]`. */
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor];
+}
+
+export interface ExtendedLineDrawing extends DrawingCommon {
+  readonly kind: "extendedLine";
+  /** [a, b]. Line is extended both directions in price/time space, clipped to the plot rect. */
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor];
+}
+
+export interface HorizontalRayDrawing extends DrawingCommon {
+  readonly kind: "horizontalRay";
+  readonly anchors: readonly [DrawingAnchor];
+  /** Direction the ray extends from the anchor. */
+  readonly direction: HorizontalRayDirection;
+}
+
+export interface ParallelChannelDrawing extends DrawingCommon {
+  readonly kind: "parallelChannel";
+  /**
+   * `[a, b, c]` in data space. `(a,b)` defines the trendline; `c` defines the
+   * parallel offset (Δprice = c.price - priceOnLineAtTime(c.time)). All three
+   * are stored in data space so the channel survives pan/zoom/DPR transitions.
+   */
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor, DrawingAnchor];
+}
+
 export type Drawing =
   | TrendlineDrawing
   | HorizontalLineDrawing
   | VerticalLineDrawing
   | RectangleDrawing
-  | FibRetracementDrawing;
+  | FibRetracementDrawing
+  | RayDrawing
+  | ExtendedLineDrawing
+  | HorizontalRayDrawing
+  | ParallelChannelDrawing;
 
 /** Default fib levels. Matches TradingView defaults. */
 export const DEFAULT_FIB_LEVELS: readonly FibLevel[] = Object.freeze([
@@ -187,4 +226,6 @@ export interface BeginCreateOptions {
   readonly levels?: readonly FibLevel[];
   readonly showPrices?: boolean;
   readonly showPercents?: boolean;
+  /** Default direction for `horizontalRay`. Defaults to `'right'`. */
+  readonly direction?: HorizontalRayDirection;
 }

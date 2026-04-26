@@ -131,6 +131,19 @@ export class DataStore {
     return this.channels.has(id);
   }
 
+  /**
+   * Cheap snapshot of registered channels in registration order. Use this
+   * for hot paths that just need the ids/kinds without per-interval cache
+   * stats (`snapshot()` builds those eagerly and is too expensive at 60Hz).
+   */
+  channelsInOrder(): readonly Channel[] {
+    const out: Channel[] = [];
+    for (const store of this.channels.values()) {
+      out.push(store.channel);
+    }
+    return out;
+  }
+
   getChannel(id: string): Channel | undefined {
     return this.channels.get(id)?.channel;
   }

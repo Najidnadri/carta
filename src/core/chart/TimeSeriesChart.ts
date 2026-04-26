@@ -49,7 +49,9 @@ import {
   type Interval,
   type IntervalChange,
   type Logger,
+  type MagnetMode,
   type MissingRangesQuery,
+  type OhlcRecord,
   type Price,
   type PriceAxisOptions,
   type PriceDomain,
@@ -224,6 +226,9 @@ export class TimeSeriesChart {
       currentPriceScale: () => this.currentPriceScaleForRect(this.computePlotRect()),
       currentTheme: () => this.config.snapshot.theme,
       currentDpr: () => this.currentResolution,
+      currentMagnetMode: (): MagnetMode => this.config.snapshot.magnet,
+      getOhlcAtTime: (time: number): OhlcRecord | null => this.lookupPrimaryOhlcBar(time),
+      priceFormatter: (): PriceFormatter => this.priceFormatter,
     });
     this.drawingsFacade = this.drawingsController.asFacade();
     this.viewport = new ViewportController({
@@ -331,6 +336,7 @@ export class TimeSeriesChart {
       width: resolved.width,
       height: resolved.height,
       theme,
+      magnet: "off",
     });
 
     const chart = new TimeSeriesChart(resolved, renderer, config);
@@ -427,8 +433,65 @@ export class TimeSeriesChart {
       current: next,
     });
     this.emitter.emit("interval:change", intervalPayload);
+    // Cancel any in-flight drawing drag — anchor times stored in the old bar
+    // grid would drift if we let the drag ride on the new interval.
+    this.drawingsController.cancelActiveDrag();
     this.invalidator.invalidate("viewport");
     this.invalidator.invalidate("data");
+  }
+
+  // ─── Phase 13 Cycle B1 — magnet ────────────────────────────────────────
+
+  /** Phase 13 Cycle B1 — get the current drawing-tools magnet mode. */
+  getMagnet(): MagnetMode {
+    return this.config.snapshot.magnet;
+  }
+
+  /**
+   * Phase 13 Cycle B1 — set the drawing-tools magnet mode (`'off'` /
+   * `'weak'` / `'strong'`). Affects new anchors during create + edit drag;
+   * existing drawings are unchanged. Default is `'off'`.
+   */
+  setMagnet(mode: MagnetMode): void {
+    if (this.disposed) {
+      return;
+    }
+    const next = this.config.withMagnet(mode);
+    if (next === this.config) {
+      return;
+    }
+    this.config = next;
+  }
+
+  /**
+   * Phase 13 Cycle B1 — primary-OHLC bar lookup for the magnet snap. Returns
+   * the bar at `time` from the first registered `ohlc` channel at the chart's
+   * active interval, or `null` when none exists / nothing is cached at that
+   * time.
+   */
+  private lookupPrimaryOhlcBar(time: number): OhlcRecord | null {
+    const interval = Number(this.config.snapshot.intervalDuration);
+    if (!Number.isFinite(interval) || interval <= 0) {
+      return null;
+    }
+    let primaryId: string | null = null;
+    for (const ch of this.dataStore.channelsInOrder()) {
+      if (ch.kind === "ohlc") {
+        primaryId = ch.id;
+        break;
+      }
+    }
+    if (primaryId === null) {
+      return null;
+    }
+    const bar = this.dataStore.getBar(primaryId, interval, time);
+    if (bar === undefined) {
+      return null;
+    }
+    if ("open" in bar && "high" in bar && "low" in bar && "close" in bar) {
+      return bar;
+    }
+    return null;
   }
 
   /** Register a channel. Idempotent on same-kind redefines; throws on kind collision. */
@@ -1275,6 +1338,15 @@ export class TimeSeriesChart {
   /** Subscribe for exactly one emission. */
   once<K extends EventKey>(event: K, handler: CartaEventHandler<K>): void {
     this.emitter.once(event, handler);
+  }
+
+  /**
+   * Emit a typed event on the chart's bus. Public so cross-cutting helpers
+   * (e.g. `installHotkeys`) can route input into the same channel hosts
+   * subscribe to via `chart.on(...)`.
+   */
+  emit<K extends EventKey>(event: K, payload: CartaEventMap[K]): void {
+    this.emitter.emit(event, payload);
   }
 
   /** Unsubscribe every handler for every event. Safe to call during shutdown. */

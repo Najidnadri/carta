@@ -10,11 +10,14 @@ import {
   formatAxisLabel,
   HeikinAshiSeries,
   HistogramSeries,
+  installHotkeys,
   LightTheme,
   LineSeries,
   MarkerOverlay,
   OhlcBarSeries,
   TimeSeriesChart,
+  type KeyboardHotkeyPayload,
+  type MagnetMode,
   type BaselineMode,
   type CacheStats,
   type CartaEventMap,
@@ -501,6 +504,23 @@ async function main(): Promise<void> {
     refreshSeriesMeta();
   }
 
+  // Phase 13 Cycle B1 — install document-scope Alt+letter hotkeys for the
+  // recommended drawing-tool bindings. Hotkey payloads are recorded on the
+  // test hooks for adversarial Playwright validation.
+  let hotkeyDispose: (() => void) | null = null;
+  let lastHotkeyPayload: KeyboardHotkeyPayload | null = null;
+  let hotkeyPayloadCount = 0;
+  const armHotkeys = (c: TimeSeriesChart): void => {
+    hotkeyDispose?.();
+    hotkeyDispose = installHotkeys(c);
+    c.on("keyboard:hotkey", (p) => {
+      lastHotkeyPayload = p;
+      hotkeyPayloadCount += 1;
+      updateDrawingToolButtons();
+    });
+  };
+  armHotkeys(chart);
+
   const remount = async (): Promise<void> => {
     const gen = ++generation;
     // Phase 11 cycle A — drop the live-tick driver before destroying the chart
@@ -539,6 +559,7 @@ async function main(): Promise<void> {
     volume = next.volume;
     wireEvents(chart);
     chart.on("data:request", logRequest);
+    armHotkeys(chart);
     refreshSeriesMeta();
     // Phase 10 — re-apply the active theme so a remount doesn't snap back to
     // dark when the user had flipped to light.
@@ -1151,13 +1172,17 @@ async function main(): Promise<void> {
     });
   }
 
-  // ── Phase 13 — drawings toolbar (5 tools + clear / save / load) ─────
+  // ── Phase 13 — drawings toolbar (9 tools + magnet + clear / save / load) ─────
   const DRAWING_KINDS = [
     "trendline",
     "horizontalLine",
     "verticalLine",
     "rectangle",
     "fibRetracement",
+    "ray",
+    "extendedLine",
+    "horizontalRay",
+    "parallelChannel",
   ] as const;
   type DrawingKindName = typeof DRAWING_KINDS[number];
 
@@ -1189,6 +1214,30 @@ async function main(): Promise<void> {
   document.getElementById("drawings-clear")?.addEventListener("click", () => {
     chart?.drawings.clear();
     updateDrawingToolButtons();
+  });
+
+  // ── Phase 13 Cycle B1 — magnet toggle (Off → Weak → Strong → Off) ──
+  const magnetButton = document.getElementById("drawings-magnet");
+  const magnetCycle = ["off", "weak", "strong"] as const;
+  type MagnetModeLocal = typeof magnetCycle[number];
+  const updateMagnetButton = (mode: MagnetModeLocal): void => {
+    if (magnetButton === null) {
+      return;
+    }
+    const label = mode === "off" ? "Off" : mode === "weak" ? "Weak" : "Strong";
+    magnetButton.textContent = `Magnet: ${label}`;
+    magnetButton.setAttribute("aria-pressed", String(mode !== "off"));
+  };
+  updateMagnetButton("off");
+  magnetButton?.addEventListener("click", () => {
+    if (chart === null) {
+      return;
+    }
+    const current = chart.getMagnet();
+    const idx = magnetCycle.indexOf(current);
+    const next = magnetCycle[(idx + 1) % magnetCycle.length] ?? "off";
+    chart.setMagnet(next);
+    updateMagnetButton(next);
   });
 
   const drawingsLocalStorageKey = "carta-demo-drawings";
@@ -1249,6 +1298,25 @@ async function main(): Promise<void> {
     drawingsGetSnapshot: (): unknown => chart?.drawings.getSnapshot() ?? null,
     drawingsLoadSnapshot: (snap: unknown): { droppedCount: number; droppedKinds: readonly string[] } | null =>
       chart?.drawings.loadSnapshot(snap) ?? null,
+    // ── Phase 13 Cycle B1 — magnet + hotkeys hooks ──
+    setMagnet: (mode: string): void => {
+      const allowed = mode === "off" || mode === "weak" || mode === "strong";
+      if (chart !== null && allowed) {
+        chart.setMagnet(mode);
+        updateMagnetButton(mode);
+      }
+    },
+    getMagnet: (): MagnetMode | null => chart?.getMagnet() ?? null,
+    lastHotkeyPayload: (): unknown => lastHotkeyPayload,
+    hotkeyPayloadCount: (): number => hotkeyPayloadCount,
+    canvasTabIndex: (): number => document.querySelector("canvas")?.tabIndex ?? -2,
+    canvasOutline: (): string => {
+      const c = document.querySelector("canvas");
+      if (c instanceof HTMLCanvasElement) {
+        return c.style.outline;
+      }
+      return "";
+    },
     // ── Phase 11 cycle A — request log / overlay / live tick / interval ──
     requestLogEntries: (): readonly RequestLogEntry[] => requestLog.snapshot(),
     requestLogTotal: (): number => requestLog.totalPushed(),

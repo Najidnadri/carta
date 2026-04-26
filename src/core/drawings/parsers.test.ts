@@ -109,4 +109,66 @@ describe("parseSnapshot", () => {
     const original = JSON.stringify(validTrendline);
     expect(JSON.parse(reJson)).toEqual(JSON.parse(original));
   });
+
+  it("Cycle B1 — round-trips ray / extendedLine / horizontalRay / parallelChannel", () => {
+    const ray = {
+      id: "ray-1",
+      kind: "ray",
+      schemaVersion: 1,
+      style: { stroke: { color: 0x00ff00 } },
+      locked: false,
+      visible: true,
+      z: 1,
+      anchors: [
+        { time: 100, price: 50, paneId: "main" },
+        { time: 200, price: 60, paneId: "main" },
+      ],
+    };
+    const extLine = { ...ray, id: "ext-1", kind: "extendedLine" };
+    const hRay = {
+      id: "hr-1",
+      kind: "horizontalRay",
+      schemaVersion: 1,
+      style: {},
+      locked: false,
+      visible: true,
+      z: 2,
+      direction: "left",
+      anchors: [{ time: 150, price: 55, paneId: "main" }],
+    };
+    const pc = {
+      id: "pc-1",
+      kind: "parallelChannel",
+      schemaVersion: 1,
+      style: { stroke: { color: 0xff0000 }, fill: { color: 0xff0000, alpha: 0.1 } },
+      locked: false,
+      visible: true,
+      z: 3,
+      anchors: [
+        { time: 100, price: 50, paneId: "main" },
+        { time: 200, price: 60, paneId: "main" },
+        { time: 100, price: 45, paneId: "main" },
+      ],
+    };
+    const snap = { schemaVersion: 1 as const, drawings: [ray, extLine, hRay, pc] };
+    const parsed = parseSnapshot(snap);
+    expect(parsed.snapshot.drawings.length).toBe(4);
+    expect(parsed.droppedCount).toBe(0);
+    expect(parsed.snapshot.drawings.map((d) => d.kind)).toEqual([
+      "ray",
+      "extendedLine",
+      "horizontalRay",
+      "parallelChannel",
+    ]);
+    // horizontalRay direction defaults to 'right' when missing.
+    const fallback = parseSnapshot({
+      schemaVersion: 1,
+      drawings: [{ ...hRay, direction: undefined }],
+    });
+    const got = fallback.snapshot.drawings[0];
+    expect(got?.kind).toBe("horizontalRay");
+    if (got?.kind === "horizontalRay") {
+      expect(got.direction).toBe("right");
+    }
+  });
 });

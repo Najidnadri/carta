@@ -6,8 +6,12 @@
 
 import type { Drawing } from "./types.js";
 import type {
+  ExtendedLineGeom,
   FibRetracementGeom,
   HorizontalLineGeom,
+  HorizontalRayGeom,
+  ParallelChannelGeom,
+  RayGeom,
   RectangleGeom,
   ScreenGeom,
   TrendlineGeom,
@@ -154,12 +158,30 @@ function hitHandle(
       }
       return null;
     }
-    case "fibRetracement": {
+    case "fibRetracement":
+    case "ray":
+    case "extendedLine": {
       if (within(px, py, geom.anchors[0].x, geom.anchors[0].y, tol)) {
         return 0;
       }
       if (within(px, py, geom.anchors[1].x, geom.anchors[1].y, tol)) {
         return 1;
+      }
+      return null;
+    }
+    case "horizontalRay": {
+      const a = geom.anchor;
+      return within(px, py, a.x, a.y, tol) ? 0 : null;
+    }
+    case "parallelChannel": {
+      if (within(px, py, geom.anchors[0].x, geom.anchors[0].y, tol)) {
+        return 0;
+      }
+      if (within(px, py, geom.anchors[1].x, geom.anchors[1].y, tol)) {
+        return 1;
+      }
+      if (within(px, py, geom.anchors[2].x, geom.anchors[2].y, tol)) {
+        return 2;
       }
       return null;
     }
@@ -189,6 +211,13 @@ function hitGeom(
       return hitRectangle(geom, px, py, tol);
     case "fibRetracement":
       return hitFib(geom, px, py, tol);
+    case "ray":
+    case "extendedLine":
+      return hitExtended(geom, px, py, tol);
+    case "horizontalRay":
+      return hitHorizontalRay(geom, px, py, tol);
+    case "parallelChannel":
+      return hitParallelChannel(geom, px, py, tol);
   }
 }
 
@@ -228,6 +257,70 @@ function hitRectangle(geom: RectangleGeom, px: number, py: number, tol: number):
     return "body";
   }
   return "border";
+}
+
+function hitExtended(geom: RayGeom | ExtendedLineGeom, px: number, py: number, tol: number): "line" | null {
+  const v0 = geom.visible[0];
+  const v1 = geom.visible[1];
+  return pointToSegmentDistance(px, py, v0.x, v0.y, v1.x, v1.y) <= tol ? "line" : null;
+}
+
+function hitHorizontalRay(geom: HorizontalRayGeom, px: number, py: number, tol: number): "line" | null {
+  if (px < geom.x1 - tol || px > geom.x2 + tol) {
+    return null;
+  }
+  return Math.abs(py - geom.snappedY) <= tol ? "line" : null;
+}
+
+function hitParallelChannel(geom: ParallelChannelGeom, px: number, py: number, tol: number): "line" | "body" | null {
+  const bb = geom.bbox;
+  if (px < bb.xMin - tol || px > bb.xMax + tol || py < bb.yMin - tol || py > bb.yMax + tol) {
+    return null;
+  }
+  // Top stroke
+  const topDist = pointToSegmentDistance(px, py, geom.top[0].x, geom.top[0].y, geom.top[1].x, geom.top[1].y);
+  if (topDist <= tol) {
+    return "line";
+  }
+  // Bottom stroke
+  const bottomDist = pointToSegmentDistance(
+    px,
+    py,
+    geom.bottom[0].x,
+    geom.bottom[0].y,
+    geom.bottom[1].x,
+    geom.bottom[1].y,
+  );
+  if (bottomDist <= tol) {
+    return "line";
+  }
+  // Body — point inside polygon (ray-casting against the 4 edges).
+  if (pointInPolygon(px, py, geom.polygon)) {
+    return "body";
+  }
+  return null;
+}
+
+function pointInPolygon(
+  px: number,
+  py: number,
+  poly: readonly { readonly x: number; readonly y: number }[],
+): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const pi = poly[i];
+    const pj = poly[j];
+    if (pi === undefined || pj === undefined) {
+      continue;
+    }
+    const intersects =
+      pi.y > py !== pj.y > py &&
+      px < ((pj.x - pi.x) * (py - pi.y)) / (pj.y - pi.y) + pi.x;
+    if (intersects) {
+      inside = !inside;
+    }
+  }
+  return inside;
 }
 
 function hitFib(geom: FibRetracementGeom, px: number, py: number, tol: number): "line" | null {

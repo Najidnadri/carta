@@ -14,10 +14,14 @@ import type { TimeScale } from "../time/TimeScale.js";
 import { asPixel } from "../../types.js";
 import type {
   Drawing,
+  ExtendedLineDrawing,
   ExtendMode,
   FibLevel,
   FibRetracementDrawing,
   HorizontalLineDrawing,
+  HorizontalRayDrawing,
+  ParallelChannelDrawing,
+  RayDrawing,
   RectangleDrawing,
   TrendlineDrawing,
   VerticalLineDrawing,
@@ -83,12 +87,51 @@ export interface FibRetracementGeom {
   readonly bbox: { readonly xMin: number; readonly xMax: number; readonly yMin: number; readonly yMax: number };
 }
 
+export interface RayGeom {
+  readonly kind: "ray";
+  readonly anchors: readonly [ScreenPoint, ScreenPoint];
+  /** Ray clipped to the plot rect, starting at `anchors[0]`. */
+  readonly visible: readonly [ScreenPoint, ScreenPoint];
+}
+
+export interface ExtendedLineGeom {
+  readonly kind: "extendedLine";
+  readonly anchors: readonly [ScreenPoint, ScreenPoint];
+  /** Both directions clipped to the plot rect. */
+  readonly visible: readonly [ScreenPoint, ScreenPoint];
+}
+
+export interface HorizontalRayGeom {
+  readonly kind: "horizontalRay";
+  readonly anchor: ScreenPoint;
+  readonly snappedY: number;
+  readonly x1: number;
+  readonly x2: number;
+}
+
+export interface ParallelChannelGeom {
+  readonly kind: "parallelChannel";
+  /** Original anchors `(a, b, c)` in screen space (pre-extension, pre-offset). */
+  readonly anchors: readonly [ScreenPoint, ScreenPoint, ScreenPoint];
+  /** Top line `(a, b)` (visible segment). */
+  readonly top: readonly [ScreenPoint, ScreenPoint];
+  /** Bottom line, parallel offset `Δprice` away from `(a, b)`. */
+  readonly bottom: readonly [ScreenPoint, ScreenPoint];
+  /** Quadrilateral fill in clockwise order: top-a, top-b, bottom-b, bottom-a. */
+  readonly polygon: readonly [ScreenPoint, ScreenPoint, ScreenPoint, ScreenPoint];
+  readonly bbox: { readonly xMin: number; readonly xMax: number; readonly yMin: number; readonly yMax: number };
+}
+
 export type ScreenGeom =
   | TrendlineGeom
   | HorizontalLineGeom
   | VerticalLineGeom
   | RectangleGeom
-  | FibRetracementGeom;
+  | FibRetracementGeom
+  | RayGeom
+  | ExtendedLineGeom
+  | HorizontalRayGeom
+  | ParallelChannelGeom;
 
 export interface ProjectionContext {
   readonly timeScale: TimeScale;
@@ -282,6 +325,97 @@ function projectFib(d: FibRetracementDrawing, ctx: ProjectionContext): FibRetrac
   });
 }
 
+function projectRay(d: RayDrawing, ctx: ProjectionContext): RayGeom {
+  const a = projectAnchor(ctx.timeScale, ctx.priceScale, Number(d.anchors[0].time), Number(d.anchors[0].price));
+  const b = projectAnchor(ctx.timeScale, ctx.priceScale, Number(d.anchors[1].time), Number(d.anchors[1].price));
+  // Ray is anchor[0] extended through anchor[1] to the plot edge — i.e.
+  // `extend: 'right'` semantics applied to the (a, b) parameterisation.
+  const visible = extendSegment(a, b, "right", ctx.plotRect);
+  return Object.freeze({
+    kind: "ray" as const,
+    anchors: Object.freeze([a, b] as const),
+    visible,
+  });
+}
+
+function projectExtendedLine(d: ExtendedLineDrawing, ctx: ProjectionContext): ExtendedLineGeom {
+  const a = projectAnchor(ctx.timeScale, ctx.priceScale, Number(d.anchors[0].time), Number(d.anchors[0].price));
+  const b = projectAnchor(ctx.timeScale, ctx.priceScale, Number(d.anchors[1].time), Number(d.anchors[1].price));
+  const visible = extendSegment(a, b, "both", ctx.plotRect);
+  return Object.freeze({
+    kind: "extendedLine" as const,
+    anchors: Object.freeze([a, b] as const),
+    visible,
+  });
+}
+
+function projectHorizontalRay(d: HorizontalRayDrawing, ctx: ProjectionContext): HorizontalRayGeom {
+  const a = projectAnchor(
+    ctx.timeScale,
+    ctx.priceScale,
+    Number(d.anchors[0].time),
+    Number(d.anchors[0].price),
+  );
+  const snappedY = pixelSnap(a.y);
+  const x1 = d.direction === "left" ? 0 : a.x;
+  const x2 = d.direction === "left" ? a.x : ctx.plotRect.w;
+  return Object.freeze({
+    kind: "horizontalRay" as const,
+    anchor: a,
+    snappedY,
+    x1,
+    x2,
+  });
+}
+
+function projectParallelChannel(d: ParallelChannelDrawing, ctx: ProjectionContext): ParallelChannelGeom {
+  const aPrice = Number(d.anchors[0].price);
+  const bPrice = Number(d.anchors[1].price);
+  const aTime = Number(d.anchors[0].time);
+  const bTime = Number(d.anchors[1].time);
+  const cTime = Number(d.anchors[2].time);
+  const cPrice = Number(d.anchors[2].price);
+  // priceOnLineAtTime(c.time) = aPrice + (cTime - aTime) / (bTime - aTime) * (bPrice - aPrice)
+  // Δprice = cPrice - that.
+  // In the degenerate case where aTime === bTime (vertical "trendline" — a
+  // pathological input), Δprice collapses to (cPrice - aPrice).
+  let priceOnLine: number;
+  if (bTime === aTime) {
+    priceOnLine = aPrice;
+  } else if (!Number.isFinite(aPrice) || !Number.isFinite(bPrice) || !Number.isFinite(cTime) || !Number.isFinite(aTime) || !Number.isFinite(bTime)) {
+    priceOnLine = aPrice;
+  } else {
+    priceOnLine = aPrice + ((cTime - aTime) / (bTime - aTime)) * (bPrice - aPrice);
+  }
+  const dPrice = Number.isFinite(cPrice) && Number.isFinite(priceOnLine) ? cPrice - priceOnLine : 0;
+  const a = projectAnchor(ctx.timeScale, ctx.priceScale, aTime, aPrice);
+  const b = projectAnchor(ctx.timeScale, ctx.priceScale, bTime, bPrice);
+  const c = projectAnchor(ctx.timeScale, ctx.priceScale, cTime, cPrice);
+  const aBottom = projectAnchor(ctx.timeScale, ctx.priceScale, aTime, aPrice + dPrice);
+  const bBottom = projectAnchor(ctx.timeScale, ctx.priceScale, bTime, bPrice + dPrice);
+  const top = Object.freeze([a, b] as const);
+  const bottom = Object.freeze([aBottom, bBottom] as const);
+  // Polygon clockwise: top-a → top-b → bottom-b → bottom-a.
+  const polygon: readonly [ScreenPoint, ScreenPoint, ScreenPoint, ScreenPoint] = Object.freeze([
+    a,
+    b,
+    bBottom,
+    aBottom,
+  ] as const);
+  const xMin = Math.min(a.x, b.x, aBottom.x, bBottom.x);
+  const xMax = Math.max(a.x, b.x, aBottom.x, bBottom.x);
+  const yMin = Math.min(a.y, b.y, aBottom.y, bBottom.y, c.y);
+  const yMax = Math.max(a.y, b.y, aBottom.y, bBottom.y, c.y);
+  return Object.freeze({
+    kind: "parallelChannel" as const,
+    anchors: Object.freeze([a, b, c] as const),
+    top,
+    bottom,
+    polygon,
+    bbox: Object.freeze({ xMin, xMax, yMin, yMax }),
+  });
+}
+
 function makeLevel(lvl: FibLevel, y: number, price: number, visible: boolean): FibLevelGeom {
   return Object.freeze({
     value: lvl.value,
@@ -306,6 +440,14 @@ export function projectDrawing(d: Drawing, ctx: ProjectionContext): ScreenGeom {
       return projectRectangle(d, ctx);
     case "fibRetracement":
       return projectFib(d, ctx);
+    case "ray":
+      return projectRay(d, ctx);
+    case "extendedLine":
+      return projectExtendedLine(d, ctx);
+    case "horizontalRay":
+      return projectHorizontalRay(d, ctx);
+    case "parallelChannel":
+      return projectParallelChannel(d, ctx);
   }
 }
 

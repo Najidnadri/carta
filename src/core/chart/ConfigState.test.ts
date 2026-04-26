@@ -10,6 +10,7 @@ const baseSnapshot = (): ConfigStateSnapshot => ({
   width: 800,
   height: 400,
   theme: DarkTheme,
+  magnet: "off",
 });
 
 describe("ConfigState", () => {
@@ -63,5 +64,15 @@ describe("ConfigState", () => {
     const next = cfg.withTheme(newTheme);
     expect(next).not.toBe(cfg);
     expect(next.snapshot.theme).toBe(newTheme);
+  });
+
+  it("withMagnet returns same instance when unchanged and new instance otherwise", () => {
+    const cfg = new ConfigState(baseSnapshot());
+    expect(cfg.withMagnet("off")).toBe(cfg);
+    const weak = cfg.withMagnet("weak");
+    expect(weak).not.toBe(cfg);
+    expect(weak.snapshot.magnet).toBe("weak");
+    const strong = weak.withMagnet("strong");
+    expect(strong.snapshot.magnet).toBe("strong");
   });
 });

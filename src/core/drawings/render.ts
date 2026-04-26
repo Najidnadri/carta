@@ -17,8 +17,12 @@ import type {
   ExtendMode,
 } from "./types.js";
 import type {
+  ExtendedLineGeom,
   FibRetracementGeom,
   HorizontalLineGeom,
+  HorizontalRayGeom,
+  ParallelChannelGeom,
+  RayGeom,
   RectangleGeom,
   ScreenGeom,
   TrendlineGeom,
@@ -139,6 +143,43 @@ function drawRectangle(g: Graphics, geom: RectangleGeom, drawing: Drawing, theme
   });
 }
 
+function drawRay(g: Graphics, geom: RayGeom, drawing: Drawing, theme: Theme, dpr: number): void {
+  const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
+  const v0 = geom.visible[0];
+  const v1 = geom.visible[1];
+  drawSegment(g, v0.x, v0.y, v1.x, v1.y, stroke);
+}
+
+function drawExtendedLine(g: Graphics, geom: ExtendedLineGeom, drawing: Drawing, theme: Theme, dpr: number): void {
+  const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
+  const v0 = geom.visible[0];
+  const v1 = geom.visible[1];
+  drawSegment(g, v0.x, v0.y, v1.x, v1.y, stroke);
+}
+
+function drawHorizontalRay(g: Graphics, geom: HorizontalRayGeom, drawing: Drawing, theme: Theme, dpr: number): void {
+  const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
+  drawSegment(g, geom.x1, geom.snappedY, geom.x2, geom.snappedY, stroke);
+}
+
+function drawParallelChannel(g: Graphics, geom: ParallelChannelGeom, drawing: Drawing, theme: Theme, dpr: number): void {
+  const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
+  const fill = drawing.style.fill;
+  // Fill the polygon first so strokes sit on top.
+  const fillColor = fill?.color ?? stroke.color;
+  const fillAlpha = fill?.alpha ?? 0.10;
+  if (fillAlpha > 0) {
+    const flat: number[] = [];
+    for (const p of geom.polygon) {
+      flat.push(p.x, p.y);
+    }
+    g.poly(flat).fill({ color: fillColor, alpha: fillAlpha });
+  }
+  // Top + bottom strokes.
+  drawSegment(g, geom.top[0].x, geom.top[0].y, geom.top[1].x, geom.top[1].y, stroke);
+  drawSegment(g, geom.bottom[0].x, geom.bottom[0].y, geom.bottom[1].x, geom.bottom[1].y, stroke);
+}
+
 function drawFib(g: Graphics, geom: FibRetracementGeom, drawing: Drawing, theme: Theme, dpr: number): void {
   const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
   // Trend connector between anchors (subtle).
@@ -190,6 +231,18 @@ export function redrawDrawing(
       return;
     case "fibRetracement":
       drawFib(g, geom, drawing, theme, dpr);
+      return;
+    case "ray":
+      drawRay(g, geom, drawing, theme, dpr);
+      return;
+    case "extendedLine":
+      drawExtendedLine(g, geom, drawing, theme, dpr);
+      return;
+    case "horizontalRay":
+      drawHorizontalRay(g, geom, drawing, theme, dpr);
+      return;
+    case "parallelChannel":
+      drawParallelChannel(g, geom, drawing, theme, dpr);
       return;
   }
 }
@@ -294,7 +347,9 @@ export function handleSpecsFor(
   switch (geom.kind) {
     case "trendline":
     case "fibRetracement":
-    case "rectangle": {
+    case "rectangle":
+    case "ray":
+    case "extendedLine": {
       const a0 = geom.anchors[0];
       const a1 = geom.anchors[1];
       if (inPlot(a0.x, a0.y)) {
@@ -306,10 +361,26 @@ export function handleSpecsFor(
       return specs;
     }
     case "horizontalLine":
-    case "verticalLine": {
+    case "verticalLine":
+    case "horizontalRay": {
       const a = geom.anchor;
       if (inPlot(a.x, a.y)) {
         specs.push(Object.freeze({ key: 0, x: a.x, y: a.y, variant: variantFor(0) }));
+      }
+      return specs;
+    }
+    case "parallelChannel": {
+      const a0 = geom.anchors[0];
+      const a1 = geom.anchors[1];
+      const a2 = geom.anchors[2];
+      if (inPlot(a0.x, a0.y)) {
+        specs.push(Object.freeze({ key: 0, x: a0.x, y: a0.y, variant: variantFor(0) }));
+      }
+      if (inPlot(a1.x, a1.y)) {
+        specs.push(Object.freeze({ key: 1, x: a1.x, y: a1.y, variant: variantFor(1) }));
+      }
+      if (inPlot(a2.x, a2.y)) {
+        specs.push(Object.freeze({ key: 2, x: a2.x, y: a2.y, variant: variantFor(2) }));
       }
       return specs;
     }

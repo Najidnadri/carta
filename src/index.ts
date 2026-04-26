@@ -80,10 +80,16 @@ export {
   niceNumber,
   targetTickCountForHeight,
 } from "./core/price/priceNaturalStep.js";
-export { DrawingsController } from "./core/drawings/DrawingsController.js";
+export { DrawingsController, normalizeDrawingDefaults } from "./core/drawings/DrawingsController.js";
 export type { DrawingsFacade, DrawingsRenderContext } from "./core/drawings/DrawingsController.js";
 export { parseSnapshot, parseDrawing } from "./core/drawings/parsers.js";
 export type { ParseSnapshotResult } from "./core/drawings/parsers.js";
+export { applyMagnet, nearestBarTime } from "./core/drawings/magnet.js";
+export type { MagnetSnapResult } from "./core/drawings/magnet.js";
+export { FibLabelPool } from "./core/drawings/FibLabelPool.js";
+export type { FibLabelSyncContext } from "./core/drawings/FibLabelPool.js";
+export { installHotkeys, RECOMMENDED_HOTKEY_BINDINGS } from "./core/interaction/Hotkeys.js";
+export type { HotkeysChart, InstallHotkeysOptions } from "./core/interaction/Hotkeys.js";
 export { CrosshairController } from "./core/interaction/CrosshairController.js";
 export type {
   CrosshairControllerDeps,
@@ -132,12 +138,17 @@ export type {
   DrawingStroke,
   DrawingStyle,
   DrawingTextStyle,
+  ExtendedLineDrawing,
   ExtendMode,
   FibLevel,
   FibRetracementDrawing,
   HorizontalLineDrawing,
+  HorizontalRayDirection,
+  HorizontalRayDrawing,
   JsonValue,
   PaneId,
+  ParallelChannelDrawing,
+  RayDrawing,
   RectangleDrawing,
   StrokeStyle,
   TrendlineDrawing,

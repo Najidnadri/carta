@@ -25,6 +25,9 @@ import {
   asTime,
   type CartaEventMap,
   type Logger,
+  type MagnetMode,
+  type OhlcRecord,
+  type PriceFormatter,
   type Theme,
 } from "../../types.js";
 import {
@@ -42,6 +45,8 @@ import {
   type DrawingStyle,
   type FibLevel,
 } from "./types.js";
+import { applyMagnet } from "./magnet.js";
+import { FibLabelPool } from "./FibLabelPool.js";
 import {
   defaultTolerancesFor,
   hitTestDrawings,
@@ -92,6 +97,20 @@ export interface DrawingsControllerDeps {
   readonly currentPriceScale: () => PriceScale;
   readonly currentTheme: () => Theme;
   readonly currentDpr: () => number;
+  /**
+   * Phase 13 Cycle B1 — magnet snap. Reads `ConfigState.magnet`. When the
+   * mode is non-off, drawing creation + handle drag snap anchor.time to the
+   * nearest bar centre and anchor.price to nearest of `{H,L}` (weak) or
+   * `{O,H,L,C}` (strong). Default returns `'off'`.
+   */
+  readonly currentMagnetMode?: () => MagnetMode;
+  /**
+   * Look up the OHLC bar at a given snapped time. Returns `null` when the
+   * chart has no `ohlc` channel registered or the bar isn't cached.
+   */
+  readonly getOhlcAtTime?: (time: number) => OhlcRecord | null;
+  /** Format function for fib level price labels; defaults to `(v) => v.toFixed(2)`. */
+  readonly priceFormatter?: () => PriceFormatter;
   /** ID generator. Default = `crypto.randomUUID()` with a counter fallback. */
   readonly newId?: () => DrawingId;
   /** Test hooks. */
@@ -147,10 +166,12 @@ export class DrawingsController {
   private readonly deps: DrawingsControllerDeps;
   private readonly drawings = new Map<DrawingId, Drawing>();
   private readonly graphicsByDrawing = new Map<DrawingId, Graphics>();
+  private readonly fibLabelPools = new Map<DrawingId, FibLabelPool>();
   private readonly handleGraphicsPool: Graphics[] = [];
   private readonly handleCache = new HandleContextCache();
   private readonly handlesContainer: Container;
   private readonly handleHitParent: { addChild: (g: Graphics) => Graphics };
+  private warnedMissingOhlcChannel = false;
 
   private readonly storage: StorageBinding;
 
@@ -248,17 +269,38 @@ export class DrawingsController {
     }
     this.handlesContainer.position.set(ctx.plotRect.x, ctx.plotRect.y);
     const projected = this.projectAll({ timeScale: ctx.timeScale, priceScale: ctx.priceScale, plotRect: ctx.plotRect });
-    // Redraw drawings into pooled graphics.
+    // Redraw drawings into pooled graphics + fib label pool sync.
     const seen = new Set<DrawingId>();
+    const formatter = this.deps.priceFormatter?.() ?? ((v: number): string => v.toFixed(2));
     for (const entry of projected) {
       const g = this.ensureGraphicsFor(entry.drawing.id);
       redrawDrawing(g, entry.drawing, entry.geom, ctx.theme, ctx.dpr);
       seen.add(entry.drawing.id);
+      if (entry.drawing.kind === "fibRetracement" && entry.geom.kind === "fibRetracement") {
+        const pool = this.ensureFibLabelPool(entry.drawing.id);
+        if (entry.drawing.visible) {
+          pool.sync(entry.geom.levels, {
+            theme: ctx.theme,
+            priceFormatter: formatter,
+            showPrices: entry.drawing.showPrices,
+            showPercents: entry.drawing.showPercents,
+            xRight: entry.geom.xMax,
+            plotWidth: ctx.plotRect.w,
+          });
+        } else {
+          pool.hideAll();
+        }
+      }
     }
     // Hide graphics whose drawings vanished.
     for (const [id, g] of this.graphicsByDrawing) {
       if (!seen.has(id)) {
         g.visible = false;
+      }
+    }
+    for (const [id, pool] of this.fibLabelPools) {
+      if (!seen.has(id)) {
+        pool.hideAll();
       }
     }
     // Sync handles for selected drawing.
@@ -299,6 +341,10 @@ export class DrawingsController {
     }
     this.handleGraphicsPool.length = 0;
     this.handleCache.destroy();
+    for (const pool of this.fibLabelPools.values()) {
+      pool.destroy();
+    }
+    this.fibLabelPools.clear();
     this.storage.destroy();
     this.drawings.clear();
     this.selectedId = null;
@@ -385,7 +431,8 @@ export class DrawingsController {
     if (ctx === null) {
       return;
     }
-    const { time, price } = unprojectPoint(ctx, localX, localY);
+    const { time: rawTime, price: rawPrice } = unprojectPoint(ctx, localX, localY);
+    const { time, price } = this.applyMagnetSnap(rawTime, rawPrice);
     const anchor: DrawingAnchor = Object.freeze({
       time: asTime(time),
       price: asPrice(price),
@@ -474,6 +521,47 @@ export class DrawingsController {
           showPercents: creating.options.showPercents !== false,
         });
       }
+      case "ray": {
+        if (a[0] === undefined || a[1] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "ray" as const,
+          anchors: Object.freeze([a[0], a[1]] as const),
+        });
+      }
+      case "extendedLine": {
+        if (a[0] === undefined || a[1] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "extendedLine" as const,
+          anchors: Object.freeze([a[0], a[1]] as const),
+        });
+      }
+      case "horizontalRay": {
+        if (a[0] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "horizontalRay" as const,
+          anchors: Object.freeze([a[0]] as const),
+          direction: creating.options.direction ?? "right",
+        });
+      }
+      case "parallelChannel": {
+        if (a[0] === undefined || a[1] === undefined || a[2] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "parallelChannel" as const,
+          anchors: Object.freeze([a[0], a[1], a[2]] as const),
+        });
+      }
     }
   }
 
@@ -527,6 +615,11 @@ export class DrawingsController {
       g.parent?.removeChild(g);
       g.destroy();
       this.graphicsByDrawing.delete(id);
+    }
+    const pool = this.fibLabelPools.get(id);
+    if (pool !== undefined) {
+      pool.destroy();
+      this.fibLabelPools.delete(id);
     }
     if (this.selectedId === id) {
       this.setSelected(null);
@@ -706,7 +799,8 @@ export class DrawingsController {
     if (ctx === null) {
       return;
     }
-    const { time: liveTime, price: livePrice } = unprojectPoint(ctx, localX, localY);
+    const { time: rawLiveTime, price: rawLivePrice } = unprojectPoint(ctx, localX, localY);
+    const { time: liveTime, price: livePrice } = this.applyMagnetSnap(rawLiveTime, rawLivePrice);
     const orig = this.drawings.get(drag.id);
     if (orig === undefined) {
       this.dragging = null;
@@ -753,8 +847,8 @@ export class DrawingsController {
       } else if (orig.kind === "verticalLine") {
         priceOut = Number(a.price);
       }
-      // Trendline shift-constrain (3-bucket).
-      if (orig.kind === "trendline" && drag.shiftConstrain) {
+      // Trendline-family shift-constrain (3-bucket): horizontal / vertical / 45°.
+      if ((orig.kind === "trendline" || orig.kind === "ray" || orig.kind === "extendedLine") && drag.shiftConstrain) {
         const otherIdx = idx === 0 ? 1 : 0;
         const other = orig.anchors[otherIdx];
         const a0Px = Number(ctx.timeScale.timeToPixel(other.time));
@@ -987,6 +1081,15 @@ export class DrawingsController {
     return g;
   }
 
+  private ensureFibLabelPool(id: DrawingId): FibLabelPool {
+    let pool = this.fibLabelPools.get(id);
+    if (pool === undefined) {
+      pool = new FibLabelPool(this.handlesContainer);
+      this.fibLabelPools.set(id, pool);
+    }
+    return pool;
+  }
+
   private maybeWarnSoftLimit(): void {
     if (!this.warnedSoftLimit && this.drawings.size >= SOFT_DRAWING_LIMIT) {
       this.warnedSoftLimit = true;
@@ -994,6 +1097,65 @@ export class DrawingsController {
         `[carta] drawings: count exceeded ${String(SOFT_DRAWING_LIMIT)}; hit-test + render may degrade. Consider trimming.`,
       );
     }
+  }
+
+  /**
+   * Cancel an in-flight handle/body drag, restoring the drawing to its
+   * `startAnchors`. Called by the chart when `interval:change` fires mid-drag
+   * so anchor times don't drift in the new bar grid. Idempotent.
+   */
+  cancelActiveDrag(): void {
+    const drag = this.dragging;
+    if (drag === null) {
+      return;
+    }
+    const orig = this.drawings.get(drag.id);
+    if (orig !== undefined) {
+      const restored = withAnchors(orig, drag.startAnchors);
+      this.drawings.set(drag.id, restored);
+    }
+    this.dragging = null;
+    this.deps.invalidate();
+  }
+
+  private applyMagnetSnap(time: number, price: number): { time: number; price: number } {
+    const modeFn = this.deps.currentMagnetMode;
+    if (modeFn === undefined) {
+      return { time, price };
+    }
+    const mode = modeFn();
+    if (mode === "off") {
+      return { time, price };
+    }
+    const interval = Number(this.deps.currentTimeScale().intervalDuration);
+    const safeInterval = Number.isFinite(interval) && interval > 0 ? interval : 0;
+    if (safeInterval <= 0) {
+      return { time, price };
+    }
+    const lookup = this.deps.getOhlcAtTime;
+    if (lookup === undefined) {
+      this.warnMagnetMissingOhlcChannel();
+      return { time, price };
+    }
+    // Probe the bar at the snapped time; magnet helper handles null bar.
+    const probeTime = nearestBarSampleTime(time, safeInterval);
+    const bar = lookup(probeTime);
+    if (bar === null) {
+      // No cached bar — still snap time, but leave price live (don't drift).
+      return applyMagnetTimeOnly(time, safeInterval, price);
+    }
+    const snapped = applyMagnet(time, price, mode, safeInterval, bar);
+    return { time: snapped.time, price: snapped.price };
+  }
+
+  private warnMagnetMissingOhlcChannel(): void {
+    if (this.warnedMissingOhlcChannel) {
+      return;
+    }
+    this.warnedMissingOhlcChannel = true;
+    this.deps.logger.warn(
+      "[carta] drawings:magnet — no OHLC channel registered; magnet is a no-op until one is added.",
+    );
   }
 
   private nextZ(): number {
@@ -1031,45 +1193,60 @@ export class DrawingsController {
 
 // Helpers — pure functions used by both the controller and tests.
 
+function nearestBarSampleTime(time: number, interval: number): number {
+  if (!Number.isFinite(time) || !Number.isFinite(interval) || interval <= 0) {
+    return time;
+  }
+  return Math.floor((time + interval / 2) / interval) * interval;
+}
+
+function applyMagnetTimeOnly(time: number, interval: number, price: number): { time: number; price: number } {
+  return { time: nearestBarSampleTime(time, interval), price };
+}
+
 function requiredAnchorsFor(kind: DrawingKind): number {
   switch (kind) {
     case "trendline":
     case "rectangle":
     case "fibRetracement":
+    case "ray":
+    case "extendedLine":
       return 2;
     case "horizontalLine":
     case "verticalLine":
+    case "horizontalRay":
       return 1;
+    case "parallelChannel":
+      return 3;
   }
 }
 
 function withAnchors(orig: Drawing, anchors: readonly DrawingAnchor[]): Drawing {
   switch (orig.kind) {
     case "trendline":
+    case "rectangle":
+    case "fibRetracement":
+    case "ray":
+    case "extendedLine":
       if (anchors[0] === undefined || anchors[1] === undefined) {
         return orig;
       }
       return Object.freeze({ ...orig, anchors: Object.freeze([anchors[0], anchors[1]] as const) });
     case "horizontalLine":
-      if (anchors[0] === undefined) {
-        return orig;
-      }
-      return Object.freeze({ ...orig, anchors: Object.freeze([anchors[0]] as const) });
     case "verticalLine":
+    case "horizontalRay":
       if (anchors[0] === undefined) {
         return orig;
       }
       return Object.freeze({ ...orig, anchors: Object.freeze([anchors[0]] as const) });
-    case "rectangle":
-      if (anchors[0] === undefined || anchors[1] === undefined) {
+    case "parallelChannel":
+      if (anchors[0] === undefined || anchors[1] === undefined || anchors[2] === undefined) {
         return orig;
       }
-      return Object.freeze({ ...orig, anchors: Object.freeze([anchors[0], anchors[1]] as const) });
-    case "fibRetracement":
-      if (anchors[0] === undefined || anchors[1] === undefined) {
-        return orig;
-      }
-      return Object.freeze({ ...orig, anchors: Object.freeze([anchors[0], anchors[1]] as const) });
+      return Object.freeze({
+        ...orig,
+        anchors: Object.freeze([anchors[0], anchors[1], anchors[2]] as const),
+      });
   }
 }
 
@@ -1094,6 +1271,8 @@ function cloneDrawingWithOffset(d: Drawing, intervalMs: number, newId: DrawingId
     case "trendline":
     case "rectangle":
     case "fibRetracement":
+    case "ray":
+    case "extendedLine":
       return Object.freeze({
         ...d,
         id: newId,
@@ -1101,10 +1280,21 @@ function cloneDrawingWithOffset(d: Drawing, intervalMs: number, newId: DrawingId
       });
     case "horizontalLine":
     case "verticalLine":
+    case "horizontalRay":
       return Object.freeze({
         ...d,
         id: newId,
         anchors: Object.freeze([shift(d.anchors[0])] as const),
+      });
+    case "parallelChannel":
+      return Object.freeze({
+        ...d,
+        id: newId,
+        anchors: Object.freeze([
+          shift(d.anchors[0]),
+          shift(d.anchors[1]),
+          shift(d.anchors[2]),
+        ] as const),
       });
   }
 }

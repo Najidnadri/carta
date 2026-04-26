@@ -102,6 +102,11 @@ export class Renderer {
     canvasStyle.height = "100%";
     canvasStyle.touchAction = "none";
     canvasStyle.userSelect = "none";
+    // Phase 13 Cycle B1 — keyboard discoverability. `tabIndex=0` puts the
+    // canvas in tab order so cold-load Tab focuses it; `outline:none`
+    // suppresses the default focus ring (host-level a11y is phase 17).
+    app.canvas.tabIndex = 0;
+    canvasStyle.outline = "none";
     // Vendor-prefixed properties (-webkit-user-select for iOS Safari,
     // -webkit-tap-highlight-color for tap-flash suppression) routed via
     // `setProperty` to dodge the deprecation hints + stay zero-`any`.
