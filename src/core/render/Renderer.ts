@@ -1,5 +1,6 @@
 import { Application, Container, Graphics } from "pixi.js";
 import type { Pane } from "../pane/Pane.js";
+import type { PaneHeader } from "../pane/PaneHeader.js";
 import type { Theme } from "../../types.js";
 
 export interface RendererOptions {
@@ -51,6 +52,15 @@ export class Renderer {
 
   readonly bgLayer = new Container({ label: "bgLayer" });
   readonly paneRoot = new Container({ label: "paneRoot" });
+  /**
+   * Phase 14 Cycle C — pane header strips. Sibling of `paneRoot` (NOT
+   * child of any individual `pane.paneContainer`) so a collapsed pane
+   * can keep its header visible at 24 px while its plot region clamps
+   * to 0 px. Order under stage: `paneRoot < paneHeaderLayer <
+   * separatorLayer` — separator lines paint on top of headers, headers
+   * paint on top of the plot.
+   */
+  readonly paneHeaderLayer = new Container({ label: "paneHeaderLayer" });
   /** Phase 14 Cycle A — separator lines + drag handles between panes. */
   readonly separatorLayer = new Container({ label: "separatorLayer" });
   readonly crosshairLinesLayer = new Container({ label: "crosshairLinesLayer", eventMode: "none" });
@@ -73,6 +83,7 @@ export class Renderer {
     this.stage.addChild(
       this.bgLayer,
       this.paneRoot,
+      this.paneHeaderLayer,
       this.separatorLayer,
       this.crosshairLinesLayer,
       this.axesLayer,
@@ -152,6 +163,45 @@ export class Renderer {
     if (pane.paneContainer.parent === this.paneRoot) {
       this.paneRoot.removeChild(pane.paneContainer);
     }
+  }
+
+  /**
+   * Phase 14 Cycle C — attach a `PaneHeader`'s container under
+   * `paneHeaderLayer`. Order matches the chart's pane order; the chart
+   * calls `reorderPaneHeader` after pane-list mutations to keep the
+   * header z-order in sync.
+   */
+  attachPaneHeader(header: PaneHeader): void {
+    if (this.destroyed) {
+      return;
+    }
+    if (header.container.parent !== this.paneHeaderLayer) {
+      this.paneHeaderLayer.addChild(header.container);
+    }
+  }
+
+  detachPaneHeader(header: PaneHeader): void {
+    if (this.destroyed) {
+      return;
+    }
+    if (header.container.parent === this.paneHeaderLayer) {
+      this.paneHeaderLayer.removeChild(header.container);
+    }
+  }
+
+  reorderPaneHeader(header: PaneHeader, newIndex: number): void {
+    if (this.destroyed) {
+      return;
+    }
+    if (header.container.parent !== this.paneHeaderLayer) {
+      return;
+    }
+    const len = this.paneHeaderLayer.children.length;
+    if (len === 0) {
+      return;
+    }
+    const safeIndex = Math.max(0, Math.min(newIndex, len - 1));
+    this.paneHeaderLayer.setChildIndex(header.container, safeIndex);
   }
 
   /**

@@ -25,6 +25,27 @@ export interface PaneRect {
 }
 
 /**
+ * Phase 14 Cycle C — pane header configuration. Headers are off by default
+ * (`addPane({ ... })` without a `header` field renders no strip). Hosts opt
+ * in by passing a `PaneHeaderOptions` object; passing `false` (or omitting)
+ * keeps the pane headerless.
+ *
+ * The primary pane is implicitly headerless — it's the canonical price
+ * chart and any chevron / gear / × there would clutter the dominant view.
+ * `addPane({ header })` on the primary pane warns and is ignored.
+ *
+ * Minimal surface for now — `title` is shown left-aligned in the strip;
+ * `visible` lets hosts hide the strip without losing the title for a
+ * future re-show. Cycle C does not add per-pane button toggles.
+ */
+export interface PaneHeaderOptions {
+  /** Title shown at the left of the strip. Empty string hides the title. */
+  readonly title?: string;
+  /** When `false`, strip is not rendered (treated as `header: false`). */
+  readonly visible?: boolean;
+}
+
+/**
  * Options accepted by `chart.addPane(opts?)` and the internal primary-pane
  * constructor. Pre-1.0 so missing fields are not breaking.
  *
@@ -51,6 +72,27 @@ export interface PaneOptions {
    * layout; subtree state (series, scales, drawings) is preserved.
    */
   readonly hidden?: boolean;
+  /**
+   * Phase 14 Cycle C — collapsed state. A collapsed pane shows only its
+   * header strip (24 CSS px) — the plot region clamps to 0 px. Distinct
+   * from `hidden`, which removes the pane (header included) entirely.
+   * Toggled by the chevron in the header strip; programmatic via
+   * `chart.setPaneCollapsed(id, bool)`. The pane's prior `heightOverride`
+   * is preserved so re-expansion restores the size from before the
+   * collapse.
+   *
+   * Setting `collapsed: true` on a pane without a header is allowed
+   * (the pane vanishes visually, since neither plot nor header renders),
+   * but is rarely useful — hosts who want that effect should use
+   * `hidden: true`.
+   */
+  readonly collapsed?: boolean;
+  /**
+   * Phase 14 Cycle C — header strip configuration. `false` (default)
+   * renders no header. An options object opts the pane in. Primary pane
+   * may not have a header — passing one warns and is ignored.
+   */
+  readonly header?: PaneHeaderOptions | false;
   /**
    * Phase 14 Cycle B — per-pane price formatter override. `null` falls
    * back to the chart's `priceFormatter`. Useful for the volume pane's

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computePaneRects } from "./PaneLayout.js";
+import { computePaneRectBundles, computePaneRects } from "./PaneLayout.js";
 
 const OPTS = { bottomMargin: 28, minHeight: 50 } as const;
 
@@ -204,5 +204,114 @@ describe("PaneLayout.computePaneRects", () => {
     expect(rects).toHaveLength(2);
     const total = rects.reduce((acc, r) => acc + r.h, 0);
     expect(total).toBeGreaterThan(172);
+  });
+
+  // ─── Phase 14 Cycle C ────────────────────────────────────────────────
+
+  describe("cycle C — collapsed panes + headerHeight", () => {
+    it("collapsed panes contribute exactly headerHeight (plot region = 0)", () => {
+      const bundles = computePaneRectBundles(
+        800,
+        600,
+        [
+          { stretchFactor: 1, minHeight: 50 },
+          { stretchFactor: 1, minHeight: 50, collapsed: true, headerHeight: 24 },
+        ],
+        OPTS,
+      );
+      expect(bundles).toHaveLength(2);
+      // Plot region of collapsed pane is 0; header is 24.
+      expect(bundles[1]?.rect.h).toBe(0);
+      expect(bundles[1]?.headerRect.h).toBe(24);
+      expect(bundles[1]?.outerRect.h).toBe(24);
+      // First pane gets all the leftover flex space.
+      expect((bundles[0]?.outerRect.h ?? 0) + 24).toBeLessThanOrEqual(572);
+    });
+
+    it("hidden panes still contribute 0 (header skipped)", () => {
+      const bundles = computePaneRectBundles(
+        800,
+        600,
+        [
+          { stretchFactor: 1, minHeight: 50 },
+          { stretchFactor: 1, minHeight: 50, hidden: true, headerHeight: 24 },
+        ],
+        OPTS,
+      );
+      expect(bundles).toHaveLength(2);
+      expect(bundles[1]?.rect.h).toBe(0);
+      expect(bundles[1]?.headerRect.h).toBe(0);
+      expect(bundles[1]?.outerRect.h).toBe(0);
+    });
+
+    it("reserves headerHeight above each pane's plot region", () => {
+      const bundles = computePaneRectBundles(
+        800,
+        600,
+        [
+          { stretchFactor: 1, minHeight: 50 },
+          { stretchFactor: 1, minHeight: 50, headerHeight: 24 },
+        ],
+        OPTS,
+      );
+      expect(bundles).toHaveLength(2);
+      // Header strip sits at the top of pane 1's outer band.
+      expect(bundles[1]?.headerRect.y).toBe(bundles[1]?.outerRect.y);
+      expect(bundles[1]?.headerRect.h).toBe(24);
+      // Plot region starts directly below the header.
+      expect(bundles[1]?.rect.y).toBe(
+        (bundles[1]?.outerRect.y ?? 0) + (bundles[1]?.headerRect.h ?? 0),
+      );
+    });
+
+    it("computePaneRects (legacy) returns plot rects only — back-compat", () => {
+      const rects = computePaneRects(
+        800,
+        600,
+        [
+          { stretchFactor: 1, minHeight: 50 },
+          { stretchFactor: 1, minHeight: 50, headerHeight: 24 },
+        ],
+        OPTS,
+      );
+      expect(rects).toHaveLength(2);
+      // Both rects are plot regions; pane 1's plot starts 24 px below its
+      // outer top.
+      expect(rects[0]?.y).toBe(0);
+      expect(rects[1]?.y).toBeGreaterThan(rects[0]?.h ?? 0);
+    });
+
+    it("ignores non-finite / negative headerHeight (treats as 0)", () => {
+      const bundles = computePaneRectBundles(
+        800,
+        600,
+        [
+          { stretchFactor: 1, minHeight: 50 },
+          { stretchFactor: 1, minHeight: 50, headerHeight: -5 },
+          { stretchFactor: 1, minHeight: 50, headerHeight: Number.NaN },
+        ],
+        OPTS,
+      );
+      expect(bundles[1]?.headerRect.h).toBe(0);
+      expect(bundles[2]?.headerRect.h).toBe(0);
+    });
+
+    it("3-pane collapse scenario — 2 collapsed contribute 24px each, 1 expanded fills the rest", () => {
+      const bundles = computePaneRectBundles(
+        800,
+        600,
+        [
+          { stretchFactor: 1, minHeight: 50 },
+          { stretchFactor: 1, minHeight: 50, collapsed: true, headerHeight: 24 },
+          { stretchFactor: 1, minHeight: 50, collapsed: true, headerHeight: 24 },
+        ],
+        OPTS,
+      );
+      // available - bottomMargin - 2 headers = 572 - 48 = 524 for the
+      // expanded pane.
+      expect(bundles[0]?.rect.h).toBe(524);
+      expect(bundles[1]?.outerRect.h).toBe(24);
+      expect(bundles[2]?.outerRect.h).toBe(24);
+    });
   });
 });

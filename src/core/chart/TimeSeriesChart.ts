@@ -10,7 +10,13 @@ import { EventBus } from "../infra/EventBus.js";
 import { InvalidationQueue, type DirtyReason } from "../infra/InvalidationQueue.js";
 import { noopLogger } from "../infra/Logger.js";
 import { Pane, type PaneOwner, type PrePatchPaneSnapshot } from "../pane/Pane.js";
-import { computePaneRects, type PaneLayoutInput } from "../pane/PaneLayout.js";
+import { PaneHeader, PANE_HEADER_HEIGHT } from "../pane/PaneHeader.js";
+import { PaneHeaderController } from "../pane/PaneHeaderController.js";
+import {
+  computePaneRectBundles,
+  type PaneLayoutInput,
+  type PaneRectBundle,
+} from "../pane/PaneLayout.js";
 import { PaneResizeController } from "../pane/PaneResizeController.js";
 import type { PaneOptions, PaneRect, PriceScaleId } from "../pane/types.js";
 import {
@@ -145,7 +151,35 @@ export class TimeSeriesChart {
   private readonly drawingsController: DrawingsController;
   private readonly drawingsFacade: DrawingsFacade;
   private readonly paneResizeController: PaneResizeController;
+  private readonly paneHeaderController: PaneHeaderController;
+  private readonly paneHeaders = new Map<PaneId, PaneHeader>();
+  /**
+   * Phase 14 Cycle C — reentrancy guard for `setPaneCollapsed`. Mirrors
+   * cycle B's `removingPaneIds` Set. Reentrant calls from inside a
+   * `pane:collapse` handler warn + no-op.
+   */
+  private collapsingPaneIds = new Set<PaneId>();
+  /**
+   * Phase 14 Cycle C — bookkeeping for adaptive auto-collapse. When the
+   * chart resize causes the visible-pane minimum to overflow, the bottom-
+   * most visible pane is hidden + added to this set. Subsequent resizes
+   * that grow the chart back above the threshold restore panes from this
+   * set in reverse order. A host-initiated `setPaneHidden(id, false)`
+   * removes the entry so the pane isn't auto-hidden again on the next
+   * resize.
+   */
+  private wasAutoCollapsed = new Set<PaneId>();
+  /**
+   * Phase 14 Cycle C — re-entrancy guard for the auto-collapse evaluator.
+   * The evaluator mutates `pane.hidden` and emits `pane:visibility`,
+   * which can recurse if a host handler calls back into the chart. The
+   * evaluator runs at the start of each flush; this flag prevents a
+   * synchronous recurse while the evaluator is mid-pass.
+   */
+  private autoCollapseEvaluating = false;
   private lastPaneRects: readonly PaneRect[] = [];
+  private lastPaneHeaderRects: readonly PaneRect[] = [];
+  private lastPaneOuterRects: readonly PaneRect[] = [];
   private readonly dataStore: DataStore;
   private readonly emitter: EventBus<CartaEventMap>;
   private readonly dataRequestDebouncer: DebouncedEmitter<void>;
@@ -281,6 +315,10 @@ export class TimeSeriesChart {
         // Phase 13 Cycle C.3 — pinch mid-stroke discards any partial brush
         // capture so a 2-finger pinch rolls back to viewport zoom cleanly.
         this.drawingsController.cancelActiveBrush();
+        // Phase 14 Cycle C — pinch starts also cancel any in-flight header
+        // drag-reorder. Two fingers on the chart never indicates intent to
+        // drag a single pane; the user is zooming.
+        this.paneHeaderController.cancelDrag();
       },
     });
     this.priceAxisController = new PriceAxisController({
@@ -310,6 +348,66 @@ export class TimeSeriesChart {
       onResize: (aboveId, aboveH, belowId, belowH): void => {
         this.applyPaneDragResize(aboveId, aboveH, belowId, belowH);
       },
+    });
+    // Phase 14 Cycle C — header click + drag-reorder dispatcher.
+    this.paneHeaderController = new PaneHeaderController({
+      canvas: renderer.app.canvas,
+      headerLayer: renderer.paneHeaderLayer,
+      panes: () => this.panesList,
+      headerForPane: (id) => this.paneHeaders.get(id) ?? null,
+      paneRects: () => this.lastPaneRects,
+      headerRects: () => this.lastPaneHeaderRects,
+      outerRects: () => this.lastPaneOuterRects,
+      onChevronClick: (id) => { this.setPaneCollapsedInternal(id, undefined, "header-chevron"); },
+      onGearClick: (id) => { this.emitter.emit("pane:settings", { paneId: id }); },
+      onCloseClick: (id) => {
+        if (id === MAIN_PANE_ID) {
+          return;
+        }
+        this.removePane(id);
+      },
+      onReorder: (id, targetIndex) => {
+        if (id === MAIN_PANE_ID) {
+          return;
+        }
+        const pane = this.panesById.get(id);
+        if (pane === undefined) {
+          return;
+        }
+        const currentIndex = this.panesList.indexOf(pane);
+        if (currentIndex === -1) {
+          return;
+        }
+        // `targetIndex` from the controller is the insertion slot. When
+        // dragging downward past the source, the slot needs a -1 fix-up
+        // because the source's removal shifts subsequent indices.
+        let safeIdx = targetIndex;
+        if (safeIdx > currentIndex) {
+          safeIdx -= 1;
+        }
+        if (safeIdx < 1) {
+          safeIdx = 1;
+        }
+        if (safeIdx === currentIndex) {
+          return;
+        }
+        pane.moveTo(safeIdx);
+      },
+      onDragStart: (id) => {
+        const pane = this.panesById.get(id);
+        if (pane === undefined) {
+          return;
+        }
+        pane.paneContainer.alpha = 0.5;
+        this.invalidator.invalidate("layout");
+      },
+      onDragEnd: () => {
+        for (const pane of this.panesList) {
+          pane.paneContainer.alpha = 1;
+        }
+        this.invalidator.invalidate("layout");
+      },
+      onHoverChange: () => { this.invalidator.invalidate("layout"); },
     });
   }
 
@@ -467,6 +565,10 @@ export class TimeSeriesChart {
     this.drawingsController.cancelActiveDrag();
     // Phase 13 Cycle C.3 — same rationale for an active brush capture.
     this.drawingsController.cancelActiveBrush();
+    // Phase 14 Cycle C — cancel any in-flight header drag-reorder so the
+    // pane stack snapshot the controller captured stays consistent with
+    // the new interval's data state.
+    this.paneHeaderController.cancelDrag();
     this.invalidator.invalidate("viewport");
     this.invalidator.invalidate("data");
   }
@@ -871,6 +973,11 @@ export class TimeSeriesChart {
     if (nextDpr !== this.currentResolution) {
       this.currentResolution = nextDpr;
       this.renderer.setResolution(nextDpr);
+      // Phase 14 Cycle C — DPR change can re-rasterize the canvas under
+      // an in-flight header drag-reorder. The captured pointer Y becomes
+      // ambiguous; cancel the gesture so the user's next pointermove
+      // arrives in a clean state.
+      this.paneHeaderController.cancelDrag();
       this.invalidator.invalidate("size");
     }
     this.armDprListener();
@@ -959,9 +1066,31 @@ export class TimeSeriesChart {
     if (opts?.priceScales?.left?.mode !== undefined) {
       pane.priceScale("left").setMode(opts.priceScales.left.mode);
     }
+    // Phase 14 Cycle C — collapsed flag at construction.
+    if (opts?.collapsed === true) {
+      pane.setCollapsed(true);
+    }
     this.renderer.attachPane(pane);
     this.panesList.push(pane);
     this.panesById.set(id, pane);
+    // Phase 14 Cycle C — header strip. Primary pane never gets a header
+    // (the canonical price chart). Other panes opt in via
+    // `addPane({ header: { title } })`. Construction order: header is
+    // attached AFTER the pane is in `panesList` so `headerForPane` lookups
+    // from cycle B+C controllers see consistent state.
+    const headerOpt = opts?.header;
+    if (headerOpt !== undefined && headerOpt !== false) {
+      if (id === MAIN_PANE_ID) {
+        this.opts.logger.warn(
+          `[carta] addPane: 'header' on primary pane is ignored`,
+        );
+      } else {
+        pane.setHeaderOptions(headerOpt);
+        const header = new PaneHeader(id, this.opts.logger);
+        this.paneHeaders.set(id, header);
+        this.renderer.attachPaneHeader(header);
+      }
+    }
     const index = this.panesList.length - 1;
     this.invalidator.invalidate("layout");
     this.emitter.emit("pane:add", { paneId: id, index });
@@ -1001,8 +1130,20 @@ export class TimeSeriesChart {
    * Phase 14 Cycle A — toggle pane visibility. Hidden panes occupy 0 px of
    * layout; the pane's series + scale state are preserved so unhiding
    * restores the prior visual. Emits `pane:visibility`.
+   *
+   * Phase 14 Cycle C — emits `pane:visibility` with `source:
+   * 'programmatic'`. The internal `setPaneHiddenInternal` path passes
+   * `'chart-resize'` for adaptive auto-collapse hides.
    */
   setPaneHidden(id: PaneId, hidden: boolean): void {
+    this.setPaneHiddenInternal(id, hidden, "programmatic");
+  }
+
+  private setPaneHiddenInternal(
+    id: PaneId,
+    hidden: boolean,
+    source: "programmatic" | "chart-resize",
+  ): void {
     if (this.disposed) {
       return;
     }
@@ -1015,7 +1156,7 @@ export class TimeSeriesChart {
     }
     pane.setHidden(hidden);
     this.invalidator.invalidate("layout");
-    this.emitter.emit("pane:visibility", { paneId: id, hidden });
+    this.emitter.emit("pane:visibility", { paneId: id, hidden, source });
     // Phase 14 Cycle A — emit `pane:resize` with `source: 'hidden'` only on
     // hide (height collapses to 0 in the same frame). On show, the post-flush
     // chart-resize path emits the restored height; emitting it here would
@@ -1026,6 +1167,85 @@ export class TimeSeriesChart {
         height: 0,
         source: "hidden",
       });
+      // Phase 14 Cycle C — host-initiated hide clears the auto-collapse
+      // bookkeeping so the pane isn't auto-restored on a chart resize.
+      // chart-resize-driven hides are tracked in `wasAutoCollapsed` by
+      // the evaluator; that path doesn't go through here.
+      if (source === "programmatic") {
+        this.wasAutoCollapsed.delete(id);
+      }
+    } else {
+      // Phase 14 Cycle C — host-initiated show clears the bookkeeping so
+      // the pane is treated as host-pinned-visible (won't get re-hidden by
+      // auto-collapse on the same flush). chart-resize-driven shows
+      // (auto-restore) leave the bookkeeping in place — the evaluator
+      // manages it.
+      if (source === "programmatic") {
+        this.wasAutoCollapsed.delete(id);
+      }
+    }
+  }
+
+  /**
+   * Phase 14 Cycle C — collapsed-state toggle. Differs from
+   * `setPaneHidden` in that the pane's header strip (if present) keeps
+   * rendering — so the chevron remains clickable for re-expansion.
+   * Throws on the primary pane (the canonical price chart can never be
+   * collapsed; doing so would deny the user any visible price data).
+   *
+   * Source defaults to `'programmatic'`; the header chevron path
+   * passes `'header-chevron'`. Reentrant calls warn + no-op via the
+   * `collapsingPaneIds` Set (mirrors cycle B's `removingPaneIds`).
+   *
+   * `next` may be omitted — when undefined, the call toggles the
+   * current state. The header-chevron path uses this to flip without
+   * needing to read state first.
+   */
+  setPaneCollapsed(id: PaneId, collapsed: boolean): void {
+    this.setPaneCollapsedInternal(id, collapsed, "programmatic");
+  }
+
+  private setPaneCollapsedInternal(
+    id: PaneId,
+    next: boolean | undefined,
+    source: "programmatic" | "header-chevron",
+  ): void {
+    if (this.disposed) {
+      return;
+    }
+    if (id === MAIN_PANE_ID) {
+      this.opts.logger.warn(
+        `[carta] setPaneCollapsed: cannot collapse the primary pane`,
+      );
+      return;
+    }
+    const pane = this.panesById.get(id);
+    if (pane === undefined) {
+      return;
+    }
+    if (this.collapsingPaneIds.has(id)) {
+      this.opts.logger.warn(
+        `[carta] setPaneCollapsed: reentrant call for pane '${String(id)}'; ignored`,
+      );
+      return;
+    }
+    const target = next ?? !pane.collapsed;
+    if (pane.collapsed === target) {
+      return;
+    }
+    // Cancel any in-flight reorder drag (this pane may be the dragged pane).
+    this.paneHeaderController.cancelDrag();
+    pane.setCollapsed(target);
+    this.collapsingPaneIds.add(id);
+    try {
+      this.invalidator.invalidate("layout");
+      this.emitter.emit("pane:collapse", {
+        paneId: id,
+        collapsed: target,
+        source,
+      });
+    } finally {
+      this.collapsingPaneIds.delete(id);
     }
   }
 
@@ -1118,6 +1338,17 @@ export class TimeSeriesChart {
     this.series.length = 0;
     this.series.push(...survivors);
     this.renderer.detachPane(pane);
+    // Phase 14 Cycle C — release header before destroying the pane so any
+    // in-flight reorder drag captured against this pane can't see a
+    // dangling header reference.
+    this.paneHeaderController.cancelDrag();
+    const header = this.paneHeaders.get(id);
+    if (header !== undefined) {
+      this.renderer.detachPaneHeader(header);
+      header.destroy();
+      this.paneHeaders.delete(id);
+    }
+    this.wasAutoCollapsed.delete(id);
     pane.destroy();
     this.panesList.splice(previousIndex, 1);
     this.panesById.delete(id);
@@ -1242,6 +1473,10 @@ export class TimeSeriesChart {
     // Cancel any in-flight divider drag before the splice — drag-state
     // indices become stale after the panesList mutation.
     this.paneResizeController.cancelDrag();
+    // Phase 14 Cycle C — also roll back any in-flight header drag-reorder.
+    // The drag's captured snapshots become stale after the splice; cycle
+    // C surfaces the bug as alpha=0.5 stuck on the wrong pane.
+    this.paneHeaderController.cancelDrag();
     // Build a new top-to-bottom panesList from the id order.
     const next: Pane[] = [];
     for (const id of newOrder) {
@@ -1260,6 +1495,10 @@ export class TimeSeriesChart {
       const pane = this.panesList[i];
       if (pane !== undefined) {
         this.renderer.reorderPane(pane, i);
+        const header = this.paneHeaders.get(pane.id);
+        if (header !== undefined) {
+          this.renderer.reorderPaneHeader(header, i);
+        }
       }
     }
     this.invalidator.invalidate("layout");
@@ -1305,7 +1544,11 @@ export class TimeSeriesChart {
           // (only on hide-transitions) if hidden flipped — same shape as
           // chart.setPaneHidden.
           if (patch.hidden !== undefined && pane.hidden !== prePatch.hidden) {
-            this.emitter.emit("pane:visibility", { paneId: pane.id, hidden: pane.hidden });
+            this.emitter.emit("pane:visibility", {
+              paneId: pane.id,
+              hidden: pane.hidden,
+              source: "programmatic",
+            });
             if (pane.hidden) {
               this.emitter.emit("pane:resize", {
                 paneId: pane.id,
@@ -1313,6 +1556,14 @@ export class TimeSeriesChart {
                 source: "hidden",
               });
             }
+            this.wasAutoCollapsed.delete(pane.id);
+          }
+          if (patch.collapsed !== undefined && pane.collapsed !== prePatch.collapsed) {
+            this.emitter.emit("pane:collapse", {
+              paneId: pane.id,
+              collapsed: pane.collapsed,
+              source: "programmatic",
+            });
           }
         },
       };
@@ -1344,6 +1595,12 @@ export class TimeSeriesChart {
       if (nextConfig !== this.config) {
         this.config = nextConfig;
         changed = true;
+        // Phase 14 Cycle C — theme swap mid-header-drag would render the
+        // picked-up pane against new colors while still ghosted at
+        // alpha=0.5. Mirror the `setInterval` / `setResolution` cancel
+        // pattern: roll the drag back so the next interaction starts on
+        // the freshly themed surface.
+        this.paneHeaderController.cancelDrag();
       }
     }
     if (changed) {
@@ -1644,6 +1901,13 @@ export class TimeSeriesChart {
     this.disarmDprListener();
     this.drawingsController.destroy();
     this.paneResizeController.destroy();
+    this.paneHeaderController.destroy();
+    for (const header of this.paneHeaders.values()) {
+      header.destroy();
+    }
+    this.paneHeaders.clear();
+    this.wasAutoCollapsed.clear();
+    this.collapsingPaneIds.clear();
     this.crosshair.destroy();
     this.priceAxisController.destroy();
     this.viewport.destroy();
@@ -1674,9 +1938,26 @@ export class TimeSeriesChart {
       return;
     }
 
+    // Phase 14 Cycle C — adaptive auto-collapse runs BEFORE layout so the
+    // computed rects already reflect the post-collapse pane set. Skip on
+    // pure crosshair flushes (cheap fast path).
+    if (
+      reasons.size > 0 &&
+      !(reasons.size === 1 && reasons.has("crosshair")) &&
+      !this.paneResizeController.isDragging() &&
+      !this.paneHeaderController.isDragging()
+    ) {
+      this.evaluateAutoCollapse();
+    }
+
     // Layout panes once per flush (also used by the crosshair fast path).
-    const paneRects = this.computePaneRects();
+    const bundles = this.computePaneRectBundlesInternal();
+    const paneRects: PaneRect[] = bundles.map((b) => b.rect);
+    const headerRects: PaneRect[] = bundles.map((b) => b.headerRect);
+    const outerRects: PaneRect[] = bundles.map((b) => b.outerRect);
     this.lastPaneRects = paneRects;
+    this.lastPaneHeaderRects = headerRects;
+    this.lastPaneOuterRects = outerRects;
     for (let i = 0; i < this.panesList.length; i += 1) {
       const pane = this.panesList[i];
       const rect = paneRects[i];
@@ -1684,8 +1965,29 @@ export class TimeSeriesChart {
         pane.applyRect(rect);
       }
     }
-    const primaryRect = paneRects[0] ?? { x: 0, y: 0, w: 0, h: 0 };
+    // Phase 14 Cycle C — paint each header strip. Headers live in
+    // `paneHeaderLayer` (sibling of `paneRoot`) so they render even when
+    // the pane's plot region collapses to 0.
     const snap = this.config.snapshot;
+    for (let i = 0; i < this.panesList.length; i += 1) {
+      const pane = this.panesList[i];
+      if (pane === undefined) {
+        continue;
+      }
+      const header = this.paneHeaders.get(pane.id);
+      if (header === undefined) {
+        continue;
+      }
+      const headerRect = headerRects[i] ?? { x: 0, y: 0, w: 0, h: 0 };
+      const title =
+        pane.headerOptions === null
+          ? ""
+          : typeof pane.headerOptions.title === "string"
+            ? pane.headerOptions.title
+            : "";
+      header.applyRect(headerRect, snap.theme, title, pane.collapsed);
+    }
+    const primaryRect = paneRects[0] ?? { x: 0, y: 0, w: 0, h: 0 };
 
     // Fast path: pointer moves that only set the `'crosshair'` dirty flag
     // must not redraw series / axes / grid. Uses the current plot rect +
@@ -1722,6 +2024,7 @@ export class TimeSeriesChart {
 
     this.renderer.renderFrame(snap.theme, snap.width, snap.height, paneRects);
     this.paneResizeController.render(snap.theme);
+    this.paneHeaderController.render(snap.theme);
     // Reconcile each pane's scales (auto-scale → lastRenderedDomain).
     const winStart = Number(snap.startTime);
     const winEnd = Number(snap.endTime);
@@ -1980,8 +2283,21 @@ export class TimeSeriesChart {
    * occupy the canvas minus `BOTTOM_MARGIN` (time-axis gutter) and minus
    * `PRICE_AXIS_STRIP_WIDTH` on the right (each pane's PriceAxis renders
    * inside its own subtree, so the rect's `w` is canvas - strip).
+   *
+   * Phase 14 Cycle C — back-compat shim. Returns plot rects only; cycle C
+   * call sites use `computePaneRectBundles` directly to get header +
+   * outer rects too.
    */
   private computePaneRects(): PaneRect[] {
+    return this.computePaneRectBundlesInternal().map((b) => b.rect);
+  }
+
+  /**
+   * Phase 14 Cycle C — the full layout output (plot + header + outer
+   * rects). Reused by the flush, the resize controller, and the header
+   * controller's drop-slot math.
+   */
+  private computePaneRectBundlesInternal(): PaneRectBundle[] {
     const { width, height } = this.config.snapshot;
     const usableW = Math.max(0, width - PRICE_AXIS_STRIP_WIDTH);
     const inputs: PaneLayoutInput[] = this.panesList.map((p) => ({
@@ -1989,11 +2305,154 @@ export class TimeSeriesChart {
       minHeight: p.minHeight,
       hidden: p.hidden,
       heightOverride: p.heightOverride,
+      collapsed: p.collapsed,
+      headerHeight: this.headerHeightFor(p.id),
     }));
-    return computePaneRects(usableW, height, inputs, {
+    return computePaneRectBundles(usableW, height, inputs, {
       bottomMargin: BOTTOM_MARGIN,
       minHeight: 50,
     });
+  }
+
+  /**
+   * Phase 14 Cycle C — pixel header height for the given pane. Returns
+   * `0` when the pane has no header (or `header.visible === false`).
+   * Visible-or-collapsed panes with a header reserve `PANE_HEADER_HEIGHT`.
+   */
+  private headerHeightFor(id: PaneId): number {
+    if (id === MAIN_PANE_ID) {
+      return 0;
+    }
+    const pane = this.panesById.get(id);
+    if (pane === undefined) {
+      return 0;
+    }
+    if (pane.headerOptions === null) {
+      return 0;
+    }
+    if (pane.headerOptions.visible === false) {
+      return 0;
+    }
+    return PANE_HEADER_HEIGHT;
+  }
+
+  /**
+   * Phase 14 Cycle C — adaptive auto-collapse. When the chart's vertical
+   * space drops below the visible-pane minimum, hides panes from the
+   * bottom up until the layout fits. When the chart grows back past the
+   * threshold + 16 px hysteresis, restores the most-recently-auto-hidden
+   * pane.
+   *
+   * Algorithm:
+   * 1. Compute `requiredH = bottomMargin + Σ headerH(visible-or-collapsed)
+   *    + Σ minHeight(visible-not-collapsed)`. Compare against `chartH`.
+   * 2. While `requiredH > chartH` and at least one auto-hideable pane is
+   *    visible, hide the bottom-most non-primary visible pane via
+   *    `setPaneHiddenInternal(id, true, 'chart-resize')` and add to
+   *    `wasAutoCollapsed`.
+   * 3. Else compute `availableSlack = chartH - requiredH - 16`. While
+   *    `availableSlack > minHeight(restoreCandidate) + headerH(restoreCandidate)`,
+   *    pop from `wasAutoCollapsed` (most recent first) and restore.
+   *
+   * Hard guarantees: primary pane never auto-hides; auto-collapse never
+   * runs while a divider drag or header drag is active; reentrant
+   * auto-collapse from inside a `pane:visibility` handler is no-oped via
+   * `autoCollapseEvaluating`.
+   */
+  private evaluateAutoCollapse(): void {
+    if (this.autoCollapseEvaluating) {
+      return;
+    }
+    this.autoCollapseEvaluating = true;
+    try {
+      const HYSTERESIS_PX = 16;
+      const { height: chartH } = this.config.snapshot;
+      // Hide bottom-up while overflowing.
+      // Re-evaluate per iteration since `setPaneHiddenInternal` mutates state.
+      // Bound by `panesList.length` to avoid pathological loops.
+      const safetyBound = this.panesList.length;
+      let safetyTicks = 0;
+      while (safetyTicks < safetyBound) {
+        safetyTicks += 1;
+        const required = this.computeRequiredHeight();
+        if (required <= chartH) {
+          break;
+        }
+        const candidate = this.findBottomMostAutoHideable();
+        if (candidate === null) {
+          break;
+        }
+        this.setPaneHiddenInternal(candidate.id, true, "chart-resize");
+        this.wasAutoCollapsed.add(candidate.id);
+      }
+      // Restore most-recently-auto-collapsed if we have slack.
+      // Iterate the auto-collapsed set newest-first; stop once a candidate
+      // doesn't fit.
+      const order = Array.from(this.wasAutoCollapsed);
+      for (let i = order.length - 1; i >= 0; i -= 1) {
+        const id = order[i];
+        if (id === undefined) {
+          continue;
+        }
+        const pane = this.panesById.get(id);
+        if (pane?.hidden !== true) {
+          // Stale entry — drop it.
+          this.wasAutoCollapsed.delete(id);
+          continue;
+        }
+        const required = this.computeRequiredHeight();
+        const slack = chartH - required - HYSTERESIS_PX;
+        const minNeeded =
+          (pane.collapsed ? 0 : pane.minHeight) + this.headerHeightFor(id);
+        if (slack >= minNeeded) {
+          this.setPaneHiddenInternal(id, false, "chart-resize");
+          this.wasAutoCollapsed.delete(id);
+        } else {
+          break;
+        }
+      }
+    } finally {
+      this.autoCollapseEvaluating = false;
+    }
+  }
+
+  /**
+   * Phase 14 Cycle C — sum of vertical pixels needed by the current
+   * (non-hidden) pane set: bottom margin + header strips + minHeights of
+   * visible-not-collapsed panes. Collapsed panes contribute only their
+   * header height; hidden panes contribute nothing.
+   */
+  private computeRequiredHeight(): number {
+    let total = BOTTOM_MARGIN;
+    for (const pane of this.panesList) {
+      if (pane.hidden) {
+        continue;
+      }
+      total += this.headerHeightFor(pane.id);
+      if (!pane.collapsed) {
+        total += Math.max(30, Math.floor(pane.minHeight));
+      }
+    }
+    return total;
+  }
+
+  /**
+   * Phase 14 Cycle C — bottom-most non-primary visible pane that's a
+   * legal auto-hide candidate. Returns `null` if no candidate exists
+   * (e.g. only the primary pane remains visible).
+   */
+  private findBottomMostAutoHideable(): Pane | null {
+    for (let i = this.panesList.length - 1; i >= 1; i -= 1) {
+      const pane = this.panesList[i];
+      if (pane === undefined) {
+        continue;
+      }
+      if (pane.hidden) {
+        continue;
+      }
+      return pane;
+    }
+    return null;
   }
 
   private onAutoResize(): void {

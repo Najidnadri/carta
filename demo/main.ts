@@ -341,7 +341,11 @@ async function mount(mountOpts: MountOptions): Promise<MountResult> {
     // LWC convention; the pane's right scale auto-scales independently from
     // the candle's so the volume bars fill the pane height regardless of
     // the candle range.
-    const volumePane = chart.addPane({ id: VOLUME_PANE_ID, stretchFactor: 0.25 });
+    const volumePane = chart.addPane({
+      id: VOLUME_PANE_ID,
+      stretchFactor: 0.25,
+      header: { title: "Volume" },
+    });
     volumePane.priceScale("right").setAutoScale(true);
     // Phase 14 Cycle A — volume pane gets a compact integer formatter
     // (`12.5K`, `1.4M`) so the y-axis is scannable without trailing decimals.
@@ -387,7 +391,11 @@ async function mount(mountOpts: MountOptions): Promise<MountResult> {
 
     // RSI pane — bounded [0, 100] with 5 % pad so the line never sits
     // flush against the pane frame.
-    const rsiPane = chart.addPane({ id: RSI_PANE_ID, stretchFactor: 0.4 });
+    const rsiPane = chart.addPane({
+      id: RSI_PANE_ID,
+      stretchFactor: 0.4,
+      header: { title: "RSI(14)" },
+    });
     rsiPane.priceScale("right").setMode({ kind: "bounded", min: 0, max: 100, pad: 0.05 });
     rsiPane.priceScale("right").setAutoScale(true);
     const rsiSeries = chart.addSeries(
@@ -401,7 +409,11 @@ async function mount(mountOpts: MountOptions): Promise<MountResult> {
 
     // MACD pane — auto-scale (signed values centered on 0). Three series:
     // MACD line + signal line + histogram for the divergence.
-    const macdPane = chart.addPane({ id: MACD_PANE_ID, stretchFactor: 0.4 });
+    const macdPane = chart.addPane({
+      id: MACD_PANE_ID,
+      stretchFactor: 0.4,
+      header: { title: "MACD(12,26,9)" },
+    });
     macdPane.priceScale("right").setAutoScale(true);
     const macdLine = chart.addSeries(
       new LineSeries({
@@ -429,7 +441,11 @@ async function mount(mountOpts: MountOptions): Promise<MountResult> {
 
     // Z-score pane — bounded [-3, 3] with 10 % pad. Custom oscillator
     // demonstrates bounded mode with negative bounds.
-    const zscorePane = chart.addPane({ id: ZSCORE_PANE_ID, stretchFactor: 0.3 });
+    const zscorePane = chart.addPane({
+      id: ZSCORE_PANE_ID,
+      stretchFactor: 0.3,
+      header: { title: "Z-Score(20)" },
+    });
     zscorePane.priceScale("right").setMode({ kind: "bounded", min: -3, max: 3, pad: 0.1 });
     zscorePane.priceScale("right").setAutoScale(true);
     const zscoreSeries = chart.addSeries(
@@ -1415,6 +1431,18 @@ async function main(): Promise<void> {
     });
   };
   chart.on("data:request", logRequest);
+
+  // Phase 14 Cycle C — surface pane header lifecycle for the demo. Hosts in
+  // production typically open a settings panel from `pane:settings`; the
+  // demo just logs.
+  chart.on("pane:settings", (payload) => {
+    activeLogger.info(`[demo] pane:settings paneId=${String(payload.paneId)}`);
+  });
+  chart.on("pane:collapse", (payload) => {
+    activeLogger.info(
+      `[demo] pane:collapse paneId=${String(payload.paneId)} collapsed=${String(payload.collapsed)} source=${payload.source}`,
+    );
+  });
 
   type OverlayShape = "line" | "area" | "baseline";
   let overlayShape: OverlayShape = "line";

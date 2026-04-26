@@ -36,6 +36,15 @@ export const DarkTheme: Theme = {
   // `#0e1116`, passes the WCAG 1.4.11 non-text contrast floor for
   // interactive UI components.
   paneSeparator: 0x5b6573,
+  // Phase 14 Cycle C — pane header tokens. `paneHeaderBg` is one shade
+  // brighter than the chart background so the strip reads as a UI
+  // surface; `paneHeaderText` keeps the same `text` luminance for AAA
+  // contrast (12.6:1 on `#1a1f27`). `paneHeaderHoverBg` is the
+  // selection accent at 0x282f3a so hover rectangles sit visibly behind
+  // the glyphs without dominating them.
+  paneHeaderBg: 0x1a1f27,
+  paneHeaderText: 0xc9d1d9,
+  paneHeaderHoverBg: 0x2d333b,
   fontFamily: DEFAULT_FONT_FAMILY,
   fontSize: DEFAULT_FONT_SIZE,
 };
@@ -71,6 +80,15 @@ export const LightTheme: Theme = {
   // Phase 14 Cycle A — pane separator. `#9098a1` ≈ 3.5:1 contrast on
   // `#ffffff`, passes WCAG 1.4.11.
   paneSeparator: 0x9098a1,
+  // Phase 14 Cycle C — pane header tokens for the light theme. Header
+  // bg is `#f5f7fa` — one shade darker than the chart background so the
+  // strip reads as a separate surface. Header text uses the same `text`
+  // value (12.6:1 on `#f5f7fa`, still passes AAA). Hover bg is
+  // `#e6e9ed`, contrast against the header bg is ~1.3:1 — the hover
+  // signal is intentionally subtle.
+  paneHeaderBg: 0xf5f7fa,
+  paneHeaderText: 0x24292f,
+  paneHeaderHoverBg: 0xe6e9ed,
   fontFamily: DEFAULT_FONT_FAMILY,
   fontSize: DEFAULT_FONT_SIZE,
 };

@@ -8,13 +8,18 @@ export { Renderer } from "./core/render/Renderer.js";
 export type { PlotRect, RendererOptions } from "./core/render/Renderer.js";
 export { Pane, sanitizePriceScaleMode } from "./core/pane/Pane.js";
 export type { PaneConstructionOptions, PaneOwner, PrePatchPaneSnapshot } from "./core/pane/Pane.js";
-export { computePaneRects } from "./core/pane/PaneLayout.js";
-export type { PaneLayoutInput, PaneLayoutOptions } from "./core/pane/PaneLayout.js";
+export { computePaneRects, computePaneRectBundles } from "./core/pane/PaneLayout.js";
+export type { PaneLayoutInput, PaneLayoutOptions, PaneRectBundle } from "./core/pane/PaneLayout.js";
+export { PaneHeader, PANE_HEADER_HEIGHT } from "./core/pane/PaneHeader.js";
+export type { PaneHeaderRegion, PaneHeaderHitOptions } from "./core/pane/PaneHeader.js";
+export { PaneHeaderController } from "./core/pane/PaneHeaderController.js";
+export type { PaneHeaderControllerDeps } from "./core/pane/PaneHeaderController.js";
 export {
   OVERLAY_SCALE_ID,
 } from "./core/pane/types.js";
 export type {
   OverlayScaleId,
+  PaneHeaderOptions,
   PaneOptions,
   PaneRect,
   PriceScaleId,

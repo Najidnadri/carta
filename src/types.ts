@@ -242,9 +242,48 @@ export interface PaneResizePayload {
   readonly source: "user-drag" | "programmatic" | "chart-resize" | "hidden";
 }
 
+/**
+ * Source of a `pane:visibility` event. Cycle C widens this from a fixed
+ * `'programmatic'` to allow header-chevron toggles and chart-resize-driven
+ * auto-collapse to be distinguished by hosts. The field is optional for
+ * back-compat; absence is read as `'programmatic'`.
+ */
+export type PaneVisibilitySource =
+  | "programmatic"
+  | "header-chevron"
+  | "chart-resize";
+
 export interface PaneVisibilityPayload {
   readonly paneId: PaneId;
   readonly hidden: boolean;
+  readonly source?: PaneVisibilitySource;
+}
+
+/**
+ * Phase 14 Cycle C — payload of `pane:collapse`. Fires whenever a pane
+ * transitions between expanded and collapsed (header-only) states.
+ * `source` distinguishes user chevron clicks from programmatic
+ * `chart.setPaneCollapsed` calls.
+ *
+ * Auto-collapse on narrow viewports does NOT emit `pane:collapse` —
+ * those panes go truly hidden (`pane:visibility` with
+ * `source: 'chart-resize'`) because there's no header strip to surface
+ * the un-collapse control at narrow viewports.
+ */
+export interface PaneCollapsePayload {
+  readonly paneId: PaneId;
+  readonly collapsed: boolean;
+  readonly source: "programmatic" | "header-chevron";
+}
+
+/**
+ * Phase 14 Cycle C — payload of `pane:settings`. Fires when the user
+ * clicks the gear icon in a pane's header. Hosts render their own
+ * settings UI; Carta does not provide one. Empty payload by design —
+ * the host already knows which pane it is from `paneId`.
+ */
+export interface PaneSettingsPayload {
+  readonly paneId: PaneId;
 }
 
 /**
@@ -307,6 +346,8 @@ export interface CartaEventMap extends Record<string, unknown> {
   readonly "pane:add": PaneAddPayload;
   readonly "pane:remove": PaneRemovePayload;
   readonly "pane:reorder": PaneReorderPayload;
+  readonly "pane:collapse": PaneCollapsePayload;
+  readonly "pane:settings": PaneSettingsPayload;
   readonly resize: SizeInfo;
   readonly "drawings:created": DrawingsChangedPayload;
   readonly "drawings:updated": DrawingsChangedPayload;
@@ -371,6 +412,25 @@ export interface Theme {
    * `frame` if the host omits it (pre-1.0 hosts using prior theme objects).
    */
   readonly paneSeparator: number;
+
+  // ─── Pane header (Phase 14 Cycle C) ─────────────────────────
+  /**
+   * Background fill of the canvas-rendered pane header strip. Sits between
+   * the chart `background` and the pane plot region. Subtle contrast is
+   * intentional — the header should read as a UI surface without competing
+   * visually with the price data below.
+   */
+  readonly paneHeaderBg: number;
+  /**
+   * Foreground color used for header title text and button glyphs
+   * (chevron / gear / ×). Must hit 4.5:1 contrast against `paneHeaderBg`.
+   */
+  readonly paneHeaderText: number;
+  /**
+   * Background tint painted behind a hovered or pressed header button
+   * (chevron / gear / ×). Drawn as a 4 px rounded rect at 0.5 alpha.
+   */
+  readonly paneHeaderHoverBg: number;
 
   // ─── Drawings ────────────────────────────────────────────────
   /**

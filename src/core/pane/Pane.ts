@@ -16,7 +16,7 @@ import {
   type PriceRangeProvider,
 } from "../price/PriceRangeProvider.js";
 import { DEFAULT_PRICE_MARGINS, PriceScale } from "../price/PriceScale.js";
-import type { PaneId, PaneOptions, PaneRect, PriceScaleId, PriceScaleSide } from "./types.js";
+import type { PaneHeaderOptions, PaneId, PaneOptions, PaneRect, PriceScaleId, PriceScaleSide } from "./types.js";
 
 const DEFAULT_DOMAIN_MIN = 0;
 const DEFAULT_DOMAIN_MAX = 1;
@@ -48,11 +48,13 @@ export interface PaneOwner {
 /**
  * Phase 14 Cycle B — pre-applyOptions snapshot the chart uses to detect
  * which fields actually changed (so `pane:resize` / `pane:visibility` only
- * emit on real transitions).
+ * emit on real transitions). Cycle C extends with `collapsed` so
+ * `pane:collapse` only emits on real transitions.
  */
 export interface PrePatchPaneSnapshot {
   readonly heightOverride: number | null;
   readonly hidden: boolean;
+  readonly collapsed: boolean;
 }
 
 export interface PaneConstructionOptions {
@@ -142,6 +144,20 @@ export class Pane {
    * (2-decimal price formatting).
    */
   priceFormatterOverride: PriceFormatter | null = null;
+  /**
+   * Phase 14 Cycle C — collapsed state. When true, the plot region clamps
+   * to 0 px but the header strip (if present) still renders. Distinct from
+   * `hidden` (header included). `heightOverride` is preserved through the
+   * collapse so `setCollapsed(false)` restores the prior size.
+   */
+  collapsed = false;
+  /**
+   * Phase 14 Cycle C — header configuration. `null` means no header strip
+   * (default for primary pane). A non-null `PaneHeaderOptions` opts the
+   * pane in. The header itself is owned by `PaneHeader` (sibling of the
+   * plot region in the scene graph), not by `Pane.paneContainer`.
+   */
+  headerOptions: PaneHeaderOptions | null = null;
 
   constructor(options: PaneConstructionOptions) {
     this.id = options.id;
@@ -186,6 +202,12 @@ export class Pane {
    * Apply pane-level position + clip rect. Called from the chart's flush
    * once per layout pass. Pane-local coords inside the subtree always start
    * at `(0, 0)` regardless of where the pane sits on the canvas.
+   *
+   * Phase 14 Cycle C — `rect` is always the PLOT region (excluding any
+   * header strip). When the pane is collapsed, layout passes a 0-height
+   * rect, so `paneContainer.visible` evaluates to false and the plot
+   * subtree is GPU-skipped. The header strip is owned by `PaneHeader`,
+   * which receives its own rect from the chart's flush.
    */
   applyRect(rect: PaneRect): void {
     if (this.destroyed) {
@@ -193,7 +215,7 @@ export class Pane {
     }
     this.rect = rect;
     this.paneContainer.position.set(rect.x, rect.y);
-    this.paneContainer.visible = !this.hidden && rect.h > 0;
+    this.paneContainer.visible = !this.hidden && !this.collapsed && rect.h > 0;
     const safeW = Math.max(0, rect.w);
     const safeH = Math.max(0, rect.h);
     this.clipMask.clear().rect(0, 0, safeW, safeH).fill(0xffffff);
@@ -206,6 +228,28 @@ export class Pane {
    */
   setHidden(hidden: boolean): void {
     this.hidden = hidden;
+  }
+
+  /**
+   * Phase 14 Cycle C — collapsed-state toggle. When true, the plot region
+   * collapses to 0 px (subtree skipped), but the header strip (if present)
+   * keeps rendering at its declared height. Distinct from `setHidden`,
+   * which removes the header too. `heightOverride` is preserved through the
+   * collapse so a subsequent `setCollapsed(false)` restores the prior plot
+   * size. Caller must invalidate `'layout'` after a flip.
+   */
+  setCollapsed(collapsed: boolean): void {
+    this.collapsed = collapsed;
+  }
+
+  /**
+   * Phase 14 Cycle C — opt the pane in/out of a header strip. `null`
+   * removes the header (no strip is reserved or rendered); a non-null
+   * `PaneHeaderOptions` opts the pane in. Caller must invalidate
+   * `'layout'` after a change.
+   */
+  setHeaderOptions(opts: PaneHeaderOptions | null): void {
+    this.headerOptions = opts;
   }
 
   /**
@@ -448,6 +492,7 @@ export class Pane {
     const prePatch: PrePatchPaneSnapshot = {
       heightOverride: this.heightOverride,
       hidden: this.hidden,
+      collapsed: this.collapsed,
     };
     const knownKeys = new Set([
       "id",
@@ -455,6 +500,8 @@ export class Pane {
       "minHeight",
       "height",
       "hidden",
+      "collapsed",
+      "header",
       "priceFormatter",
       "priceScales",
     ]);
@@ -493,6 +540,12 @@ export class Pane {
     }
     if (patch.hidden !== undefined) {
       this.setHidden(patch.hidden);
+    }
+    if (patch.collapsed !== undefined) {
+      this.setCollapsed(patch.collapsed);
+    }
+    if (patch.header !== undefined) {
+      this.setHeaderOptions(patch.header === false ? null : patch.header);
     }
     if (patch.priceFormatter !== undefined) {
       this.setPriceFormatter(patch.priceFormatter);

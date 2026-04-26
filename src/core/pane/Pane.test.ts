@@ -420,4 +420,95 @@ describe("Pane", () => {
       expect(Number(scale.domainMax)).toBeGreaterThanOrEqual(105);
     });
   });
+
+  // ─── Phase 14 Cycle C ────────────────────────────────────────────────
+
+  describe("cycle C — collapsed state + header options", () => {
+    it("setCollapsed toggles the collapsed field", () => {
+      const pane = new Pane({ id: asPaneId("rsi") });
+      expect(pane.collapsed).toBe(false);
+      pane.setCollapsed(true);
+      expect(pane.collapsed).toBe(true);
+      pane.setCollapsed(false);
+      expect(pane.collapsed).toBe(false);
+    });
+
+    it("applyRect makes paneContainer invisible when collapsed (plot region collapses to 0)", () => {
+      const pane = new Pane({ id: asPaneId("rsi") });
+      pane.applyRect({ x: 0, y: 100, w: 800, h: 0 });
+      pane.setCollapsed(true);
+      pane.applyRect({ x: 0, y: 100, w: 800, h: 0 });
+      expect(pane.paneContainer.visible).toBe(false);
+    });
+
+    it("preserves heightOverride through a collapse + restore cycle", () => {
+      const pane = new Pane({ id: asPaneId("rsi") });
+      pane.setHeight(180);
+      expect(pane.heightOverride).toBe(180);
+      pane.setCollapsed(true);
+      // heightOverride survives the collapse — restore reads it on uncollapse.
+      expect(pane.heightOverride).toBe(180);
+      pane.setCollapsed(false);
+      expect(pane.heightOverride).toBe(180);
+    });
+
+    it("setHeaderOptions stores the title; null clears it", () => {
+      const pane = new Pane({ id: asPaneId("rsi") });
+      expect(pane.headerOptions).toBeNull();
+      pane.setHeaderOptions({ title: "RSI(14)" });
+      expect(pane.headerOptions?.title).toBe("RSI(14)");
+      pane.setHeaderOptions(null);
+      expect(pane.headerOptions).toBeNull();
+    });
+
+    it("applyOptions routes 'collapsed' to setCollapsed", () => {
+      const pane = new Pane({ id: asPaneId("rsi") });
+      pane.applyOptions({ collapsed: true });
+      expect(pane.collapsed).toBe(true);
+      pane.applyOptions({ collapsed: false });
+      expect(pane.collapsed).toBe(false);
+    });
+
+    it("applyOptions routes 'header' (object) to setHeaderOptions", () => {
+      const pane = new Pane({ id: asPaneId("rsi") });
+      pane.applyOptions({ header: { title: "Test" } });
+      expect(pane.headerOptions?.title).toBe("Test");
+    });
+
+    it("applyOptions routes 'header: false' to clear headerOptions", () => {
+      const pane = new Pane({ id: asPaneId("rsi") });
+      pane.setHeaderOptions({ title: "X" });
+      pane.applyOptions({ header: false });
+      expect(pane.headerOptions).toBeNull();
+    });
+
+    it("applyOptions emits paneOptionsApplied with prePatch.collapsed", () => {
+      const captured: PrePatchPaneSnapshot[] = [];
+      const owner: PaneOwner = {
+        movePaneTo: vi.fn(),
+        paneOptionsApplied: (_p, _patch, prePatch): void => {
+          captured.push(prePatch);
+        },
+      };
+      const pane = new Pane({ id: asPaneId("rsi"), paneOwner: owner });
+      pane.applyOptions({ collapsed: true });
+      expect(captured.length).toBe(1);
+      expect(captured[0]?.collapsed).toBe(false);
+      pane.applyOptions({ collapsed: false });
+      expect(captured.length).toBe(2);
+      expect(captured[1]?.collapsed).toBe(true);
+    });
+
+    it("collapsed and hidden are independent flags", () => {
+      const pane = new Pane({ id: asPaneId("rsi") });
+      pane.setCollapsed(true);
+      pane.setHidden(true);
+      expect(pane.collapsed).toBe(true);
+      expect(pane.hidden).toBe(true);
+      pane.setHidden(false);
+      expect(pane.hidden).toBe(false);
+      // Collapsed flag is not auto-reset when hidden flips.
+      expect(pane.collapsed).toBe(true);
+    });
+  });
 });
