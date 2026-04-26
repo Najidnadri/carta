@@ -6,8 +6,8 @@
  * `keyboard:hotkey` event without using the helper.
  *
  * Recommended bindings (matches the published TradingView Alt-letter
- * convention; we collapse `Alt+Shift+R` to `Alt+R` since rectangle has no
- * conflict in Carta):
+ * convention where possible; we collapse `Alt+Shift+R` to `Alt+R` since
+ * rectangle has no conflict in Carta):
  *
  *   Alt+T → trendline
  *   Alt+H → horizontalLine
@@ -18,6 +18,14 @@
  *   Alt+E → extendedLine
  *   Alt+G → horizontalRay  (G for "ray", since H is already horizontalLine)
  *   Alt+P → parallelChannel
+ *   Alt+Shift+L → longPosition
+ *   Alt+Shift+S → shortPosition
+ *   Alt+N → text (note)
+ *   Alt+B → callout (b for "bubble")
+ *   Alt+W → arrow
+ *   Alt+D → dateRange
+ *   Alt+M → priceRange (m for "measure")
+ *   Alt+K → priceDateRange
  *
  * Filters: `event.repeat`, IME composition, and keydowns delivered while an
  * `<input>`/`<textarea>`/`contenteditable` is focused. Hosts can `preventDefault`
@@ -42,8 +50,16 @@ export interface HotkeysChart {
   readonly drawings: DrawingsFacade;
 }
 
-/** Recommended Alt-letter → drawing-kind table. Lowercased. */
+/**
+ * Recommended Alt-letter → drawing-kind table. Lowercased.
+ *
+ * Phase 13 Cycle B.2 extended the table — keys may include modifier prefixes
+ * `'shift+'` (e.g. `'shift+l'` for `Alt+Shift+L`) for tools that conflict with
+ * existing TradingView Alt-letter bindings. The handler normalizes the active
+ * key into `'<modifier>+<letter>'` before lookup.
+ */
 export const RECOMMENDED_HOTKEY_BINDINGS: Readonly<Record<string, KeyboardHotkeyBinding>> = Object.freeze({
+  // Phase 13 Cycle B.1
   t: "trendline",
   h: "horizontalLine",
   v: "verticalLine",
@@ -53,6 +69,15 @@ export const RECOMMENDED_HOTKEY_BINDINGS: Readonly<Record<string, KeyboardHotkey
   e: "extendedLine",
   g: "horizontalRay",
   p: "parallelChannel",
+  // Phase 13 Cycle B.2
+  "shift+l": "longPosition",
+  "shift+s": "shortPosition",
+  n: "text",
+  b: "callout",
+  w: "arrow",
+  d: "dateRange",
+  m: "priceRange",
+  k: "priceDateRange",
 });
 
 export interface InstallHotkeysOptions {
@@ -102,7 +127,11 @@ export function installHotkeys(chart: HotkeysChart, options?: InstallHotkeysOpti
     if (key.length !== 1) {
       return;
     }
-    const binding = bindings[key] ?? null;
+    // Cycle B.2 — `Alt+Shift+letter` maps via `'shift+<letter>'` keys; bare
+    // `Alt+letter` continues to map via `'<letter>'`. Shift-only is the only
+    // extra modifier we honor here (Ctrl/Meta combinations are reserved).
+    const lookupKey = raw.shiftKey ? `shift+${key}` : key;
+    const binding = bindings[lookupKey] ?? null;
     const payload: KeyboardHotkeyPayload = Object.freeze({
       key,
       modifiers: Object.freeze({

@@ -65,10 +65,17 @@
         padding: 6px 10px;
         font-size: 12px;
         min-height: 44px;
+        min-width: 44px;
         cursor: pointer;
       }
       header button:hover {
         background: var(--button-bg-hover);
+      }
+      /* Phase 13 Cycle B.2 fix-up F-4 — ensure drawing toolbar buttons hit
+         the WCAG 2.5.5 44×44 CSS-px minimum on every viewport. */
+      #drawings-toolbar button {
+        min-width: 44px;
+        min-height: 44px;
       }
       #readout {
         margin-left: auto;
@@ -172,6 +179,11 @@
         grid-template-columns: auto 1fr;
         row-gap: 4px;
         column-gap: 10px;
+      }
+      /* Phase 13 Cycle B.2 fix-up F-1 — `display: grid` above overrides the
+         `hidden` boolean attribute. Restore the default `[hidden]` semantics. */
+      #crosshair-panel dl[hidden] {
+        display: none;
       }
       #crosshair-panel dt {
         color: var(--muted);
@@ -283,6 +295,14 @@
           <button id="draw-extendedLine" aria-pressed="false" title="Extended line (Alt+E)">↔</button>
           <button id="draw-horizontalRay" aria-pressed="false" title="Horizontal ray (Alt+G)">⇒</button>
           <button id="draw-parallelChannel" aria-pressed="false" title="Parallel channel (Alt+P)">⫽</button>
+          <button id="draw-longPosition" aria-pressed="false" title="Long position (Alt+Shift+L)">L⤴</button>
+          <button id="draw-shortPosition" aria-pressed="false" title="Short position (Alt+Shift+S)">S⤵</button>
+          <button id="draw-text" aria-pressed="false" title="Text / note (Alt+N)">T</button>
+          <button id="draw-callout" aria-pressed="false" title="Callout (Alt+B)">💬</button>
+          <button id="draw-arrow" aria-pressed="false" title="Arrow (Alt+W)">➤</button>
+          <button id="draw-dateRange" aria-pressed="false" title="Date range (Alt+D)">↔t</button>
+          <button id="draw-priceRange" aria-pressed="false" title="Price range (Alt+M)">↔$</button>
+          <button id="draw-priceDateRange" aria-pressed="false" title="Price+date range (Alt+K)">▭$t</button>
           <button id="drawings-magnet" aria-pressed="false" title="Toggle magnet snap (Off → Weak → Strong)">Magnet: Off</button>
           <button id="drawings-clear" title="Clear all drawings">×</button>
           <button id="drawings-save" title="Save drawings to localStorage">Save</button>
@@ -345,6 +365,20 @@
           </dl>
           <section id="series-readouts" aria-label="Series values at crosshair">
             <!-- populated by main.ts -->
+          </section>
+          <section id="position-pnl-section" aria-label="Position-tool P&amp;L readout">
+            <h2>Position P&amp;L</h2>
+            <dl id="position-pnl-empty"><dt>—</dt><dd>no position selected</dd></dl>
+            <dl id="position-pnl-detail" hidden>
+              <dt>side</dt><dd id="pnl-side">—</dd>
+              <dt>entry</dt><dd id="pnl-entry">—</dd>
+              <dt>SL</dt><dd id="pnl-sl">—</dd>
+              <dt>TP</dt><dd id="pnl-tp">—</dd>
+              <dt>R:R</dt><dd id="pnl-rr">—</dd>
+              <dt>qty</dt><dd id="pnl-qty">—</dd>
+              <dt>last</dt><dd id="pnl-last">—</dd>
+              <dt>uPnL</dt><dd id="pnl-upnl">—</dd>
+            </dl>
           </section>
           <section id="request-log-section" aria-label="Per-channel data-request log">
             <h2>Request log</h2>

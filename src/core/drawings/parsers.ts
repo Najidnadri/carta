@@ -6,6 +6,10 @@
 
 import { asPrice, asTime } from "../../types.js";
 import type {
+  ArrowDrawing,
+  CalloutDrawing,
+  DateRangeDrawing,
+  DisplayMode,
   Drawing,
   DrawingAnchor,
   DrawingFill,
@@ -23,11 +27,16 @@ import type {
   HorizontalRayDirection,
   HorizontalRayDrawing,
   JsonValue,
+  LongPositionDrawing,
   PaneId,
   ParallelChannelDrawing,
+  PriceDateRangeDrawing,
+  PriceRangeDrawing,
   RayDrawing,
   RectangleDrawing,
+  ShortPositionDrawing,
   StrokeStyle,
+  TextDrawing,
   TrendlineDrawing,
   VerticalLineDrawing,
 } from "./types.js";
@@ -453,6 +462,175 @@ function parseParallelChannel(raw: Record<string, unknown>): ParallelChannelDraw
   });
 }
 
+// ─── Phase 13 Cycle B.2 — position / text / callout / arrow / range parsers ──
+
+function parseDisplayMode(raw: unknown): DisplayMode {
+  return raw === "rr" || raw === "percent" || raw === "price" || raw === "ticks" ? raw : "rr";
+}
+
+function parsePositiveFiniteNumber(raw: unknown): number | null {
+  const n = parseFiniteNumber(raw);
+  return n !== null && n > 0 ? n : null;
+}
+
+function parsePositionLike(
+  raw: Record<string, unknown>,
+  kind: "longPosition" | "shortPosition",
+): LongPositionDrawing | ShortPositionDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parseTripleAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  const endTime = parseFiniteNumber(raw.endTime);
+  if (endTime === null) {
+    return null;
+  }
+  if (endTime <= Number(anchors[0].time)) {
+    return null;
+  }
+  // qty / tickSize / displayMode are tolerantly normalized.
+  const qty = parsePositiveFiniteNumber(raw.qty) ?? 1;
+  const tickSize = parsePositiveFiniteNumber(raw.tickSize);
+  const displayMode = parseDisplayMode(raw.displayMode);
+  const base = {
+    ...c,
+    anchors,
+    endTime: asTime(endTime),
+    qty,
+    displayMode,
+    schemaVersion: 1 as const,
+  };
+  const withTick = tickSize === null ? base : { ...base, tickSize };
+  if (kind === "longPosition") {
+    return Object.freeze({ ...withTick, kind: "longPosition" as const });
+  }
+  return Object.freeze({ ...withTick, kind: "shortPosition" as const });
+}
+
+function parseLongPosition(raw: Record<string, unknown>): LongPositionDrawing | null {
+  const result = parsePositionLike(raw, "longPosition");
+  return result !== null && result.kind === "longPosition" ? result : null;
+}
+
+function parseShortPosition(raw: Record<string, unknown>): ShortPositionDrawing | null {
+  const result = parsePositionLike(raw, "shortPosition");
+  return result !== null && result.kind === "shortPosition" ? result : null;
+}
+
+function parseTextDrawing(raw: Record<string, unknown>): TextDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parseSingleAnchor(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  if (typeof raw.text !== "string") {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "text" as const,
+    anchors,
+    text: raw.text,
+    schemaVersion: 1 as const,
+  });
+}
+
+function parseCallout(raw: Record<string, unknown>): CalloutDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parsePairAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  if (typeof raw.text !== "string") {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "callout" as const,
+    anchors,
+    text: raw.text,
+    schemaVersion: 1 as const,
+  });
+}
+
+function parseArrow(raw: Record<string, unknown>): ArrowDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parsePairAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "arrow" as const,
+    anchors,
+    schemaVersion: 1 as const,
+  });
+}
+
+function parseDateRange(raw: Record<string, unknown>): DateRangeDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parsePairAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "dateRange" as const,
+    anchors,
+    schemaVersion: 1 as const,
+  });
+}
+
+function parsePriceRange(raw: Record<string, unknown>): PriceRangeDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parsePairAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "priceRange" as const,
+    anchors,
+    schemaVersion: 1 as const,
+  });
+}
+
+function parsePriceDateRange(raw: Record<string, unknown>): PriceDateRangeDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parsePairAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "priceDateRange" as const,
+    anchors,
+    schemaVersion: 1 as const,
+  });
+}
+
 const PARSERS: Readonly<Record<DrawingKind, (raw: Record<string, unknown>) => Drawing | null>> = {
   trendline: parseTrendline,
   horizontalLine: parseHorizontal,
@@ -463,6 +641,14 @@ const PARSERS: Readonly<Record<DrawingKind, (raw: Record<string, unknown>) => Dr
   extendedLine: parseExtendedLine,
   horizontalRay: parseHorizontalRay,
   parallelChannel: parseParallelChannel,
+  longPosition: parseLongPosition,
+  shortPosition: parseShortPosition,
+  text: parseTextDrawing,
+  callout: parseCallout,
+  arrow: parseArrow,
+  dateRange: parseDateRange,
+  priceRange: parsePriceRange,
+  priceDateRange: parsePriceDateRange,
 };
 
 const KNOWN_KINDS: ReadonlySet<DrawingKind> = new Set([
@@ -475,6 +661,14 @@ const KNOWN_KINDS: ReadonlySet<DrawingKind> = new Set([
   "extendedLine",
   "horizontalRay",
   "parallelChannel",
+  "longPosition",
+  "shortPosition",
+  "text",
+  "callout",
+  "arrow",
+  "dateRange",
+  "priceRange",
+  "priceDateRange",
 ]);
 
 function isKnownKind(s: string): s is DrawingKind {

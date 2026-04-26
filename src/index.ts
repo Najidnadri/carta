@@ -88,6 +88,20 @@ export { applyMagnet, nearestBarTime } from "./core/drawings/magnet.js";
 export type { MagnetSnapResult } from "./core/drawings/magnet.js";
 export { FibLabelPool } from "./core/drawings/FibLabelPool.js";
 export type { FibLabelSyncContext } from "./core/drawings/FibLabelPool.js";
+export { DrawingTextPool, DEFAULT_TEXT_ATLAS_SEED } from "./core/drawings/DrawingTextPool.js";
+export type { DrawingTextSpec } from "./core/drawings/DrawingTextPool.js";
+export {
+  clampLongPosition,
+  clampShortPosition,
+  computePositionStats,
+  formatPositionLine,
+} from "./core/drawings/positionInvariant.js";
+export type {
+  PositionPrices,
+  PositionStats,
+  PositionStatsInput,
+} from "./core/drawings/positionInvariant.js";
+export { formatDuration } from "./core/time/timeFormat.js";
 export { installHotkeys, RECOMMENDED_HOTKEY_BINDINGS } from "./core/interaction/Hotkeys.js";
 export type { HotkeysChart, InstallHotkeysOptions } from "./core/interaction/Hotkeys.js";
 export { CrosshairController } from "./core/interaction/CrosshairController.js";
@@ -121,7 +135,11 @@ export {
   asPaneId,
 } from "./core/drawings/types.js";
 export type {
+  ArrowDrawing,
   BeginCreateOptions,
+  CalloutDrawing,
+  DateRangeDrawing,
+  DisplayMode,
   Drawing,
   DrawingAnchor,
   DrawingContextMenuPayload,
@@ -146,11 +164,16 @@ export type {
   HorizontalRayDirection,
   HorizontalRayDrawing,
   JsonValue,
+  LongPositionDrawing,
   PaneId,
   ParallelChannelDrawing,
+  PriceDateRangeDrawing,
+  PriceRangeDrawing,
   RayDrawing,
   RectangleDrawing,
+  ShortPositionDrawing,
   StrokeStyle,
+  TextDrawing,
   TrendlineDrawing,
   VerticalLineDrawing,
 } from "./core/drawings/types.js";

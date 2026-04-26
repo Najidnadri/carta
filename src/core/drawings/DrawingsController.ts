@@ -35,6 +35,7 @@ import {
   DEFAULT_FIB_LEVELS,
   MAIN_PANE_ID,
   type BeginCreateOptions,
+  type DisplayMode,
   type Drawing,
   type DrawingAnchor,
   type DrawingId,
@@ -44,6 +45,19 @@ import {
   type DrawingsStorageAdapter,
   type DrawingStyle,
   type FibLevel,
+} from "./types.js";
+import {
+  clampLongPosition,
+  clampShortPosition,
+  computePositionStats,
+  formatPositionLine,
+  type PositionPrices,
+} from "./positionInvariant.js";
+import { DrawingTextPool, type DrawingTextSpec } from "./DrawingTextPool.js";
+import { formatDuration } from "../time/timeFormat.js";
+import type {
+  LongPositionDrawing,
+  ShortPositionDrawing,
 } from "./types.js";
 import { applyMagnet } from "./magnet.js";
 import { FibLabelPool } from "./FibLabelPool.js";
@@ -58,6 +72,7 @@ import {
   handleSpecsFor,
   redrawDrawing,
   syncHandleGraphics,
+  type HandleKey,
 } from "./render.js";
 import { parseSnapshot } from "./parsers.js";
 import { StorageBinding } from "./storage.js";
@@ -68,13 +83,15 @@ const DRAG_THRESHOLD_PX = 6;
 interface DraggingState {
   readonly id: DrawingId;
   readonly mode: "handle" | "body";
-  readonly handleKey: number | "corner-tr" | "corner-bl" | null;
+  readonly handleKey: HandleKey | null;
   readonly pointerId: number;
   readonly startAnchors: readonly DrawingAnchor[];
   readonly startGlobalX: number;
   readonly startGlobalY: number;
   readonly startTime: number;
   readonly startPrice: number;
+  /** Position-only: snapshot of `endTime` at drag start so the time-end puller can be diffed. */
+  readonly startEndTime: number | null;
   shiftConstrain: boolean;
   committed: boolean;
 }
@@ -177,7 +194,9 @@ export class DrawingsController {
 
   private selectedId: DrawingId | null = null;
   private hoveredId: DrawingId | null = null;
-  private hoveredHandle: number | "corner-tr" | "corner-bl" | null = null;
+  private hoveredHandle: HandleKey | null = null;
+  /** Phase 13 Cycle B.2 — generic per-drawing text pool for text/callout/range/position readouts. */
+  private readonly textPools = new Map<DrawingId, DrawingTextPool>();
   private creating: CreatingState | null = null;
   private dragging: DraggingState | null = null;
   private bulkLoadDepth = 0;
@@ -272,6 +291,7 @@ export class DrawingsController {
     // Redraw drawings into pooled graphics + fib label pool sync.
     const seen = new Set<DrawingId>();
     const formatter = this.deps.priceFormatter?.() ?? ((v: number): string => v.toFixed(2));
+    const intervalDuration = Number(ctx.timeScale.intervalDuration);
     for (const entry of projected) {
       const g = this.ensureGraphicsFor(entry.drawing.id);
       redrawDrawing(g, entry.drawing, entry.geom, ctx.theme, ctx.dpr);
@@ -291,6 +311,16 @@ export class DrawingsController {
           pool.hideAll();
         }
       }
+      // Phase 13 Cycle B.2 — generic text pool sync for kinds with readouts.
+      const textSpecs = computeTextSpecs(entry.drawing, entry.geom, ctx, formatter, intervalDuration);
+      if (textSpecs !== null) {
+        const pool = this.ensureTextPool(entry.drawing.id);
+        if (entry.drawing.visible) {
+          pool.sync(textSpecs, ctx.theme);
+        } else {
+          pool.hideAll();
+        }
+      }
     }
     // Hide graphics whose drawings vanished.
     for (const [id, g] of this.graphicsByDrawing) {
@@ -299,6 +329,11 @@ export class DrawingsController {
       }
     }
     for (const [id, pool] of this.fibLabelPools) {
+      if (!seen.has(id)) {
+        pool.hideAll();
+      }
+    }
+    for (const [id, pool] of this.textPools) {
       if (!seen.has(id)) {
         pool.hideAll();
       }
@@ -345,6 +380,10 @@ export class DrawingsController {
       pool.destroy();
     }
     this.fibLabelPools.clear();
+    for (const pool of this.textPools.values()) {
+      pool.destroy();
+    }
+    this.textPools.clear();
     this.storage.destroy();
     this.drawings.clear();
     this.selectedId = null;
@@ -562,6 +601,111 @@ export class DrawingsController {
           anchors: Object.freeze([a[0], a[1], a[2]] as const),
         });
       }
+      case "longPosition":
+      case "shortPosition": {
+        // Two clicks: entry, then far-right (defines endTime). SL/TP default
+        // to ±1% of entry per side; user adjusts via handles after create.
+        if (a[0] === undefined || a[1] === undefined) {
+          return null;
+        }
+        const entryTime = a[0].time;
+        const entryPrice = Number(a[0].price);
+        const endTime = creating.options.endTime !== undefined
+          ? asTime(creating.options.endTime)
+          : a[1].time;
+        const endTimeNum = Number(endTime);
+        const entryTimeNum = Number(entryTime);
+        if (!Number.isFinite(endTimeNum) || endTimeNum <= entryTimeNum) {
+          return null;
+        }
+        const isLong = creating.kind === "longPosition";
+        const slPrice = isLong ? entryPrice * 0.99 : entryPrice * 1.01;
+        const tpPrice = isLong ? entryPrice * 1.02 : entryPrice * 0.98;
+        const entry = a[0];
+        const sl: DrawingAnchor = Object.freeze({ time: entryTime, price: asPrice(slPrice), paneId: entry.paneId });
+        const tp: DrawingAnchor = Object.freeze({ time: entryTime, price: asPrice(tpPrice), paneId: entry.paneId });
+        const qty = creating.options.qty !== undefined && Number.isFinite(creating.options.qty) && creating.options.qty > 0
+          ? creating.options.qty
+          : 1;
+        const displayMode: DisplayMode = creating.options.displayMode ?? "rr";
+        const tickSize = creating.options.tickSize !== undefined && Number.isFinite(creating.options.tickSize) && creating.options.tickSize > 0
+          ? creating.options.tickSize
+          : undefined;
+        const baseFields = {
+          ...baseCommon,
+          anchors: Object.freeze([entry, sl, tp] as const),
+          endTime,
+          qty,
+          displayMode,
+        };
+        const withTick = tickSize === undefined ? baseFields : { ...baseFields, tickSize };
+        if (isLong) {
+          return Object.freeze({ ...withTick, kind: "longPosition" as const });
+        }
+        return Object.freeze({ ...withTick, kind: "shortPosition" as const });
+      }
+      case "text": {
+        if (a[0] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "text" as const,
+          anchors: Object.freeze([a[0]] as const),
+          text: creating.options.text ?? "Note",
+        });
+      }
+      case "callout": {
+        if (a[0] === undefined || a[1] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "callout" as const,
+          anchors: Object.freeze([a[0], a[1]] as const),
+          text: creating.options.text ?? "Callout",
+        });
+      }
+      case "arrow": {
+        if (a[0] === undefined || a[1] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "arrow" as const,
+          anchors: Object.freeze([a[0], a[1]] as const),
+        });
+      }
+      case "dateRange": {
+        if (a[0] === undefined || a[1] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "dateRange" as const,
+          anchors: Object.freeze([a[0], a[1]] as const),
+        });
+      }
+      case "priceRange": {
+        if (a[0] === undefined || a[1] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "priceRange" as const,
+          anchors: Object.freeze([a[0], a[1]] as const),
+        });
+      }
+      case "priceDateRange": {
+        if (a[0] === undefined || a[1] === undefined) {
+          return null;
+        }
+        return Object.freeze({
+          ...baseCommon,
+          kind: "priceDateRange" as const,
+          anchors: Object.freeze([a[0], a[1]] as const),
+        });
+      }
     }
   }
 
@@ -620,6 +764,11 @@ export class DrawingsController {
     if (pool !== undefined) {
       pool.destroy();
       this.fibLabelPools.delete(id);
+    }
+    const tpool = this.textPools.get(id);
+    if (tpool !== undefined) {
+      tpool.destroy();
+      this.textPools.delete(id);
     }
     if (this.selectedId === id) {
       this.setSelected(null);
@@ -724,7 +873,7 @@ export class DrawingsController {
   private beginDrag(
     drawing: Drawing,
     mode: "handle" | "body",
-    handleKey: number | "corner-tr" | "corner-bl" | null,
+    handleKey: HandleKey | null,
     e: FederatedPointerEvent,
     localX: number,
     localY: number,
@@ -737,6 +886,10 @@ export class DrawingsController {
       return;
     }
     const { time, price } = unprojectPoint(ctx, localX, localY);
+    const startEndTime =
+      drawing.kind === "longPosition" || drawing.kind === "shortPosition"
+        ? Number(drawing.endTime)
+        : null;
     this.dragging = {
       id: drawing.id,
       mode,
@@ -747,6 +900,7 @@ export class DrawingsController {
       startGlobalY: e.global.y,
       startTime: time,
       startPrice: price,
+      startEndTime,
       shiftConstrain: e.shiftKey,
       committed: false,
     };
@@ -804,6 +958,21 @@ export class DrawingsController {
     const orig = this.drawings.get(drag.id);
     if (orig === undefined) {
       this.dragging = null;
+      return;
+    }
+    // Phase 13 Cycle B.2 — position tools have a 4-handle topology
+    // (entry / sl / tp / time-end) plus the SL<entry<TP invariant. Route
+    // through a dedicated path so we can keep the invariant + endTime sync.
+    if (orig.kind === "longPosition" || orig.kind === "shortPosition") {
+      const next = this.applyPositionDrag(orig, drag, liveTime, livePrice);
+      if (next === null) {
+        return;
+      }
+      this.drawings.set(drag.id, next);
+      if (this.bulkLoadDepth === 0) {
+        this.deps.eventBus.emit("drawings:updated", { drawing: next });
+      }
+      this.deps.invalidate();
       return;
     }
     const nextAnchors =
@@ -910,6 +1079,116 @@ export class DrawingsController {
       price: asPrice(Number(a.price) + dpUse),
       paneId: a.paneId,
     }));
+  }
+
+  /**
+   * Phase 13 Cycle B.2 — position-tool drag. Handles entry / sl / tp / time-end
+   * keys + body translate; enforces the SL<entry<TP invariant per side.
+   */
+  private applyPositionDrag(
+    orig: LongPositionDrawing | ShortPositionDrawing,
+    drag: DraggingState,
+    liveTime: number,
+    livePrice: number,
+  ): LongPositionDrawing | ShortPositionDrawing | null {
+    const startEntry = drag.startAnchors[0];
+    const startSl = drag.startAnchors[1];
+    const startTp = drag.startAnchors[2];
+    if (startEntry === undefined || startSl === undefined || startTp === undefined) {
+      return null;
+    }
+    const startEndTime = drag.startEndTime ?? Number(orig.endTime);
+    const isLong = orig.kind === "longPosition";
+    let entryTime = Number(startEntry.time);
+    let endTime = startEndTime;
+    let prices: PositionPrices = {
+      entry: Number(startEntry.price),
+      sl: Number(startSl.price),
+      tp: Number(startTp.price),
+    };
+
+    if (drag.mode === "body") {
+      const dt = liveTime - drag.startTime;
+      const dp = livePrice - drag.startPrice;
+      let dtUse = dt;
+      let dpUse = dp;
+      if (drag.shiftConstrain) {
+        const interval = Math.abs(dt);
+        const priceMag = Math.abs(dp);
+        if (interval >= priceMag) {
+          dpUse = 0;
+        } else {
+          dtUse = 0;
+        }
+      }
+      entryTime += dtUse;
+      endTime += dtUse;
+      prices = {
+        entry: prices.entry + dpUse,
+        sl: prices.sl + dpUse,
+        tp: prices.tp + dpUse,
+      };
+    } else {
+      // Handle drag.
+      const key = drag.handleKey;
+      if (key === 0) {
+        // Entry handle: drives entry.time AND entry.price.
+        entryTime = liveTime;
+        prices = { ...prices, entry: livePrice };
+      } else if (key === 1) {
+        // SL handle: y only.
+        prices = { ...prices, sl: livePrice };
+      } else if (key === 2) {
+        // TP handle: y only.
+        prices = { ...prices, tp: livePrice };
+      } else if (key === "time-end") {
+        endTime = liveTime;
+      } else {
+        return null;
+      }
+    }
+
+    // Enforce invariant.
+    const pinned: keyof PositionPrices | undefined =
+      drag.mode === "handle"
+        ? drag.handleKey === 0
+          ? "entry"
+          : drag.handleKey === 1
+            ? "sl"
+            : drag.handleKey === 2
+              ? "tp"
+              : undefined
+        : undefined;
+    const clamped = isLong ? clampLongPosition(prices, pinned) : clampShortPosition(prices, pinned);
+
+    // Guard endTime > entryTime.
+    if (!Number.isFinite(endTime) || endTime <= entryTime) {
+      // Don't break the drawing — clamp endTime to one bar after entry.
+      const interval = Number(this.deps.currentTimeScale().intervalDuration);
+      endTime = entryTime + (Number.isFinite(interval) && interval > 0 ? interval : 1);
+    }
+
+    const paneId = startEntry.paneId;
+    const entryAnchor: DrawingAnchor = Object.freeze({
+      time: asTime(entryTime),
+      price: asPrice(clamped.entry),
+      paneId,
+    });
+    const slAnchor: DrawingAnchor = Object.freeze({
+      time: asTime(entryTime),
+      price: asPrice(clamped.sl),
+      paneId,
+    });
+    const tpAnchor: DrawingAnchor = Object.freeze({
+      time: asTime(entryTime),
+      price: asPrice(clamped.tp),
+      paneId,
+    });
+    return Object.freeze({
+      ...orig,
+      anchors: Object.freeze([entryAnchor, slAnchor, tpAnchor] as const),
+      endTime: asTime(endTime),
+    });
   }
 
   private readonly onPointerUp = (e: FederatedPointerEvent): void => {
@@ -1090,6 +1369,15 @@ export class DrawingsController {
     return pool;
   }
 
+  private ensureTextPool(id: DrawingId): DrawingTextPool {
+    let pool = this.textPools.get(id);
+    if (pool === undefined) {
+      pool = new DrawingTextPool(this.handlesContainer);
+      this.textPools.set(id, pool);
+    }
+    return pool;
+  }
+
   private maybeWarnSoftLimit(): void {
     if (!this.warnedSoftLimit && this.drawings.size >= SOFT_DRAWING_LIMIT) {
       this.warnedSoftLimit = true;
@@ -1211,10 +1499,18 @@ function requiredAnchorsFor(kind: DrawingKind): number {
     case "fibRetracement":
     case "ray":
     case "extendedLine":
+    case "longPosition":
+    case "shortPosition":
+    case "callout":
+    case "arrow":
+    case "dateRange":
+    case "priceRange":
+    case "priceDateRange":
       return 2;
     case "horizontalLine":
     case "verticalLine":
     case "horizontalRay":
+    case "text":
       return 1;
     case "parallelChannel":
       return 3;
@@ -1228,6 +1524,11 @@ function withAnchors(orig: Drawing, anchors: readonly DrawingAnchor[]): Drawing 
     case "fibRetracement":
     case "ray":
     case "extendedLine":
+    case "callout":
+    case "arrow":
+    case "dateRange":
+    case "priceRange":
+    case "priceDateRange":
       if (anchors[0] === undefined || anchors[1] === undefined) {
         return orig;
       }
@@ -1235,11 +1536,21 @@ function withAnchors(orig: Drawing, anchors: readonly DrawingAnchor[]): Drawing 
     case "horizontalLine":
     case "verticalLine":
     case "horizontalRay":
+    case "text":
       if (anchors[0] === undefined) {
         return orig;
       }
       return Object.freeze({ ...orig, anchors: Object.freeze([anchors[0]] as const) });
     case "parallelChannel":
+      if (anchors[0] === undefined || anchors[1] === undefined || anchors[2] === undefined) {
+        return orig;
+      }
+      return Object.freeze({
+        ...orig,
+        anchors: Object.freeze([anchors[0], anchors[1], anchors[2]] as const),
+      });
+    case "longPosition":
+    case "shortPosition":
       if (anchors[0] === undefined || anchors[1] === undefined || anchors[2] === undefined) {
         return orig;
       }
@@ -1257,6 +1568,15 @@ function translateDrawing(d: Drawing, dt: number, dp: number): Drawing {
       price: asPrice(Number(a.price) + dp),
       paneId: a.paneId,
     });
+  // Position-tool: also shift `endTime` by dt so the band tracks the body.
+  if (d.kind === "longPosition" || d.kind === "shortPosition") {
+    const next = Object.freeze({
+      ...d,
+      anchors: Object.freeze([xform(d.anchors[0]), xform(d.anchors[1]), xform(d.anchors[2])] as const),
+      endTime: asTime(Number(d.endTime) + dt),
+    });
+    return next;
+  }
   return withAnchors(d, d.anchors.map(xform));
 }
 
@@ -1273,6 +1593,11 @@ function cloneDrawingWithOffset(d: Drawing, intervalMs: number, newId: DrawingId
     case "fibRetracement":
     case "ray":
     case "extendedLine":
+    case "callout":
+    case "arrow":
+    case "dateRange":
+    case "priceRange":
+    case "priceDateRange":
       return Object.freeze({
         ...d,
         id: newId,
@@ -1281,6 +1606,7 @@ function cloneDrawingWithOffset(d: Drawing, intervalMs: number, newId: DrawingId
     case "horizontalLine":
     case "verticalLine":
     case "horizontalRay":
+    case "text":
       return Object.freeze({
         ...d,
         id: newId,
@@ -1296,11 +1622,185 @@ function cloneDrawingWithOffset(d: Drawing, intervalMs: number, newId: DrawingId
           shift(d.anchors[2]),
         ] as const),
       });
+    case "longPosition":
+    case "shortPosition":
+      return Object.freeze({
+        ...d,
+        id: newId,
+        anchors: Object.freeze([
+          shift(d.anchors[0]),
+          shift(d.anchors[1]),
+          shift(d.anchors[2]),
+        ] as const),
+        endTime: asTime(Number(d.endTime) + offset),
+      });
   }
 }
 
 function cloneForSnapshot(d: Drawing): Drawing {
   return d;
+}
+
+/**
+ * Phase 13 Cycle B.2 — compute the per-drawing `DrawingTextSpec[]` for kinds
+ * that carry pooled BitmapText readouts. Returns `null` for kinds that don't
+ * have any text. The placement is plot-local pixels; pool's parent container
+ * is positioned at `plotRect.(x,y)` already so specs need no further offset.
+ */
+function computeTextSpecs(
+  drawing: Drawing,
+  geom: ScreenGeom,
+  ctx: DrawingsRenderContext,
+  formatter: (v: number) => string,
+  intervalDuration: number,
+): readonly DrawingTextSpec[] | null {
+  const theme = ctx.theme;
+  const plotW = ctx.plotRect.w;
+  switch (drawing.kind) {
+    case "text": {
+      if (geom.kind !== "text") {
+        return null;
+      }
+      const specs: DrawingTextSpec[] = [];
+      if (drawing.text.length > 0) {
+        const x = clampLabelX(geom.labelX + 6, plotW, drawing.text.length * 6 + 8);
+        specs.push(textSpec(drawing.text, x, geom.labelY - 8, theme));
+      }
+      return specs;
+    }
+    case "callout": {
+      if (geom.kind !== "callout") {
+        return null;
+      }
+      if (drawing.text.length === 0) {
+        return [];
+      }
+      const x = geom.labelX + 8;
+      const y = geom.labelY + 6;
+      return [textSpec(drawing.text, x, y, theme)];
+    }
+    case "longPosition":
+    case "shortPosition": {
+      if (geom.kind !== "longPosition" && geom.kind !== "shortPosition") {
+        return null;
+      }
+      const stats = computePositionStats({
+        entry: Number(drawing.anchors[0].price),
+        sl: Number(drawing.anchors[1].price),
+        tp: Number(drawing.anchors[2].price),
+        qty: drawing.qty,
+        side: drawing.kind === "longPosition" ? "long" : "short",
+        displayMode: drawing.displayMode,
+        ...(drawing.tickSize !== undefined ? { tickSize: drawing.tickSize } : {}),
+      });
+      const rewardLabel = formatPositionLine(stats, drawing.displayMode, "reward", formatter);
+      const riskLabel = formatPositionLine(stats, drawing.displayMode, "risk", formatter);
+      const xRight = geom.endX;
+      const labelOffset = 6;
+      const rewardX = clampLabelX(xRight + labelOffset, plotW, rewardLabel.length * 6 + 8);
+      const riskX = clampLabelX(xRight + labelOffset, plotW, riskLabel.length * 6 + 8);
+      const rewardY = (geom.rewardRect.yTop + geom.rewardRect.yBottom) / 2 - 8;
+      const riskY = (geom.riskRect.yTop + geom.riskRect.yBottom) / 2 - 8;
+      const specs: DrawingTextSpec[] = [];
+      specs.push({
+        text: rewardLabel,
+        x: rewardX,
+        y: rewardY,
+        bgColor: theme.up,
+        textColor: theme.crosshairTagText,
+        bgAlpha: 0.85,
+      });
+      specs.push({
+        text: riskLabel,
+        x: riskX,
+        y: riskY,
+        bgColor: theme.down,
+        textColor: theme.crosshairTagText,
+        bgAlpha: 0.85,
+      });
+      return specs;
+    }
+    case "dateRange": {
+      if (geom.kind !== "dateRange") {
+        return null;
+      }
+      const a = drawing.anchors;
+      const dt = Number(a[1].time) - Number(a[0].time);
+      const bars =
+        intervalDuration > 0 ? Math.round(dt / intervalDuration) : 0;
+      const text = `${String(bars)} ${Math.abs(bars) === 1 ? "bar" : "bars"} · ${formatDuration(dt)}`;
+      const x = clampLabelX(geom.badgeAnchor.x - (text.length * 6) / 2, plotW, text.length * 6 + 8);
+      return [textSpec(text, x, geom.badgeAnchor.y, theme)];
+    }
+    case "priceRange": {
+      if (geom.kind !== "priceRange") {
+        return null;
+      }
+      const a = drawing.anchors;
+      const p0 = Number(a[0].price);
+      const p1 = Number(a[1].price);
+      const delta = p1 - p0;
+      const pctText = p0 === 0 ? "—" : `${(delta >= 0 ? "+" : "")}${((delta / p0) * 100).toFixed(2)}%`;
+      const sign = delta >= 0 ? "+" : "-";
+      const text = `${sign}${formatter(Math.abs(delta))} (${pctText})`;
+      const x = clampLabelX(geom.badgeAnchor.x - (text.length * 6) - 8, plotW, text.length * 6 + 8);
+      return [textSpec(text, x, geom.badgeAnchor.y - 8, theme)];
+    }
+    case "priceDateRange": {
+      if (geom.kind !== "priceDateRange") {
+        return null;
+      }
+      const a = drawing.anchors;
+      const p0 = Number(a[0].price);
+      const p1 = Number(a[1].price);
+      const dt = Number(a[1].time) - Number(a[0].time);
+      const bars = intervalDuration > 0 ? Math.round(dt / intervalDuration) : 0;
+      const delta = p1 - p0;
+      const pctText = p0 === 0 ? "—" : `${(delta >= 0 ? "+" : "")}${((delta / p0) * 100).toFixed(2)}%`;
+      const sign = delta >= 0 ? "+" : "-";
+      const line1 = `${String(bars)} ${Math.abs(bars) === 1 ? "bar" : "bars"} · ${formatDuration(dt)}`;
+      const line2 = `${sign}${formatter(Math.abs(delta))} (${pctText})`;
+      const text = `${line1}\n${line2}`;
+      const widest = Math.max(line1.length, line2.length);
+      const x = clampLabelX(geom.badgeAnchor.x - (widest * 6) / 2, plotW, widest * 6 + 8);
+      return [textSpec(text, x, geom.badgeAnchor.y + 4, theme)];
+    }
+    case "trendline":
+    case "horizontalLine":
+    case "verticalLine":
+    case "rectangle":
+    case "fibRetracement":
+    case "ray":
+    case "extendedLine":
+    case "horizontalRay":
+    case "parallelChannel":
+    case "arrow":
+      // No text readouts for these kinds (fib has its own pool).
+      return null;
+  }
+}
+
+function textSpec(text: string, x: number, y: number, theme: Theme): DrawingTextSpec {
+  return {
+    text,
+    x,
+    y,
+    bgColor: theme.crosshairTagBg,
+    textColor: theme.crosshairTagText,
+  };
+}
+
+function clampLabelX(rawX: number, plotW: number, approxW: number): number {
+  if (!Number.isFinite(plotW) || plotW <= 0) {
+    return rawX;
+  }
+  if (rawX + approxW > plotW) {
+    return Math.max(0, plotW - approxW);
+  }
+  if (rawX < 0) {
+    return 0;
+  }
+  return rawX;
 }
 
 /**

@@ -1119,6 +1119,11 @@ async function main(): Promise<void> {
       ohlcChannel: DEMO_OHLC_CHANNEL,
       volumeChannel: DEMO_VOLUME_CHANNEL,
       intervalMs: 1000,
+      // Phase 13 Cycle B.2 fix-up F-3 — refresh the P&L panel on every tick
+      // so `lastClose` / `uPnL` track the freshest synthesized price.
+      onTick: () => {
+        document.dispatchEvent(new CustomEvent("carta:demo-tick"));
+      },
     });
   };
 
@@ -1172,7 +1177,7 @@ async function main(): Promise<void> {
     });
   }
 
-  // ── Phase 13 — drawings toolbar (9 tools + magnet + clear / save / load) ─────
+  // ── Phase 13 — drawings toolbar (16 tools + magnet + clear / save / load) ────
   const DRAWING_KINDS = [
     "trendline",
     "horizontalLine",
@@ -1183,6 +1188,15 @@ async function main(): Promise<void> {
     "extendedLine",
     "horizontalRay",
     "parallelChannel",
+    // Phase 13 Cycle B.2
+    "longPosition",
+    "shortPosition",
+    "text",
+    "callout",
+    "arrow",
+    "dateRange",
+    "priceRange",
+    "priceDateRange",
   ] as const;
   type DrawingKindName = typeof DRAWING_KINDS[number];
 
@@ -1214,6 +1228,10 @@ async function main(): Promise<void> {
   document.getElementById("drawings-clear")?.addEventListener("click", () => {
     chart?.drawings.clear();
     updateDrawingToolButtons();
+    // Phase 13 Cycle B.2 fix-up — P&L panel reset hooks are wired below
+    // (after `trackedPositionId` is in scope); we dispatch a custom event
+    // here that the panel listens for once it's wired.
+    document.dispatchEvent(new CustomEvent("carta:demo-clear"));
   });
 
   // ── Phase 13 Cycle B1 — magnet toggle (Off → Weak → Strong → Off) ──
@@ -1272,6 +1290,153 @@ async function main(): Promise<void> {
       // Ignore broken JSON; loadSnapshot itself never throws on bad shape.
     }
     updateDrawingToolButtons();
+  });
+
+  // ── Phase 13 Cycle B.2 — position-tool P&L sidebar ─────────────────
+  const pnlEmpty = document.getElementById("position-pnl-empty");
+  const pnlDetail = document.getElementById("position-pnl-detail");
+  const pnlSide = document.getElementById("pnl-side");
+  const pnlEntry = document.getElementById("pnl-entry");
+  const pnlSl = document.getElementById("pnl-sl");
+  const pnlTp = document.getElementById("pnl-tp");
+  const pnlRr = document.getElementById("pnl-rr");
+  const pnlQty = document.getElementById("pnl-qty");
+  const pnlLast = document.getElementById("pnl-last");
+  const pnlUpnl = document.getElementById("pnl-upnl");
+  let trackedPositionId: string | null = null;
+
+  const updatePnlPanel = (): void => {
+    if (chart === null) {
+      return;
+    }
+    const drawings = chart.drawings.list();
+    let target: unknown = null;
+    if (trackedPositionId !== null) {
+      target = chart.drawings.getById(trackedPositionId);
+    }
+    if (target === null) {
+      // Pick the most recently selected position; fallback = last in list.
+      const selectedId = chart.drawings.getSelectedId();
+      if (selectedId !== null) {
+        const sel = chart.drawings.getById(selectedId);
+        if (sel !== null && (sel.kind === "longPosition" || sel.kind === "shortPosition")) {
+          target = sel;
+          trackedPositionId = String(selectedId);
+        }
+      }
+      if (target === null) {
+        for (let i = drawings.length - 1; i >= 0; i--) {
+          const d = drawings[i];
+          if (d !== undefined && (d.kind === "longPosition" || d.kind === "shortPosition")) {
+            target = d;
+            trackedPositionId = String(d.id);
+            break;
+          }
+        }
+      }
+    }
+    if (
+      target === null ||
+      typeof target !== "object" ||
+      !("kind" in target) ||
+      ((target as { kind: string }).kind !== "longPosition" &&
+        (target as { kind: string }).kind !== "shortPosition")
+    ) {
+      pnlEmpty?.removeAttribute("hidden");
+      pnlDetail?.setAttribute("hidden", "");
+      return;
+    }
+    const pos = target as {
+      kind: "longPosition" | "shortPosition";
+      anchors: readonly { time: number; price: number }[];
+      qty: number;
+    };
+    const entry = Number(pos.anchors[0]?.price);
+    const sl = Number(pos.anchors[1]?.price);
+    const tp = Number(pos.anchors[2]?.price);
+    const isLong = pos.kind === "longPosition";
+    const reward = isLong ? tp - entry : entry - tp;
+    const risk = isLong ? entry - sl : sl - entry;
+    const rr = risk === 0 ? "∞" : (reward / risk).toFixed(2);
+    // Last close from the chart's data store — covers both the synthesized
+    // bars *and* live ticks that `LiveTickDriver.supplyTick(...)` has merged
+    // in (those ticks land at `Date.now()`, well past `winEnd`). The query
+    // range spans the entire cached span by reading a generous window.
+    const ivlNum = Number(chart.getInterval());
+    const winInfo = chart.getWindow();
+    const winEnd = Number(winInfo.endTime);
+    const lookEnd = Math.max(winEnd, Date.now()) + ivlNum;
+    const lookStart = winEnd - ivlNum * 50;
+    const cachedBars = chart.recordsInRange(DEMO_OHLC_CHANNEL, ivlNum, lookStart, lookEnd);
+    const lastCachedBar =
+      cachedBars.length > 0 ? cachedBars[cachedBars.length - 1] : undefined;
+    const lastClose =
+      lastCachedBar !== undefined && "close" in lastCachedBar
+        ? Number(lastCachedBar.close)
+        : entry;
+    const upnl = isLong ? (lastClose - entry) * pos.qty : (entry - lastClose) * pos.qty;
+    pnlEmpty?.setAttribute("hidden", "");
+    pnlDetail?.removeAttribute("hidden");
+    if (pnlSide !== null) {
+      pnlSide.textContent = isLong ? "long" : "short";
+    }
+    if (pnlEntry !== null) {
+      pnlEntry.textContent = entry.toFixed(2);
+    }
+    if (pnlSl !== null) {
+      pnlSl.textContent = sl.toFixed(2);
+    }
+    if (pnlTp !== null) {
+      pnlTp.textContent = tp.toFixed(2);
+    }
+    if (pnlRr !== null) {
+      pnlRr.textContent = rr;
+    }
+    if (pnlQty !== null) {
+      pnlQty.textContent = pos.qty.toFixed(2);
+    }
+    if (pnlLast !== null) {
+      pnlLast.textContent = lastClose.toFixed(2);
+    }
+    if (pnlUpnl !== null) {
+      pnlUpnl.textContent = `${upnl >= 0 ? "+" : "-"}${Math.abs(upnl).toFixed(2)}`;
+    }
+  };
+
+  // Initial paint + on every drawings event.
+  updatePnlPanel();
+  chart.on("drawings:created", () => {
+    updatePnlPanel();
+  });
+  chart.on("drawings:updated", () => {
+    updatePnlPanel();
+  });
+  // Cycle B.2 fix-up F-1 — bulk-clear suppresses `drawings:removed`, so the
+  // demo's clear button dispatches a CustomEvent that we listen for here to
+  // blank the panel.
+  document.addEventListener("carta:demo-clear", () => {
+    trackedPositionId = null;
+    updatePnlPanel();
+  });
+  // Cycle B.2 fix-up F-3 — repaint the panel on every live tick so
+  // `lastClose` / `uPnL` track the freshest synthesized price.
+  document.addEventListener("carta:demo-tick", () => {
+    updatePnlPanel();
+  });
+  chart.on("drawings:removed", (payload) => {
+    if (trackedPositionId !== null && String(payload.id) === trackedPositionId) {
+      trackedPositionId = null;
+    }
+    updatePnlPanel();
+  });
+  chart.on("drawings:selected", (payload) => {
+    if (
+      payload.drawing !== null &&
+      (payload.drawing.kind === "longPosition" || payload.drawing.kind === "shortPosition")
+    ) {
+      trackedPositionId = String(payload.drawing.id);
+    }
+    updatePnlPanel();
   });
 
   // Test hooks (dev only) — used by Playwright for adversarial scenarios.

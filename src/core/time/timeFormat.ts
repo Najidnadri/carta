@@ -164,6 +164,45 @@ export function formatAxisLabel(
 }
 
 /**
+ * Phase 13 Cycle B.2 — adaptive duration string for date-range / position
+ * "time elapsed" readouts. Adaptive precision: days-and-hours for ≥ 1 day,
+ * hours-and-minutes for ≥ 1 hour, etc. Single-unit output for the smallest
+ * tier (e.g. `"42s"`, not `"0m 42s"`). Negative durations are `-`-prefixed.
+ * NaN / non-finite returns `"—"`.
+ */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms)) {
+    return "—";
+  }
+  if (ms === 0) {
+    return "0s";
+  }
+  const sign = ms < 0 ? "-" : "";
+  const abs = Math.abs(ms);
+  if (abs >= DAY) {
+    const d = Math.floor(abs / DAY);
+    const h = Math.floor((abs % DAY) / HOUR);
+    return h === 0 ? `${sign}${String(d)}d` : `${sign}${String(d)}d ${String(h)}h`;
+  }
+  if (abs >= HOUR) {
+    const h = Math.floor(abs / HOUR);
+    const m = Math.floor((abs % HOUR) / MIN);
+    return m === 0 ? `${sign}${String(h)}h` : `${sign}${String(h)}h ${String(m)}m`;
+  }
+  if (abs >= MIN) {
+    const m = Math.floor(abs / MIN);
+    const s = Math.floor((abs % MIN) / SEC);
+    return s === 0 ? `${sign}${String(m)}m` : `${sign}${String(m)}m ${String(s)}s`;
+  }
+  const s = Math.floor(abs / SEC);
+  if (s === 0) {
+    // Sub-second fall-through — show ms.
+    return `${sign}${String(abs)}ms`;
+  }
+  return `${sign}${String(s)}s`;
+}
+
+/**
  * Test hook — lets unit tests inspect LRU state and reset caches.
  */
 export const __internals__ = {

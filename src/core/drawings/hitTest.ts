@@ -6,14 +6,21 @@
 
 import type { Drawing } from "./types.js";
 import type {
+  ArrowGeom,
+  CalloutGeom,
+  DateRangeGeom,
   ExtendedLineGeom,
   FibRetracementGeom,
   HorizontalLineGeom,
   HorizontalRayGeom,
   ParallelChannelGeom,
+  PositionGeom,
+  PriceDateRangeGeom,
+  PriceRangeGeom,
   RayGeom,
   RectangleGeom,
   ScreenGeom,
+  TextGeom,
   TrendlineGeom,
   VerticalLineGeom,
 } from "./project.js";
@@ -67,10 +74,13 @@ export function defaultTolerancesFor(pointerType: PointerKind, dpr: number): Hit
   });
 }
 
+/** Phase 13 Cycle B.2 — handle key superset. `'time-end'` is the position-tool right-edge puller. */
+export type HandleKey = number | "corner-tr" | "corner-bl" | "time-end";
+
 export interface HitResult {
   readonly drawing: Drawing;
-  /** Anchor index when the hit is on a handle. `'corner'` for derived corners on rectangle. */
-  readonly handle?: number | "corner-tr" | "corner-bl";
+  /** Anchor index when the hit is on a handle. `'corner-*'` for derived corners on rectangle; `'time-end'` for the position-tool right-edge puller. */
+  readonly handle?: HandleKey;
   readonly part: "handle" | "border" | "body" | "line";
 }
 
@@ -121,7 +131,7 @@ function hitHandle(
   px: number,
   py: number,
   tol: number,
-): number | "corner-tr" | "corner-bl" | null {
+): HandleKey | null {
   switch (geom.kind) {
     case "trendline": {
       if (within(px, py, geom.anchors[0].x, geom.anchors[0].y, tol)) {
@@ -185,6 +195,56 @@ function hitHandle(
       }
       return null;
     }
+    case "longPosition":
+    case "shortPosition": {
+      if (within(px, py, geom.entry.x, geom.entry.y, tol)) {
+        return 0;
+      }
+      if (within(px, py, geom.endX, geom.sl.y, tol)) {
+        return 1;
+      }
+      if (within(px, py, geom.endX, geom.tp.y, tol)) {
+        return 2;
+      }
+      const timeEndY = (geom.sl.y + geom.tp.y) / 2;
+      if (within(px, py, geom.endX, timeEndY, tol)) {
+        return "time-end";
+      }
+      return null;
+    }
+    case "text": {
+      const a = geom.anchor;
+      return within(px, py, a.x, a.y, tol) ? 0 : null;
+    }
+    case "callout": {
+      if (within(px, py, geom.pin.x, geom.pin.y, tol)) {
+        return 0;
+      }
+      if (within(px, py, geom.labelCenter.x, geom.labelCenter.y, tol)) {
+        return 1;
+      }
+      return null;
+    }
+    case "arrow": {
+      if (within(px, py, geom.anchors[0].x, geom.anchors[0].y, tol)) {
+        return 0;
+      }
+      if (within(px, py, geom.anchors[1].x, geom.anchors[1].y, tol)) {
+        return 1;
+      }
+      return null;
+    }
+    case "dateRange":
+    case "priceRange":
+    case "priceDateRange": {
+      if (within(px, py, geom.anchors[0].x, geom.anchors[0].y, tol)) {
+        return 0;
+      }
+      if (within(px, py, geom.anchors[1].x, geom.anchors[1].y, tol)) {
+        return 1;
+      }
+      return null;
+    }
   }
 }
 
@@ -218,7 +278,159 @@ function hitGeom(
       return hitHorizontalRay(geom, px, py, tol);
     case "parallelChannel":
       return hitParallelChannel(geom, px, py, tol);
+    case "longPosition":
+    case "shortPosition":
+      return hitPosition(geom, px, py, tol);
+    case "text":
+      return hitText(geom, px, py, tol);
+    case "callout":
+      return hitCallout(geom, px, py, tol);
+    case "arrow":
+      return hitArrow(geom, px, py, tol);
+    case "dateRange":
+      return hitDateRange(geom, px, py, tol);
+    case "priceRange":
+      return hitPriceRange(geom, px, py, tol);
+    case "priceDateRange":
+      return hitPriceDateRange(geom, px, py, tol);
   }
+}
+
+function hitPosition(geom: PositionGeom, px: number, py: number, tol: number): "border" | "body" | "line" | null {
+  const bb = geom.bbox;
+  if (px < bb.xMin - tol || px > bb.xMax + tol || py < bb.yMin - tol || py > bb.yMax + tol) {
+    return null;
+  }
+  // Entry / SL / TP horizontal lines.
+  if (px >= geom.rewardRect.xLeft - tol && px <= geom.rewardRect.xRight + tol) {
+    if (Math.abs(py - geom.entry.y) <= tol) {
+      return "line";
+    }
+    if (Math.abs(py - geom.sl.y) <= tol) {
+      return "line";
+    }
+    if (Math.abs(py - geom.tp.y) <= tol) {
+      return "line";
+    }
+  }
+  // Body inside reward or risk zone.
+  const inReward =
+    px >= geom.rewardRect.xLeft &&
+    px <= geom.rewardRect.xRight &&
+    py >= geom.rewardRect.yTop &&
+    py <= geom.rewardRect.yBottom;
+  if (inReward) {
+    return "body";
+  }
+  const inRisk =
+    px >= geom.riskRect.xLeft &&
+    px <= geom.riskRect.xRight &&
+    py >= geom.riskRect.yTop &&
+    py <= geom.riskRect.yBottom;
+  if (inRisk) {
+    return "body";
+  }
+  return null;
+}
+
+function hitText(geom: TextGeom, px: number, py: number, tol: number): "body" | null {
+  // Generous body tolerance — without measured text dimensions in the geom,
+  // we hit-test against a `2*tol`-wide square centered at the anchor.
+  if (Math.abs(px - geom.anchor.x) <= tol * 2 && Math.abs(py - geom.anchor.y) <= tol * 2) {
+    return "body";
+  }
+  return null;
+}
+
+function hitCallout(geom: CalloutGeom, px: number, py: number, tol: number): "body" | "line" | null {
+  // Body: point-in-rect on label bbox.
+  if (
+    geom.labelW > 0 &&
+    geom.labelH > 0 &&
+    px >= geom.labelX - tol &&
+    px <= geom.labelX + geom.labelW + tol &&
+    py >= geom.labelY - tol &&
+    py <= geom.labelY + geom.labelH + tol
+  ) {
+    return "body";
+  }
+  // Leader line.
+  if (geom.leaderEnd !== null) {
+    const dist = pointToSegmentDistance(
+      px,
+      py,
+      geom.pin.x,
+      geom.pin.y,
+      geom.leaderEnd.x,
+      geom.leaderEnd.y,
+    );
+    if (dist <= tol) {
+      return "line";
+    }
+  }
+  return null;
+}
+
+function hitArrow(geom: ArrowGeom, px: number, py: number, tol: number): "line" | null {
+  const v0 = geom.shaft[0];
+  const v1 = geom.shaft[1];
+  if (pointToSegmentDistance(px, py, v0.x, v0.y, v1.x, v1.y) <= tol) {
+    return "line";
+  }
+  // Hit the head triangle bbox.
+  const tip = geom.head[0];
+  const bl = geom.head[1];
+  const br = geom.head[2];
+  const xs = [tip.x, bl.x, br.x];
+  const ys = [tip.y, bl.y, br.y];
+  const xMin = Math.min(...xs);
+  const xMax = Math.max(...xs);
+  const yMin = Math.min(...ys);
+  const yMax = Math.max(...ys);
+  if (px >= xMin - tol && px <= xMax + tol && py >= yMin - tol && py <= yMax + tol) {
+    return "line";
+  }
+  return null;
+}
+
+function hitDateRange(geom: DateRangeGeom, px: number, _py: number, tol: number): "border" | "body" | null {
+  if (px < geom.xLeft - tol || px > geom.xRight + tol) {
+    return null;
+  }
+  if (Math.abs(px - geom.xLeft) <= tol || Math.abs(px - geom.xRight) <= tol) {
+    return "border";
+  }
+  return "body";
+}
+
+function hitPriceRange(geom: PriceRangeGeom, _px: number, py: number, tol: number): "border" | "body" | null {
+  if (py < geom.yTop - tol || py > geom.yBottom + tol) {
+    return null;
+  }
+  if (Math.abs(py - geom.yTop) <= tol || Math.abs(py - geom.yBottom) <= tol) {
+    return "border";
+  }
+  return "body";
+}
+
+function hitPriceDateRange(
+  geom: PriceDateRangeGeom,
+  px: number,
+  py: number,
+  tol: number,
+): "border" | "body" | null {
+  if (px < geom.xLeft - tol || px > geom.xRight + tol) {
+    return null;
+  }
+  if (py < geom.yTop - tol || py > geom.yBottom + tol) {
+    return null;
+  }
+  const onBorder =
+    Math.abs(px - geom.xLeft) <= tol ||
+    Math.abs(px - geom.xRight) <= tol ||
+    Math.abs(py - geom.yTop) <= tol ||
+    Math.abs(py - geom.yBottom) <= tol;
+  return onBorder ? "border" : "body";
 }
 
 function hitTrendline(geom: TrendlineGeom, px: number, py: number, tol: number): "line" | null {

@@ -31,9 +31,24 @@ export type DrawingKind =
   | "ray"
   | "extendedLine"
   | "horizontalRay"
-  | "parallelChannel";
+  | "parallelChannel"
+  | "longPosition"
+  | "shortPosition"
+  | "text"
+  | "callout"
+  | "arrow"
+  | "dateRange"
+  | "priceRange"
+  | "priceDateRange";
 
 export type HorizontalRayDirection = "left" | "right";
+
+/**
+ * Phase 13 Cycle B.2 — display mode for position-tool readouts.
+ * `'rr'` shows risk:reward + price delta; `'percent'` shows %; `'price'`
+ * shows raw delta; `'ticks'` shows tick count (requires `tickSize`).
+ */
+export type DisplayMode = "rr" | "percent" | "price" | "ticks";
 
 export type StrokeStyle = "solid" | "dashed" | "dotted";
 export type ExtendMode = "none" | "left" | "right" | "both";
@@ -147,6 +162,66 @@ export interface ParallelChannelDrawing extends DrawingCommon {
   readonly anchors: readonly [DrawingAnchor, DrawingAnchor, DrawingAnchor];
 }
 
+// ─── Phase 13 Cycle B.2 — position / text / callout / arrow / range kinds ──
+
+/**
+ * Long-position drawing — 3 anchors that all share `time = entryTime`, plus a
+ * kind-specific `endTime` for the right edge of the visible band. Anchor
+ * indices: `0 = entry`, `1 = stopLoss`, `2 = takeProfit`. Long invariant:
+ * `sl.price < entry.price < tp.price`. Mirror for `ShortPositionDrawing`.
+ */
+export interface LongPositionDrawing extends DrawingCommon {
+  readonly kind: "longPosition";
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor, DrawingAnchor];
+  readonly endTime: Time;
+  readonly qty: number;
+  readonly displayMode: DisplayMode;
+  readonly tickSize?: number;
+}
+
+export interface ShortPositionDrawing extends DrawingCommon {
+  readonly kind: "shortPosition";
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor, DrawingAnchor];
+  readonly endTime: Time;
+  readonly qty: number;
+  readonly displayMode: DisplayMode;
+  readonly tickSize?: number;
+}
+
+export interface TextDrawing extends DrawingCommon {
+  readonly kind: "text";
+  readonly anchors: readonly [DrawingAnchor];
+  readonly text: string;
+}
+
+export interface CalloutDrawing extends DrawingCommon {
+  readonly kind: "callout";
+  /** `[pin, labelCenter]`. Leader runs from pin to nearest label-bbox edge. */
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor];
+  readonly text: string;
+}
+
+export interface ArrowDrawing extends DrawingCommon {
+  readonly kind: "arrow";
+  /** `[start, end]`. Filled triangular arrowhead at `end`. */
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor];
+}
+
+export interface DateRangeDrawing extends DrawingCommon {
+  readonly kind: "dateRange";
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor];
+}
+
+export interface PriceRangeDrawing extends DrawingCommon {
+  readonly kind: "priceRange";
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor];
+}
+
+export interface PriceDateRangeDrawing extends DrawingCommon {
+  readonly kind: "priceDateRange";
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor];
+}
+
 export type Drawing =
   | TrendlineDrawing
   | HorizontalLineDrawing
@@ -156,7 +231,15 @@ export type Drawing =
   | RayDrawing
   | ExtendedLineDrawing
   | HorizontalRayDrawing
-  | ParallelChannelDrawing;
+  | ParallelChannelDrawing
+  | LongPositionDrawing
+  | ShortPositionDrawing
+  | TextDrawing
+  | CalloutDrawing
+  | ArrowDrawing
+  | DateRangeDrawing
+  | PriceRangeDrawing
+  | PriceDateRangeDrawing;
 
 /** Default fib levels. Matches TradingView defaults. */
 export const DEFAULT_FIB_LEVELS: readonly FibLevel[] = Object.freeze([
@@ -228,4 +311,19 @@ export interface BeginCreateOptions {
   readonly showPercents?: boolean;
   /** Default direction for `horizontalRay`. Defaults to `'right'`. */
   readonly direction?: HorizontalRayDirection;
+  // ─── Phase 13 Cycle B.2 ───
+  /** Initial text content for `text` / `callout`. Defaults to `''`. */
+  readonly text?: string;
+  /** Position-tool quantity (positive finite). Defaults to 1. */
+  readonly qty?: number;
+  /** Position-tool tick size (positive finite). Omit for percent-mode readouts. */
+  readonly tickSize?: number;
+  /** Position-tool readout mode. Defaults to `'rr'`. */
+  readonly displayMode?: DisplayMode;
+  /**
+   * Position-tool right-edge time. When omitted, controller fills it on
+   * materialize using the second anchor's time (if 4 clicks placed) or
+   * `entryTime + 12 * intervalDuration` (legacy 3-click flow).
+   */
+  readonly endTime?: number;
 }

@@ -122,7 +122,7 @@ describe("installHotkeys", () => {
     expect(emitted.length).toBe(0);
   });
 
-  it("RECOMMENDED_HOTKEY_BINDINGS table contains all 9 cycle-A + cycle-B1 kinds", () => {
+  it("RECOMMENDED_HOTKEY_BINDINGS table contains all cycle-A + cycle-B kinds", () => {
     const values = Object.values(RECOMMENDED_HOTKEY_BINDINGS);
     expect(new Set(values)).toEqual(new Set([
       "trendline",
@@ -134,7 +134,62 @@ describe("installHotkeys", () => {
       "extendedLine",
       "horizontalRay",
       "parallelChannel",
+      "longPosition",
+      "shortPosition",
+      "text",
+      "callout",
+      "arrow",
+      "dateRange",
+      "priceRange",
+      "priceDateRange",
     ]));
+  });
+
+  it("Alt+Shift+L resolves to longPosition (Cycle B.2)", () => {
+    const store: HandlerStore = { handler: null };
+    const { chart, emitted, beginCalls } = makeChart();
+    installHotkeys(chart, { target: makeTarget(store) });
+    const e = new KeyboardEvent("keydown", { key: "L", altKey: true, shiftKey: true });
+    store.handler!(e);
+    expect(emitted.length).toBe(1);
+    expect((emitted[0]?.payload as KeyboardHotkeyPayload).binding).toBe("longPosition");
+    expect(beginCalls).toEqual(["longPosition"]);
+  });
+
+  it("Alt+Shift+S resolves to shortPosition (Cycle B.2)", () => {
+    const store: HandlerStore = { handler: null };
+    const { chart, emitted } = makeChart();
+    installHotkeys(chart, { target: makeTarget(store) });
+    const e = new KeyboardEvent("keydown", { key: "S", altKey: true, shiftKey: true });
+    store.handler!(e);
+    expect((emitted[0]?.payload as KeyboardHotkeyPayload).binding).toBe("shortPosition");
+  });
+
+  it("Alt+N resolves to text (Cycle B.2)", () => {
+    const store: HandlerStore = { handler: null };
+    const { chart, emitted } = makeChart();
+    installHotkeys(chart, { target: makeTarget(store) });
+    const e = new KeyboardEvent("keydown", { key: "n", altKey: true });
+    store.handler!(e);
+    expect((emitted[0]?.payload as KeyboardHotkeyPayload).binding).toBe("text");
+  });
+
+  it("Alt+M resolves to priceRange (Cycle B.2)", () => {
+    const store: HandlerStore = { handler: null };
+    const { chart, emitted } = makeChart();
+    installHotkeys(chart, { target: makeTarget(store) });
+    const e = new KeyboardEvent("keydown", { key: "m", altKey: true });
+    store.handler!(e);
+    expect((emitted[0]?.payload as KeyboardHotkeyPayload).binding).toBe("priceRange");
+  });
+
+  it("Alt+L (without Shift) does NOT collide with Alt+Shift+L longPosition binding", () => {
+    const store: HandlerStore = { handler: null };
+    const { chart, emitted } = makeChart();
+    installHotkeys(chart, { target: makeTarget(store) });
+    const e = new KeyboardEvent("keydown", { key: "l", altKey: true });
+    store.handler!(e);
+    expect((emitted[0]?.payload as KeyboardHotkeyPayload).binding).toBeNull();
   });
 
   it("disposer detaches the listener", () => {

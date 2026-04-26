@@ -4,6 +4,7 @@ import {
   __internals__,
   dayKeyOf,
   formatAxisLabel,
+  formatDuration,
   tierOfStep,
 } from "./timeFormat.js";
 
@@ -104,5 +105,48 @@ describe("LRU eviction", () => {
     const sizeAfterFirst = __internals__.labelCacheSize();
     formatAxisLabel(t, MIN, false, CTX);
     expect(__internals__.labelCacheSize()).toBe(sizeAfterFirst);
+  });
+});
+
+describe("formatDuration", () => {
+  it("returns 0s for zero", () => {
+    expect(formatDuration(0)).toBe("0s");
+  });
+
+  it("formats sub-second durations as ms", () => {
+    expect(formatDuration(123)).toBe("123ms");
+  });
+
+  it("formats sub-minute durations as seconds", () => {
+    expect(formatDuration(42 * SEC)).toBe("42s");
+  });
+
+  it("formats minutes-and-seconds (m + s when s > 0)", () => {
+    expect(formatDuration(3 * MIN + 12 * SEC)).toBe("3m 12s");
+  });
+
+  it("formats whole minutes without s suffix", () => {
+    expect(formatDuration(5 * MIN)).toBe("5m");
+  });
+
+  it("formats hours-and-minutes", () => {
+    expect(formatDuration(5 * HOUR + 30 * MIN)).toBe("5h 30m");
+    expect(formatDuration(2 * HOUR)).toBe("2h");
+  });
+
+  it("formats days-and-hours", () => {
+    expect(formatDuration(2 * DAY + 4 * HOUR)).toBe("2d 4h");
+    expect(formatDuration(7 * DAY)).toBe("7d");
+  });
+
+  it("prefixes negative durations with '-'", () => {
+    expect(formatDuration(-3 * MIN)).toBe("-3m");
+    expect(formatDuration(-(2 * HOUR + 30 * MIN))).toBe("-2h 30m");
+  });
+
+  it("returns em-dash for non-finite", () => {
+    expect(formatDuration(Number.NaN)).toBe("—");
+    expect(formatDuration(Number.POSITIVE_INFINITY)).toBe("—");
+    expect(formatDuration(Number.NEGATIVE_INFINITY)).toBe("—");
   });
 });
