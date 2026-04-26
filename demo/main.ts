@@ -1846,9 +1846,10 @@ async function main(): Promise<void> {
       if (canvas === null) {
         return;
       }
+      const rect = canvas.getBoundingClientRect();
       const e = new WheelEvent("wheel", {
-        clientX: opts.x,
-        clientY: opts.y,
+        clientX: rect.x + opts.x,
+        clientY: rect.y + opts.y,
         deltaY: opts.deltaY,
         deltaMode: opts.deltaMode ?? 0,
         shiftKey: opts.shiftKey ?? false,
@@ -1869,14 +1870,15 @@ async function main(): Promise<void> {
       if (canvas === null) {
         return;
       }
+      const rect = canvas.getBoundingClientRect();
       const y = opts.y ?? 100;
       const duration = opts.durationMs ?? 200;
       const steps = opts.steps ?? 12;
       const pointerType = opts.pointerType ?? "mouse";
       const send = (type: string, x: number, extra: Record<string, unknown> = {}): void => {
         const pe = new PointerEvent(type, {
-          clientX: x,
-          clientY: y,
+          clientX: rect.x + x,
+          clientY: rect.y + y,
           pointerId: 1,
           pointerType,
           bubbles: true,
@@ -1906,13 +1908,14 @@ async function main(): Promise<void> {
       if (canvas === null) {
         return;
       }
+      const rect = canvas.getBoundingClientRect();
       const duration = opts.durationMs ?? 200;
       const steps = opts.steps ?? 12;
       const pointerType = opts.pointerType ?? "mouse";
       const send = (type: string, y: number, extra: Record<string, unknown> = {}): void => {
         const pe = new PointerEvent(type, {
-          clientX: opts.x,
-          clientY: y,
+          clientX: rect.x + opts.x,
+          clientY: rect.y + y,
           pointerId: 1,
           pointerType,
           bubbles: true,
@@ -1940,10 +1943,11 @@ async function main(): Promise<void> {
       if (canvas === null) {
         return;
       }
+      const rect = canvas.getBoundingClientRect();
       canvas.dispatchEvent(
         new PointerEvent(type, {
-          clientX: x,
-          clientY: y,
+          clientX: rect.x + x,
+          clientY: rect.y + y,
           pointerId,
           pointerType: "mouse",
           bubbles: true,
