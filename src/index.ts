@@ -80,8 +80,16 @@ export {
   niceNumber,
   targetTickCountForHeight,
 } from "./core/price/priceNaturalStep.js";
-export { DrawingsController, normalizeDrawingDefaults } from "./core/drawings/DrawingsController.js";
+export { DrawingsController } from "./core/drawings/DrawingsController.js";
 export type { DrawingsFacade, DrawingsRenderContext } from "./core/drawings/DrawingsController.js";
+export { normalizeDrawingDefaults } from "./core/drawings/normalize.js";
+export type { NormalizeResult } from "./core/drawings/normalize.js";
+export type {
+  BeginDragForTestOptions,
+  DragStateSnapshot,
+  DrawingsDevHooks,
+  VisibleHandleInfo,
+} from "./core/drawings/devHooks.js";
 export { parseSnapshot, parseDrawing } from "./core/drawings/parsers.js";
 export type { ParseSnapshotResult } from "./core/drawings/parsers.js";
 export { applyMagnet, nearestBarTime } from "./core/drawings/magnet.js";

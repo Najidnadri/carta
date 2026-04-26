@@ -44,7 +44,6 @@ import {
   type DrawingsSnapshot,
   type DrawingsStorageAdapter,
   type DrawingStyle,
-  type FibLevel,
 } from "./types.js";
 import {
   clampLongPosition,
@@ -73,12 +72,27 @@ import {
   redrawDrawing,
   syncHandleGraphics,
   type HandleKey,
+  type HandleSpec,
 } from "./render.js";
 import { parseSnapshot } from "./parsers.js";
 import { StorageBinding } from "./storage.js";
+import { normalizeDrawingDefaults as normalizeBoundary } from "./normalize.js";
+import type {
+  BeginDragForTestOptions,
+  DragStateSnapshot,
+  DrawingsDevHooks,
+  VisibleHandleInfo,
+} from "./devHooks.js";
 
 const SOFT_DRAWING_LIMIT = 500;
 const DRAG_THRESHOLD_PX = 6;
+/**
+ * Phase 13 Cycle B.3 — chart-height threshold below which the readout
+ * auto-thin kicks in.  Per F-2 in the B.2 test report: at 300 px every
+ * stacked priceDateRange / position label overlaps; 360 gives a comfortable
+ * margin while still allowing tight panes.
+ */
+const COMPACT_READOUT_HEIGHT_PX = 360;
 
 interface DraggingState {
   readonly id: DrawingId;
@@ -92,6 +106,14 @@ interface DraggingState {
   readonly startPrice: number;
   /** Position-only: snapshot of `endTime` at drag start so the time-end puller can be diffed. */
   readonly startEndTime: number | null;
+  /**
+   * Cycle B.3 — when body-drag is multi-select, snapshot the full Drawing
+   * for every peer in the selection (excluding the primary drag.id and
+   * any locked drawings).  Each frame translates from these snapshots so
+   * deltas stay absolute relative to drag start.  Empty for handle-drag
+   * and single-selection body-drag.
+   */
+  readonly peerStartStates: ReadonlyMap<DrawingId, Drawing>;
   shiftConstrain: boolean;
   committed: boolean;
 }
@@ -171,12 +193,31 @@ export interface DrawingsFacade {
   update<K extends Drawing>(id: DrawingId | string, patch: Partial<Omit<K, "id" | "kind" | "schemaVersion">>): boolean;
   remove(id: DrawingId | string): boolean;
   clear(): void;
-  getSelectedId(): DrawingId | null;
+  /**
+   * Plural selection getter — returns the full selection set (length 0 =
+   * nothing, length 1 = single-select, length ≥ 2 = multi).  Cycle B.3
+   * replaced the legacy singular `getSelectedId`; hosts that want "the
+   * active drawing" should call `getPrimarySelectedId()`.
+   */
+  getSelectedIds(): readonly DrawingId[];
+  /** Most recently clicked / focused drawing in the selection, or `null`. */
+  getPrimarySelectedId(): DrawingId | null;
   select(id: DrawingId | string | null): void;
+  /**
+   * Cycle B.3 — toggle a drawing's membership in the selection set.
+   * Used by Ctrl/Cmd+click on desktop.  When the drawing was just added,
+   * it becomes the new primary.
+   */
+  toggleSelection(id: DrawingId | string): void;
   getSnapshot(): DrawingsSnapshot;
   loadSnapshot(snapshot: unknown): { droppedCount: number; droppedKinds: readonly string[] };
   attachStorage(adapter: DrawingsStorageAdapter, scope: DrawingScope): void;
   detachStorage(): void;
+  /**
+   * Phase 13 Cycle B.3 — test-only / unstable surface.  See `DrawingsDevHooks`
+   * for the contract.  Not part of the SemVer API; may change between minors.
+   */
+  getDevHooks(): DrawingsDevHooks;
 }
 
 export class DrawingsController {
@@ -192,7 +233,26 @@ export class DrawingsController {
 
   private readonly storage: StorageBinding;
 
-  private selectedId: DrawingId | null = null;
+  /**
+   * Phase 13 Cycle B.3 — multi-select state.  `selectedIds` is the full
+   * selection set (rendered as primary outline + handles for the most
+   * recently focused, secondary outline for the rest).  `primarySelectedId`
+   * tracks the last-clicked drawing so hit-tests + handle-drags route to
+   * a single owner.  `selectedId` (singular) is preserved as an internal
+   * alias for the primary so existing render code keeps working until the
+   * full secondary-render landing.
+   */
+  private readonly selectedIds = new Set<DrawingId>();
+  private primarySelectedId: DrawingId | null = null;
+  /**
+   * Internal alias for `primarySelectedId` — keeps the read sites that
+   * pre-date the multi-select refactor (handle hit-test, hover gating,
+   * keyboard nudge) working without rewriting every reference.  Writes go
+   * through `setSelected` / `toggleSelection` / `clearSelection`.
+   */
+  private get selectedId(): DrawingId | null {
+    return this.primarySelectedId;
+  }
   private hoveredId: DrawingId | null = null;
   private hoveredHandle: HandleKey | null = null;
   /** Phase 13 Cycle B.2 — generic per-drawing text pool for text/callout/range/position readouts. */
@@ -200,6 +260,13 @@ export class DrawingsController {
   private creating: CreatingState | null = null;
   private dragging: DraggingState | null = null;
   private bulkLoadDepth = 0;
+  /**
+   * Cycle B.3 fix-up Q-A — set during `removeSelected()` so per-id
+   * `removeInternal` calls don't each emit a `drawings:selected` event.
+   * `removeSelected` emits a single trailing `drawings:selected` after the
+   * loop completes.
+   */
+  private suppressSelectionEmit = false;
   private warnedSoftLimit = false;
   private destroyed = false;
 
@@ -254,28 +321,38 @@ export class DrawingsController {
       return true;
     }
     const projected = this.projectAll(ctxScale);
-    const hit = hitTestDrawings(local.x, local.y, projected, this.selectedId === null ? null : String(this.selectedId), tols);
+    const primaryStr = this.primarySelectedId === null ? null : String(this.primarySelectedId);
+    const hit = hitTestDrawings(local.x, local.y, projected, primaryStr, tols);
     if (hit === null) {
       // Empty area — deselect if anything was selected; otherwise let viewport pan.
-      if (this.selectedId !== null) {
+      if (this.selectedIds.size > 0) {
         this.setSelected(null);
         return true;
       }
       return false;
     }
-    // Hit on selected drawing's handle → start handle drag.
+    // Cycle B.3 — Ctrl/Cmd+click toggles the hit drawing in/out of the
+    // selection set.  No drag is initiated by the modifier-click; the user
+    // is curating the selection.
+    if (e.ctrlKey || e.metaKey) {
+      this.toggleSelectionInternal(hit.drawing.id);
+      this.deps.canvas.focus();
+      return true;
+    }
+    // Hit on selected drawing's handle → start handle drag (single-only).
     if (hit.part === "handle" && hit.handle !== undefined) {
       this.beginDrag(hit.drawing, "handle", hit.handle, e, local.x, local.y);
       this.deps.canvas.focus();
       return true;
     }
-    // Hit on the selected drawing → start body translate.
-    if (this.selectedId !== null && hit.drawing.id === this.selectedId) {
+    // Hit on a member of the current selection → start body translate.
+    // Multi-select carries through the drag, peers move together.
+    if (this.selectedIds.has(hit.drawing.id)) {
       this.beginDrag(hit.drawing, "body", null, e, local.x, local.y);
       this.deps.canvas.focus();
       return true;
     }
-    // Click selects.
+    // Plain click on a non-selected drawing replaces the selection.
     this.setSelected(hit.drawing.id);
     this.deps.canvas.focus();
     return true;
@@ -288,10 +365,30 @@ export class DrawingsController {
     }
     this.handlesContainer.position.set(ctx.plotRect.x, ctx.plotRect.y);
     const projected = this.projectAll({ timeScale: ctx.timeScale, priceScale: ctx.priceScale, plotRect: ctx.plotRect });
-    // Redraw drawings into pooled graphics + fib label pool sync.
     const seen = new Set<DrawingId>();
     const formatter = this.deps.priceFormatter?.() ?? ((v: number): string => v.toFixed(2));
     const intervalDuration = Number(ctx.timeScale.intervalDuration);
+    const compact = ctx.plotRect.h < COMPACT_READOUT_HEIGHT_PX;
+
+    // Phase 1: compute candidate text-specs for every visible drawing.
+    const candidates = new Map<DrawingId, readonly DrawingTextSpec[]>();
+    for (const entry of projected) {
+      if (!entry.drawing.visible) {
+        continue;
+      }
+      const specs = computeTextSpecs(entry.drawing, entry.geom, ctx, formatter, intervalDuration, compact);
+      if (specs !== null) {
+        candidates.set(entry.drawing.id, specs);
+      }
+    }
+
+    // Phase 2: when compact, drop specs from non-selected drawings whose
+    // bbox overlaps another drawing's bbox.  Selected drawings always win.
+    const finalSpecs = compact && candidates.size >= 2
+      ? suppressOverlappingSpecs(candidates, this.selectedId)
+      : candidates;
+
+    // Render pass.
     for (const entry of projected) {
       const g = this.ensureGraphicsFor(entry.drawing.id);
       redrawDrawing(g, entry.drawing, entry.geom, ctx.theme, ctx.dpr);
@@ -311,15 +408,17 @@ export class DrawingsController {
           pool.hideAll();
         }
       }
-      // Phase 13 Cycle B.2 — generic text pool sync for kinds with readouts.
-      const textSpecs = computeTextSpecs(entry.drawing, entry.geom, ctx, formatter, intervalDuration);
-      if (textSpecs !== null) {
+      const textSpecs = finalSpecs.get(entry.drawing.id);
+      if (textSpecs !== undefined) {
         const pool = this.ensureTextPool(entry.drawing.id);
         if (entry.drawing.visible) {
           pool.sync(textSpecs, ctx.theme);
         } else {
           pool.hideAll();
         }
+      } else if (this.textPools.has(entry.drawing.id)) {
+        // Was previously rendered, now suppressed — hide pool entries.
+        this.textPools.get(entry.drawing.id)?.hideAll();
       }
     }
     // Hide graphics whose drawings vanished.
@@ -338,19 +437,30 @@ export class DrawingsController {
         pool.hideAll();
       }
     }
-    // Sync handles for selected drawing.
-    const selected = this.selectedId === null ? null : this.drawings.get(this.selectedId);
-    if (selected !== undefined && selected !== null) {
-      const geom = projected.find((e) => e.drawing.id === selected.id)?.geom;
-      if (geom !== undefined) {
-        const draggingHandle = this.dragging?.id === selected.id ? this.dragging.handleKey : null;
-        const hoveredHandle = this.hoveredId === selected.id ? this.hoveredHandle : null;
-        const specs = handleSpecsFor(geom, hoveredHandle, draggingHandle, { w: ctx.plotRect.w, h: ctx.plotRect.h });
-        syncHandleGraphics(this.handleGraphicsPool, specs, this.handleCache, ctx.theme, ctx.dpr, this.handleHitParent);
-        return;
+    // Sync handles for the entire selection set.  Cycle B.3 — multi-select
+    // renders handles for every selected drawing; the hit-tester still only
+    // routes drags on the primary, but the visual cue makes the selection
+    // legible.  Primary's handles use the existing hover / active variants;
+    // secondaries render with the `'normal'` variant only.
+    const allSpecs: HandleSpec[] = [];
+    for (const sid of this.selectedIds) {
+      const drawing = this.drawings.get(sid);
+      if (drawing === undefined) {
+        continue;
+      }
+      const geom = projected.find((e) => e.drawing.id === drawing.id)?.geom;
+      if (geom === undefined) {
+        continue;
+      }
+      const isPrimary = sid === this.primarySelectedId;
+      const draggingHandle = isPrimary && this.dragging?.id === drawing.id ? this.dragging.handleKey : null;
+      const hoveredHandle = isPrimary && this.hoveredId === drawing.id ? this.hoveredHandle : null;
+      const specs = handleSpecsFor(geom, hoveredHandle, draggingHandle, { w: ctx.plotRect.w, h: ctx.plotRect.h });
+      for (const s of specs) {
+        allSpecs.push(s);
       }
     }
-    syncHandleGraphics(this.handleGraphicsPool, [], this.handleCache, ctx.theme, ctx.dpr, this.handleHitParent);
+    syncHandleGraphics(this.handleGraphicsPool, allSpecs, this.handleCache, ctx.theme, ctx.dpr, this.handleHitParent);
   }
 
   destroy(): void {
@@ -386,7 +496,8 @@ export class DrawingsController {
     this.textPools.clear();
     this.storage.destroy();
     this.drawings.clear();
-    this.selectedId = null;
+    this.selectedIds.clear();
+    this.primarySelectedId = null;
     this.creating = null;
     this.dragging = null;
   }
@@ -417,9 +528,13 @@ export class DrawingsController {
       ): boolean => this.updateInternal(asDrawingId(String(id)), patch),
       remove: (id: DrawingId | string): boolean => this.removeInternal(asDrawingId(String(id))),
       clear: (): void => { this.clearInternal(); },
-      getSelectedId: (): DrawingId | null => this.selectedId,
+      getSelectedIds: (): readonly DrawingId[] => Array.from(this.selectedIds),
+      getPrimarySelectedId: (): DrawingId | null => this.primarySelectedId,
       select: (id: DrawingId | string | null): void => {
         this.setSelected(id === null ? null : asDrawingId(String(id)));
+      },
+      toggleSelection: (id: DrawingId | string): void => {
+        this.toggleSelectionInternal(asDrawingId(String(id)));
       },
       getSnapshot: (): DrawingsSnapshot => this.takeSnapshotInternal(),
       loadSnapshot: (snapshot: unknown): { droppedCount: number; droppedKinds: readonly string[] } => {
@@ -442,6 +557,112 @@ export class DrawingsController {
         this.storage.attach(adapter, scope);
       },
       detachStorage: (): void => { this.storage.detach(); },
+      getDevHooks: (): DrawingsDevHooks => this.buildDevHooks(),
+    });
+  }
+
+  // ─── Dev hooks ───────────────────────────────────────────────────────────
+
+  /**
+   * Phase 13 Cycle B.3 — return the dev-hook surface used by `__cartaTest` in
+   * the demo and by Playwright e2e specs.  Materialized once per call (no
+   * caching), but each method is a thin closure that reads live controller
+   * state — so callers can hold a single reference for the lifetime of the
+   * chart.
+   */
+  private buildDevHooks(): DrawingsDevHooks {
+    return Object.freeze({
+      beginDragForTest: (opts: BeginDragForTestOptions): boolean => {
+        const id = asDrawingId(String(opts.drawingId));
+        const drawing = this.drawings.get(id);
+        if (drawing === undefined) {
+          return false;
+        }
+        const handleKey: HandleKey | null = opts.mode === "handle"
+          ? (opts.handleKey ?? 0)
+          : null;
+        // Default the start coords to the first anchor's screen position so
+        // the test caller doesn't have to compute pixels by hand.
+        let localX = opts.localX;
+        let localY = opts.localY;
+        if (localX === undefined || localY === undefined) {
+          const ctx = this.makeProjectionContext();
+          if (ctx === null) {
+            return false;
+          }
+          const geom = projectDrawing(drawing, ctx);
+          const fallback = firstAnchorScreenPoint(geom);
+          if (fallback === null) {
+            return false;
+          }
+          localX = fallback.x;
+          localY = fallback.y;
+        }
+        const plot = this.deps.plotRect();
+        return this.beginDragRaw({
+          drawing,
+          mode: opts.mode,
+          handleKey,
+          pointerId: opts.pointerId ?? 1,
+          globalX: localX + plot.x,
+          globalY: localY + plot.y,
+          shiftKey: false,
+          localX,
+          localY,
+        });
+      },
+      continueDragForTest: (localX: number, localY: number): boolean => {
+        if (this.dragging === null) {
+          return false;
+        }
+        const plot = this.deps.plotRect();
+        // Move just past the threshold the first time so the drag commits.
+        this.continueDragRaw(localX + plot.x, localY + plot.y, false, localX, localY);
+        return true;
+      },
+      endDragForTest: (): boolean => {
+        if (this.dragging === null) {
+          return false;
+        }
+        return this.endDragForPointer(this.dragging.pointerId);
+      },
+      getDragState: (): DragStateSnapshot | null => {
+        const drag = this.dragging;
+        if (drag === null) {
+          return null;
+        }
+        return Object.freeze({
+          drawingId: drag.id,
+          mode: drag.mode,
+          handleKey: drag.handleKey,
+          pointerId: drag.pointerId,
+          committed: drag.committed,
+        });
+      },
+      cancelActiveDrag: (): void => { this.cancelActiveDrag(); },
+      visibleHandlesFor: (drawingId: DrawingId | string): readonly VisibleHandleInfo[] => {
+        const id = asDrawingId(String(drawingId));
+        if (this.selectedId !== id) {
+          return Object.freeze([]);
+        }
+        const drawing = this.drawings.get(id);
+        if (drawing === undefined) {
+          return Object.freeze([]);
+        }
+        const ctx = this.makeProjectionContext();
+        if (ctx === null) {
+          return Object.freeze([]);
+        }
+        const geom = projectDrawing(drawing, ctx);
+        const specs = handleSpecsFor(geom, null, null, { w: ctx.plotRect.w, h: ctx.plotRect.h });
+        return Object.freeze(
+          specs.map((s): VisibleHandleInfo => Object.freeze({
+            key: s.key as HandleKey,
+            x: s.x,
+            y: s.y,
+          })),
+        );
+      },
     });
   }
 
@@ -714,7 +935,13 @@ export class DrawingsController {
       this.deps.logger.warn(`[carta] drawings.add: duplicate id ${String(drawing.id)} — ignored`);
       return;
     }
-    const normalized = normalizeDrawingDefaults(drawing);
+    const intervalMs = Number(this.deps.currentTimeScale().intervalDuration);
+    const safeInterval = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 0;
+    const { drawing: normalized, warn } = normalizeBoundary(drawing, safeInterval);
+    if (normalized === null) {
+      this.deps.logger.warn(`[carta] drawings.add: ${warn ?? "invalid drawing"} — dropped`);
+      return;
+    }
     this.drawings.set(normalized.id, normalized);
     this.maybeWarnSoftLimit();
     if (this.bulkLoadDepth === 0) {
@@ -770,11 +997,23 @@ export class DrawingsController {
       tpool.destroy();
       this.textPools.delete(id);
     }
-    if (this.selectedId === id) {
-      this.setSelected(null);
+    // Cycle B.3 — drop the removed id from the selection set; emit a single
+    // updated `drawings:selected` payload so hosts can re-render their
+    // selection-aware UI (PnL panel, context menu).
+    let selectionChanged = false;
+    if (this.selectedIds.delete(id)) {
+      selectionChanged = true;
+    }
+    if (this.primarySelectedId === id) {
+      const next = this.selectedIds.values().next();
+      this.primarySelectedId = next.done === true ? null : next.value;
+      selectionChanged = true;
     }
     if (this.bulkLoadDepth === 0) {
       this.deps.eventBus.emit("drawings:removed", { id, kind: existing.kind });
+      if (selectionChanged && !this.suppressSelectionEmit) {
+        this.emitSelected();
+      }
       this.storage.scheduleSave();
     }
     this.deps.invalidate();
@@ -800,24 +1039,107 @@ export class DrawingsController {
     this.deps.invalidate();
   }
 
+  /**
+   * Replace the selection set with a single drawing (or empty).  Used for
+   * pointerdown without modifier, programmatic `chart.drawings.select(id)`,
+   * and Esc clear.
+   */
   private setSelected(id: DrawingId | null): void {
-    if (this.selectedId === id) {
+    if (id === null) {
+      if (this.selectedIds.size === 0 && this.primarySelectedId === null) {
+        return;
+      }
+      this.selectedIds.clear();
+      this.primarySelectedId = null;
+      this.emitSelected();
+      this.deps.invalidate();
       return;
     }
-    this.selectedId = id;
-    const drawing = id === null ? null : this.drawings.get(id) ?? null;
-    this.deps.eventBus.emit("drawings:selected", { drawing });
+    if (
+      this.selectedIds.size === 1 &&
+      this.selectedIds.has(id) &&
+      this.primarySelectedId === id
+    ) {
+      return;
+    }
+    this.selectedIds.clear();
+    this.selectedIds.add(id);
+    this.primarySelectedId = id;
+    this.emitSelected();
     this.deps.invalidate();
   }
 
+  /**
+   * Cycle B.3 — Ctrl/Cmd+click toggle.  Adds `id` if absent, otherwise
+   * removes it.  When adding, the toggled drawing becomes primary; when
+   * removing the current primary, the next id in `selectedIds` (insertion
+   * order) becomes primary, or `null` if the set is now empty.
+   */
+  private toggleSelectionInternal(id: DrawingId): void {
+    if (this.selectedIds.has(id)) {
+      this.selectedIds.delete(id);
+      if (this.primarySelectedId === id) {
+        const next = this.selectedIds.values().next();
+        this.primarySelectedId = next.done === true ? null : next.value;
+      }
+    } else {
+      if (!this.drawings.has(id)) {
+        return;
+      }
+      this.selectedIds.add(id);
+      this.primarySelectedId = id;
+    }
+    this.emitSelected();
+    this.deps.invalidate();
+  }
+
+  private emitSelected(): void {
+    const drawings: Drawing[] = [];
+    for (const sid of this.selectedIds) {
+      const d = this.drawings.get(sid);
+      if (d !== undefined) {
+        drawings.push(d);
+      }
+    }
+    const primary =
+      this.primarySelectedId !== null
+        ? this.drawings.get(this.primarySelectedId) ?? null
+        : null;
+    this.deps.eventBus.emit("drawings:selected", {
+      drawings: Object.freeze(drawings),
+      primary,
+    });
+  }
+
   private removeSelected(): void {
-    if (this.selectedId !== null) {
-      this.removeInternal(this.selectedId);
+    if (this.selectedIds.size === 0) {
+      return;
+    }
+    // Iterate copy so removeInternal can mutate the set freely; skip locked.
+    // Cycle B.3 fix-up Q-A — coalesce per-removal `drawings:selected` emits
+    // into a single trailing emit so a 100-select-Delete doesn't spam 100
+    // selection events.  Per-removal `drawings:removed` still fires.
+    const ids = Array.from(this.selectedIds);
+    const sizeBefore = this.selectedIds.size;
+    this.suppressSelectionEmit = true;
+    try {
+      for (const id of ids) {
+        const d = this.drawings.get(id);
+        if (d === undefined || d.locked) {
+          continue;
+        }
+        this.removeInternal(id);
+      }
+    } finally {
+      this.suppressSelectionEmit = false;
+    }
+    if (this.selectedIds.size !== sizeBefore && this.bulkLoadDepth === 0) {
+      this.emitSelected();
     }
   }
 
   private duplicateSelected(): void {
-    const id = this.selectedId;
+    const id = this.primarySelectedId;
     if (id === null) {
       return;
     }
@@ -836,15 +1158,7 @@ export class DrawingsController {
   }
 
   private nudgeSelected(key: string, shift: boolean): void {
-    const id = this.selectedId;
-    if (id === null) {
-      return;
-    }
-    const orig = this.drawings.get(id);
-    if (orig === undefined) {
-      return;
-    }
-    if (orig.locked) {
+    if (this.selectedIds.size === 0) {
       return;
     }
     const interval = Number(this.deps.currentTimeScale().intervalDuration);
@@ -861,13 +1175,25 @@ export class DrawingsController {
     } else if (key === "ArrowDown") {
       dp = -stepMul;
     }
-    const next = translateDrawing(orig, dt, dp);
-    this.drawings.set(id, next);
-    if (this.bulkLoadDepth === 0) {
-      this.deps.eventBus.emit("drawings:updated", { drawing: next });
+    let touched = false;
+    for (const id of this.selectedIds) {
+      const orig = this.drawings.get(id);
+      if (orig === undefined || orig.locked) {
+        continue;
+      }
+      const next = translateDrawing(orig, dt, dp);
+      this.drawings.set(id, next);
+      if (this.bulkLoadDepth === 0) {
+        this.deps.eventBus.emit("drawings:updated", { drawing: next });
+      }
+      touched = true;
+    }
+    if (touched && this.bulkLoadDepth === 0) {
       this.storage.scheduleSave();
     }
-    this.deps.invalidate();
+    if (touched) {
+      this.deps.invalidate();
+    }
   }
 
   private beginDrag(
@@ -878,32 +1204,83 @@ export class DrawingsController {
     localX: number,
     localY: number,
   ): void {
-    if (drawing.locked) {
-      return;
-    }
-    const ctx = this.makeProjectionContext();
-    if (ctx === null) {
-      return;
-    }
-    const { time, price } = unprojectPoint(ctx, localX, localY);
-    const startEndTime =
-      drawing.kind === "longPosition" || drawing.kind === "shortPosition"
-        ? Number(drawing.endTime)
-        : null;
-    this.dragging = {
-      id: drawing.id,
+    this.beginDragRaw({
+      drawing,
       mode,
       handleKey,
       pointerId: e.pointerId,
-      startAnchors: drawing.anchors,
-      startGlobalX: e.global.x,
-      startGlobalY: e.global.y,
+      globalX: e.global.x,
+      globalY: e.global.y,
+      shiftKey: e.shiftKey,
+      localX,
+      localY,
+    });
+  }
+
+  /**
+   * Internal — accepts raw pointer coords so the dev-hook test path can
+   * initiate a drag without forging a `FederatedPointerEvent`.  Returns
+   * `true` when the drag was started; `false` when refused (locked drawing,
+   * unprojectable plot, or another drag already active).
+   */
+  private beginDragRaw(opts: {
+    drawing: Drawing;
+    mode: "handle" | "body";
+    handleKey: HandleKey | null;
+    pointerId: number;
+    globalX: number;
+    globalY: number;
+    shiftKey: boolean;
+    localX: number;
+    localY: number;
+  }): boolean {
+    if (this.dragging !== null) {
+      return false;
+    }
+    if (opts.drawing.locked) {
+      return false;
+    }
+    const ctx = this.makeProjectionContext();
+    if (ctx === null) {
+      return false;
+    }
+    const { time, price } = unprojectPoint(ctx, opts.localX, opts.localY);
+    const startEndTime =
+      opts.drawing.kind === "longPosition" || opts.drawing.kind === "shortPosition"
+        ? Number(opts.drawing.endTime)
+        : null;
+    // Cycle B.3 — for multi-select body-drag, snapshot every peer's full
+    // drawing (excluding primary + locked) so per-frame translates stay
+    // absolute relative to drag start.
+    const peerStartStates = new Map<DrawingId, Drawing>();
+    if (opts.mode === "body" && this.selectedIds.size > 1 && this.selectedIds.has(opts.drawing.id)) {
+      for (const sid of this.selectedIds) {
+        if (sid === opts.drawing.id) {
+          continue;
+        }
+        const peer = this.drawings.get(sid);
+        if (peer === undefined || peer.locked) {
+          continue;
+        }
+        peerStartStates.set(sid, peer);
+      }
+    }
+    this.dragging = {
+      id: opts.drawing.id,
+      mode: opts.mode,
+      handleKey: opts.handleKey,
+      pointerId: opts.pointerId,
+      startAnchors: opts.drawing.anchors,
+      startGlobalX: opts.globalX,
+      startGlobalY: opts.globalY,
       startTime: time,
       startPrice: price,
       startEndTime,
-      shiftConstrain: e.shiftKey,
+      peerStartStates,
+      shiftConstrain: opts.shiftKey,
       committed: false,
     };
+    return true;
   }
 
   private readonly onGlobalPointerMove = (e: FederatedPointerEvent): void => {
@@ -936,19 +1313,29 @@ export class DrawingsController {
   };
 
   private continueDrag(e: FederatedPointerEvent, localX: number, localY: number): void {
+    this.continueDragRaw(e.global.x, e.global.y, e.shiftKey, localX, localY);
+  }
+
+  private continueDragRaw(
+    globalX: number,
+    globalY: number,
+    shiftKey: boolean,
+    localX: number,
+    localY: number,
+  ): void {
     const drag = this.dragging;
     if (drag === null) {
       return;
     }
     if (!drag.committed) {
-      const dx = e.global.x - drag.startGlobalX;
-      const dy = e.global.y - drag.startGlobalY;
+      const dx = globalX - drag.startGlobalX;
+      const dy = globalY - drag.startGlobalY;
       if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) {
         return;
       }
       drag.committed = true;
     }
-    drag.shiftConstrain = e.shiftKey;
+    drag.shiftConstrain = shiftKey;
     const ctx = this.makeProjectionContext();
     if (ctx === null) {
       return;
@@ -986,6 +1373,31 @@ export class DrawingsController {
     this.drawings.set(drag.id, next);
     if (this.bulkLoadDepth === 0) {
       this.deps.eventBus.emit("drawings:updated", { drawing: next });
+    }
+    // Phase 13 Cycle B.3 — body-drag with multi-select: translate every
+    // OTHER selected drawing by the same Δt / Δp from drag start (so we
+    // never accumulate per-frame).  Locked drawings stay put (filtered
+    // out at drag-start snapshot time).  Handle-drag is single-only by
+    // design (matches TradingView).
+    if (drag.mode === "body" && drag.peerStartStates.size > 0) {
+      const dt = liveTime - drag.startTime;
+      const dp = livePrice - drag.startPrice;
+      let dtUse = dt;
+      let dpUse = dp;
+      if (drag.shiftConstrain) {
+        if (Math.abs(dt) >= Math.abs(dp)) {
+          dpUse = 0;
+        } else {
+          dtUse = 0;
+        }
+      }
+      for (const [sid, peerStart] of drag.peerStartStates) {
+        const peerNext = translateDrawing(peerStart, dtUse, dpUse);
+        this.drawings.set(sid, peerNext);
+        if (this.bulkLoadDepth === 0) {
+          this.deps.eventBus.emit("drawings:updated", { drawing: peerNext });
+        }
+      }
     }
     this.deps.invalidate();
   }
@@ -1195,17 +1607,28 @@ export class DrawingsController {
     if (this.destroyed) {
       return;
     }
-    const drag = this.dragging;
-    if (drag !== null && drag.pointerId === e.pointerId) {
-      const wasCommitted = drag.committed;
-      this.dragging = null;
-      const updated = this.drawings.get(drag.id);
-      if (wasCommitted && updated !== undefined && this.bulkLoadDepth === 0) {
-        this.storage.scheduleSave();
-      }
-      this.deps.invalidate();
-    }
+    this.endDragForPointer(e.pointerId);
   };
+
+  /**
+   * Internal — finalize the active drag for a given pointerId.  Returns
+   * `true` when a drag was ended, `false` when no drag was active for that
+   * pointer.  Used by both real `pointerup` and the dev-hook test path.
+   */
+  private endDragForPointer(pointerId: number): boolean {
+    const drag = this.dragging;
+    if (drag?.pointerId !== pointerId) {
+      return false;
+    }
+    const wasCommitted = drag.committed;
+    this.dragging = null;
+    const updated = this.drawings.get(drag.id);
+    if (wasCommitted && updated !== undefined && this.bulkLoadDepth === 0) {
+      this.storage.scheduleSave();
+    }
+    this.deps.invalidate();
+    return true;
+  }
 
   private readonly onPointerCancel = (e: FederatedPointerEvent): void => {
     const drag = this.dragging;
@@ -1388,9 +1811,66 @@ export class DrawingsController {
   }
 
   /**
-   * Cancel an in-flight handle/body drag, restoring the drawing to its
-   * `startAnchors`. Called by the chart when `interval:change` fires mid-drag
-   * so anchor times don't drift in the new bar grid. Idempotent.
+   * Phase 13 Cycle B.3 — long-press claim hook used by `TimeSeriesChart`.
+   * If a drawing is hit at the given plot-local pixel, select it + emit
+   * `drawing:contextmenu` with `source: 'long-press'` and return `true`
+   * (caller should suppress tracking-mode entry).  Returns `false` when
+   * the long-press hits empty space and should fall through to phase-09
+   * tracking mode.
+   *
+   * Pointer kind is fixed to `'touch'` because the only callers are
+   * touch / pen long-press timers (extended in B.3 to fire on pen too).
+   */
+  tryClaimLongPress(localX: number, localY: number): boolean {
+    if (this.destroyed) {
+      return false;
+    }
+    // While create-mode is active, the long-press is consumed silently so
+    // it doesn't promote into phase-09 tracking-mode and clobber the
+    // half-finished drawing.  No selection / context-menu fires — the next
+    // tap simply places the next anchor.
+    if (this.creating !== null) {
+      return true;
+    }
+    const ctx = this.makeProjectionContext();
+    if (ctx === null) {
+      return false;
+    }
+    const projected = this.projectAll(ctx);
+    const tols = defaultTolerancesFor("touch", this.deps.currentDpr());
+    const hit = hitTestDrawings(
+      localX,
+      localY,
+      projected,
+      this.selectedId === null ? null : String(this.selectedId),
+      tols,
+    );
+    if (hit === null) {
+      return false;
+    }
+    this.setSelected(hit.drawing.id);
+    const plot = this.deps.plotRect();
+    this.deps.eventBus.emit("drawing:contextmenu", {
+      drawing: hit.drawing,
+      screen: { x: plot.x + localX, y: plot.y + localY },
+      source: "long-press",
+    });
+    return true;
+  }
+
+  /**
+   * Cancel an in-flight handle/body drag, restoring the drawing AND every
+   * multi-select peer to their pre-drag state.  Called by the chart when
+   * `interval:change` fires mid-drag (so anchor times don't drift in the new
+   * bar grid) and when `ViewportController.onPinchStart` fires (so a
+   * second-finger pinch rolls back the drag and lets pinch take over).
+   * Idempotent.
+   *
+   * Cycle B.3 fix-up — also iterates `drag.peerStartStates` and restores
+   * every peer drawing translated by a multi-select body-drag.  Without
+   * this, peers stay at their dragged positions after the cancel and the
+   * user's data is silently corrupted on every interval change while a
+   * multi-drag is in progress.
    */
   cancelActiveDrag(): void {
     const drag = this.dragging;
@@ -1401,6 +1881,25 @@ export class DrawingsController {
     if (orig !== undefined) {
       const restored = withAnchors(orig, drag.startAnchors);
       this.drawings.set(drag.id, restored);
+      // Only emit when the drag actually moved the primary — sub-threshold
+      // (uncommitted) drags are a no-op rollback so silence matches the
+      // peer-rollback strict-equality short-circuit.
+      if (drag.committed && this.bulkLoadDepth === 0) {
+        this.deps.eventBus.emit("drawings:updated", { drawing: restored });
+      }
+    }
+    for (const [sid, peerStart] of drag.peerStartStates) {
+      // Only emit if a peer actually moved during the drag — beginDragRaw
+      // captures peerStartStates with `current === start`, so an
+      // uncommitted drag will set the same state back without spam.
+      const current = this.drawings.get(sid);
+      if (current === undefined || current === peerStart) {
+        continue;
+      }
+      this.drawings.set(sid, peerStart);
+      if (this.bulkLoadDepth === 0) {
+        this.deps.eventBus.emit("drawings:updated", { drawing: peerStart });
+      }
     }
     this.dragging = null;
     this.deps.invalidate();
@@ -1653,6 +2152,7 @@ function computeTextSpecs(
   ctx: DrawingsRenderContext,
   formatter: (v: number) => string,
   intervalDuration: number,
+  compact: boolean,
 ): readonly DrawingTextSpec[] | null {
   const theme = ctx.theme;
   const plotW = ctx.plotRect.w;
@@ -1693,10 +2193,25 @@ function computeTextSpecs(
         displayMode: drawing.displayMode,
         ...(drawing.tickSize !== undefined ? { tickSize: drawing.tickSize } : {}),
       });
-      const rewardLabel = formatPositionLine(stats, drawing.displayMode, "reward", formatter);
-      const riskLabel = formatPositionLine(stats, drawing.displayMode, "risk", formatter);
       const xRight = geom.endX;
       const labelOffset = 6;
+      // Compact mode: collapse the two readouts into a single R:R chip on
+      // the band centre.  Full mode: separate reward + risk chips.
+      if (compact) {
+        const rrLabel = formatPositionLine(stats, "rr", "reward", formatter);
+        const rrX = clampLabelX(xRight + labelOffset, plotW, rrLabel.length * 6 + 8);
+        const rrY = (geom.rewardRect.yTop + geom.riskRect.yBottom) / 2 - 8;
+        return [{
+          text: rrLabel,
+          x: rrX,
+          y: rrY,
+          bgColor: theme.crosshairTagBg,
+          textColor: theme.crosshairTagText,
+          bgAlpha: 0.85,
+        }];
+      }
+      const rewardLabel = formatPositionLine(stats, drawing.displayMode, "reward", formatter);
+      const riskLabel = formatPositionLine(stats, drawing.displayMode, "risk", formatter);
       const rewardX = clampLabelX(xRight + labelOffset, plotW, rewardLabel.length * 6 + 8);
       const riskX = clampLabelX(xRight + labelOffset, plotW, riskLabel.length * 6 + 8);
       const rewardY = (geom.rewardRect.yTop + geom.rewardRect.yBottom) / 2 - 8;
@@ -1728,7 +2243,9 @@ function computeTextSpecs(
       const dt = Number(a[1].time) - Number(a[0].time);
       const bars =
         intervalDuration > 0 ? Math.round(dt / intervalDuration) : 0;
-      const text = `${String(bars)} ${Math.abs(bars) === 1 ? "bar" : "bars"} · ${formatDuration(dt)}`;
+      const text = compact
+        ? `${String(bars)}b · ${formatDuration(dt)}`
+        : `${String(bars)} ${Math.abs(bars) === 1 ? "bar" : "bars"} · ${formatDuration(dt)}`;
       const x = clampLabelX(geom.badgeAnchor.x - (text.length * 6) / 2, plotW, text.length * 6 + 8);
       return [textSpec(text, x, geom.badgeAnchor.y, theme)];
     }
@@ -1742,7 +2259,9 @@ function computeTextSpecs(
       const delta = p1 - p0;
       const pctText = p0 === 0 ? "—" : `${(delta >= 0 ? "+" : "")}${((delta / p0) * 100).toFixed(2)}%`;
       const sign = delta >= 0 ? "+" : "-";
-      const text = `${sign}${formatter(Math.abs(delta))} (${pctText})`;
+      const text = compact
+        ? `${sign}${formatter(Math.abs(delta))}`
+        : `${sign}${formatter(Math.abs(delta))} (${pctText})`;
       const x = clampLabelX(geom.badgeAnchor.x - (text.length * 6) - 8, plotW, text.length * 6 + 8);
       return [textSpec(text, x, geom.badgeAnchor.y - 8, theme)];
     }
@@ -1758,6 +2277,12 @@ function computeTextSpecs(
       const delta = p1 - p0;
       const pctText = p0 === 0 ? "—" : `${(delta >= 0 ? "+" : "")}${((delta / p0) * 100).toFixed(2)}%`;
       const sign = delta >= 0 ? "+" : "-";
+      // Compact mode: single line — combine bar count + delta with a separator.
+      if (compact) {
+        const oneLine = `${String(bars)}b · ${sign}${formatter(Math.abs(delta))}`;
+        const x = clampLabelX(geom.badgeAnchor.x - (oneLine.length * 6) / 2, plotW, oneLine.length * 6 + 8);
+        return [textSpec(oneLine, x, geom.badgeAnchor.y + 4, theme)];
+      }
       const line1 = `${String(bars)} ${Math.abs(bars) === 1 ? "bar" : "bars"} · ${formatDuration(dt)}`;
       const line2 = `${sign}${formatter(Math.abs(delta))} (${pctText})`;
       const text = `${line1}\n${line2}`;
@@ -1778,6 +2303,89 @@ function computeTextSpecs(
       // No text readouts for these kinds (fib has its own pool).
       return null;
   }
+}
+
+/**
+ * Phase 13 Cycle B.3 — F-2 auto-thin overlap suppression.  Only invoked
+ * when `plotRect.h < COMPACT_READOUT_HEIGHT_PX`.  For each pair of
+ * candidate text-spec sets, if their bboxes overlap, the non-selected
+ * loser drops its specs entirely.  Selected drawings always keep their
+ * specs.  When two non-selected drawings overlap each other, the lower-z
+ * drawing (earlier insertion in the candidates Map iteration order) is
+ * dropped — small visual but stable per frame.
+ *
+ * Bbox approximation: `(x, y, max(text.length) * 6, 12)` per spec.  The
+ * `text.length * 6` heuristic mirrors what `FibLabelPool` and the existing
+ * label clampers already use.
+ */
+function suppressOverlappingSpecs(
+  candidates: ReadonlyMap<DrawingId, readonly DrawingTextSpec[]>,
+  selectedId: DrawingId | null,
+): Map<DrawingId, readonly DrawingTextSpec[]> {
+  const ids = Array.from(candidates.keys());
+  const drop = new Set<DrawingId>();
+  for (let i = 0; i < ids.length; i++) {
+    const idA = ids[i];
+    if (idA === undefined || drop.has(idA)) {
+      continue;
+    }
+    const aSpecs = candidates.get(idA);
+    if (aSpecs === undefined || aSpecs.length === 0) {
+      continue;
+    }
+    for (let j = i + 1; j < ids.length; j++) {
+      const idB = ids[j];
+      if (idB === undefined || drop.has(idB)) {
+        continue;
+      }
+      const bSpecs = candidates.get(idB);
+      if (bSpecs === undefined || bSpecs.length === 0) {
+        continue;
+      }
+      if (!specsOverlap(aSpecs, bSpecs)) {
+        continue;
+      }
+      // Prefer the selected drawing; otherwise drop the earlier one (B beats A's drop ordering).
+      if (idA === selectedId) {
+        drop.add(idB);
+      } else if (idB === selectedId) {
+        drop.add(idA);
+        break;
+      } else {
+        drop.add(idA);
+        break;
+      }
+    }
+  }
+  const final = new Map<DrawingId, readonly DrawingTextSpec[]>();
+  for (const [id, specs] of candidates) {
+    if (!drop.has(id)) {
+      final.set(id, specs);
+    }
+  }
+  return final;
+}
+
+function specsOverlap(
+  a: readonly DrawingTextSpec[],
+  b: readonly DrawingTextSpec[],
+): boolean {
+  for (const sa of a) {
+    const ax0 = sa.x;
+    const ay0 = sa.y;
+    const ax1 = ax0 + Math.max(8, sa.text.length * 6);
+    const ay1 = ay0 + 12;
+    for (const sb of b) {
+      const bx0 = sb.x;
+      const by0 = sb.y;
+      const bx1 = bx0 + Math.max(8, sb.text.length * 6);
+      const by1 = by0 + 12;
+      if (ax0 < bx1 && ax1 > bx0 && ay0 < by1 && ay1 > by0) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function textSpec(text: string, x: number, y: number, theme: Theme): DrawingTextSpec {
@@ -1803,29 +2411,39 @@ function clampLabelX(rawX: number, plotW: number, approxW: number): number {
   return rawX;
 }
 
+// `normalizeDrawingDefaults` lives in `./normalize.ts` since Cycle B.3 — the
+// helper now returns `{ drawing, warn }` so the controller can drop drawings
+// that violate hard invariants (e.g. long-position `sl < entry < tp`).
+
 /**
- * Tolerant boundary for `chart.drawings.add()`. Hosts may legitimately build
- * drawings without filling every optional shape field — the internal model
- * (and `projectDrawing`) assume they are present, so we normalize once here.
+ * Cycle B.3 — pick a sensible plot-local pixel for a drawing's first
+ * anchor / pin / entry.  Used by the dev-hook test path when callers don't
+ * pass explicit coords.
  */
-export function normalizeDrawingDefaults(d: Drawing): Drawing {
-  // Tolerate hosts who omit optional shape fields at runtime (the TS types
-  // declare them required, but JSON-built or partial inputs reach `add()`).
-  const view = d as unknown as { style?: DrawingStyle | null; levels?: readonly FibLevel[] | null };
-  const styleFill = view.style === undefined || view.style === null;
-  if (d.kind === "fibRetracement") {
-    const levelsFill = view.levels === undefined || view.levels === null || !Array.isArray(view.levels);
-    if (!styleFill && !levelsFill) {
-      return d;
+function firstAnchorScreenPoint(geom: ScreenGeom): { x: number; y: number } | null {
+  switch (geom.kind) {
+    case "trendline":
+    case "fibRetracement":
+    case "rectangle":
+    case "ray":
+    case "extendedLine":
+    case "arrow":
+    case "dateRange":
+    case "priceRange":
+    case "priceDateRange":
+    case "parallelChannel": {
+      const a = geom.anchors[0];
+      return { x: a.x, y: a.y };
     }
-    return Object.freeze({
-      ...d,
-      style: styleFill ? Object.freeze({} as DrawingStyle) : d.style,
-      levels: levelsFill ? DEFAULT_FIB_LEVELS : d.levels,
-    });
+    case "horizontalLine":
+    case "verticalLine":
+    case "horizontalRay":
+    case "text":
+      return { x: geom.anchor.x, y: geom.anchor.y };
+    case "callout":
+      return { x: geom.pin.x, y: geom.pin.y };
+    case "longPosition":
+    case "shortPosition":
+      return { x: geom.entry.x, y: geom.entry.y };
   }
-  if (!styleFill) {
-    return d;
-  }
-  return Object.freeze({ ...d, style: Object.freeze({} as DrawingStyle) });
 }

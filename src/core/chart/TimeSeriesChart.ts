@@ -250,6 +250,13 @@ export class TimeSeriesChart {
       plotRect: (): PlotRect => this.computePlotRect(),
       options: opts.viewport,
       onLongPress: (localX, localY): void => {
+        // Phase 13 Cycle B.3 — drawings consume long-press first.  If a
+        // drawing is hit, the controller selects it + emits
+        // `drawing:contextmenu` with `source: 'long-press'` and we skip
+        // tracking-mode entry.
+        if (this.drawingsController.tryClaimLongPress(localX, localY)) {
+          return;
+        }
         const anchor = this.dataAnchorAtLocalPixel(localX, localY);
         if (anchor === null) {
           return;
@@ -269,6 +276,10 @@ export class TimeSeriesChart {
         this.crosshair.setTrackingMove(plot.x + localX, plot.y + localY);
       },
       onPointerDownIntercept: this.drawingsController.onPointerDownIntercept,
+      // Phase 13 Cycle B.3 — pinch entry rolls back any in-flight drawing
+      // drag (parity with `interval:change` rollback).  Mid-create FSM is
+      // intentionally untouched: a half-placed trendline survives the pinch.
+      onPinchStart: (): void => { this.drawingsController.cancelActiveDrag(); },
     });
     this.priceAxisController = new PriceAxisController({
       axesLayer: renderer.axesLayer,

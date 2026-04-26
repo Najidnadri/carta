@@ -42,12 +42,22 @@ function makeChart(): {
       update: (): boolean => false,
       remove: (): boolean => false,
       clear: noop,
-      getSelectedId: (): null => null,
+      getSelectedIds: (): readonly never[] => [],
+      getPrimarySelectedId: (): null => null,
+      toggleSelection: noop,
       select: noop,
       getSnapshot: () => ({ schemaVersion: 1, drawings: [] }),
       loadSnapshot: () => ({ droppedCount: 0, droppedKinds: [] }),
       attachStorage: noop,
       detachStorage: noop,
+      getDevHooks: () => ({
+        beginDragForTest: (): boolean => false,
+        continueDragForTest: (): boolean => false,
+        endDragForTest: (): boolean => false,
+        getDragState: () => null,
+        cancelActiveDrag: noop,
+        visibleHandlesFor: () => [],
+      }),
     },
   };
   return { chart, emitted, beginCalls };

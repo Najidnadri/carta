@@ -1316,7 +1316,7 @@ async function main(): Promise<void> {
     }
     if (target === null) {
       // Pick the most recently selected position; fallback = last in list.
-      const selectedId = chart.drawings.getSelectedId();
+      const selectedId = chart.drawings.getPrimarySelectedId();
       if (selectedId !== null) {
         const sel = chart.drawings.getById(selectedId);
         if (sel !== null && (sel.kind === "longPosition" || sel.kind === "shortPosition")) {
@@ -1430,14 +1430,100 @@ async function main(): Promise<void> {
     updatePnlPanel();
   });
   chart.on("drawings:selected", (payload) => {
+    const primary = payload.primary;
     if (
-      payload.drawing !== null &&
-      (payload.drawing.kind === "longPosition" || payload.drawing.kind === "shortPosition")
+      primary !== null &&
+      (primary.kind === "longPosition" || primary.kind === "shortPosition")
     ) {
-      trackedPositionId = String(payload.drawing.id);
+      trackedPositionId = String(primary.id);
     }
     updatePnlPanel();
   });
+
+  // Phase 13 Cycle B.3 — drawing context menu (long-press + right-click).
+  // Library emits `drawing:contextmenu` with `{ drawing, screen, source }`;
+  // host renders the DOM menu and translates user actions back into
+  // imperative `chart.drawings.{remove, update}` calls.
+  const ctxMenu = document.getElementById("drawing-context-menu");
+  let ctxMenuTarget: string | null = null;
+  const closeCtxMenu = (): void => {
+    if (ctxMenu === null) {
+      return;
+    }
+    ctxMenu.dataset.open = "false";
+    ctxMenuTarget = null;
+  };
+  const openCtxMenu = (clientX: number, clientY: number, drawingId: string): void => {
+    if (ctxMenu === null) {
+      return;
+    }
+    ctxMenuTarget = drawingId;
+    // Clamp to viewport so the menu doesn't overflow on phone-sized screens.
+    const w = ctxMenu.offsetWidth || 160;
+    const h = ctxMenu.offsetHeight || 160;
+    const x = Math.max(4, Math.min(window.innerWidth - w - 4, clientX));
+    const y = Math.max(4, Math.min(window.innerHeight - h - 4, clientY));
+    ctxMenu.style.left = `${String(x)}px`;
+    ctxMenu.style.top = `${String(y)}px`;
+    ctxMenu.dataset.open = "true";
+  };
+  if (ctxMenu !== null) {
+    chart.on("drawing:contextmenu", (payload) => {
+      openCtxMenu(payload.screen.x, payload.screen.y, String(payload.drawing.id));
+    });
+    ctxMenu.addEventListener("click", (e) => {
+      const btn = (e.target as HTMLElement | null)?.closest<HTMLButtonElement>("button[data-action]");
+      if (btn === null || btn === undefined || ctxMenuTarget === null || chart === null) {
+        return;
+      }
+      const id = ctxMenuTarget;
+      const action = btn.dataset.action;
+      if (action === "delete") {
+        chart.drawings.remove(id);
+      } else if (action === "lock") {
+        const d = chart.drawings.getById(id);
+        if (d !== null) {
+          chart.drawings.update(id, { locked: !d.locked });
+        }
+      } else if (action === "duplicate") {
+        const d = chart.drawings.getById(id);
+        if (d !== null) {
+          const ivlNum = Number(chart.getInterval());
+          const offset = Number.isFinite(ivlNum) && ivlNum > 0 ? ivlNum : 0;
+          const cloneId = `${id}-dup-${String(Date.now())}`;
+          const cloned = JSON.parse(JSON.stringify(d)) as { id: string; anchors: { time: number }[] };
+          cloned.id = cloneId;
+          for (const a of cloned.anchors) {
+            a.time += offset;
+          }
+          chart.drawings.add(cloned as unknown as Parameters<typeof chart.drawings.add>[0]);
+        }
+      } else if (action === "bring-front") {
+        const all = chart.drawings.list();
+        let maxZ = 0;
+        for (const dx of all) {
+          if (dx.z > maxZ) {
+            maxZ = dx.z;
+          }
+        }
+        chart.drawings.update(id, { z: maxZ + 1 });
+      }
+      closeCtxMenu();
+    });
+    document.addEventListener("pointerdown", (e) => {
+      if (ctxMenu.dataset.open !== "true") {
+        return;
+      }
+      if (!(e.target instanceof Node) || !ctxMenu.contains(e.target)) {
+        closeCtxMenu();
+      }
+    });
+    chart.on("drawings:removed", (payload) => {
+      if (ctxMenuTarget !== null && String(payload.id) === ctxMenuTarget) {
+        closeCtxMenu();
+      }
+    });
+  }
 
   // Test hooks (dev only) — used by Playwright for adversarial scenarios.
   const testHook = {
@@ -1457,8 +1543,19 @@ async function main(): Promise<void> {
     drawingsClear: (): void => { chart?.drawings.clear(); },
     drawingsCount: (): number => chart?.drawings.list().length ?? 0,
     drawingsSelectedId: (): string | null => {
-      const id = chart?.drawings.getSelectedId() ?? null;
+      const id = chart?.drawings.getPrimarySelectedId() ?? null;
       return id === null ? null : String(id);
+    },
+    /**
+     * Cycle B.3 — full selection set as a flat array of drawing ids.
+     * Single-select returns length-1, multi-select returns length-N.
+     */
+    drawingsSelectedIds: (): readonly string[] => {
+      const ids = chart?.drawings.getSelectedIds() ?? [];
+      return ids.map((id) => String(id));
+    },
+    drawingsToggleSelection: (id: string): void => {
+      chart?.drawings.toggleSelection(id);
     },
     drawingsGetSnapshot: (): unknown => chart?.drawings.getSnapshot() ?? null,
     drawingsLoadSnapshot: (snap: unknown): { droppedCount: number; droppedKinds: readonly string[] } | null =>
@@ -1481,6 +1578,179 @@ async function main(): Promise<void> {
         return c.style.outline;
       }
       return "";
+    },
+    // ── Phase 13 Cycle B.3 — drawing test-infra hooks ──
+    /**
+     * Synthesize a complete handle-drag bypassing pixel hit-testing.
+     * `dx` / `dy` are plot-local CSS px deltas applied to the drawing's
+     * first-anchor screen position.  Returns the drag mode actually used
+     * (`'handle'`) or `null` when the drag was refused.
+     */
+    synthHandleDrag: (
+      drawingId: string,
+      handleKey: number | "corner-tr" | "corner-bl" | "time-end",
+      dx: number,
+      dy: number,
+    ): "handle" | null => {
+      const hooks = chart?.drawings.getDevHooks();
+      if (hooks === undefined) {
+        return null;
+      }
+      // Force-select first so handle-drag recognises the drawing.
+      chart?.drawings.select(drawingId);
+      const ok = hooks.beginDragForTest({
+        drawingId,
+        mode: "handle",
+        handleKey,
+        pointerId: 1,
+      });
+      if (!ok) {
+        return null;
+      }
+      const state = hooks.getDragState();
+      const handles = hooks.visibleHandlesFor(drawingId);
+      const anchor = handles.find((h) => h.key === handleKey) ?? handles[0];
+      if (anchor === undefined || state === null) {
+        hooks.cancelActiveDrag();
+        return null;
+      }
+      // Move past the 6px commit threshold first, then to the final pos.
+      hooks.continueDragForTest(anchor.x + 8, anchor.y + 8);
+      hooks.continueDragForTest(anchor.x + dx, anchor.y + dy);
+      hooks.endDragForTest();
+      return "handle";
+    },
+    /**
+     * Synthesize a 2-finger pinch on the canvas at `(x1,y1)`/`(x2,y2)`,
+     * scaling to centroid by `scale` over `durationMs`.  Composes the
+     * existing `synthMultiPointer` so the viewport's pinch FSM runs end-to-
+     * end (including pinch-cancels-drag wiring landed in B.3).
+     */
+    synthPinch: (opts: {
+      readonly x1: number;
+      readonly y1: number;
+      readonly x2: number;
+      readonly y2: number;
+      readonly scale: number;
+      readonly durationMs?: number;
+      readonly steps?: number;
+    }): Promise<void> => {
+      const canvas = document.querySelector("canvas");
+      if (canvas === null) {
+        return Promise.resolve();
+      }
+      const rect = canvas.getBoundingClientRect();
+      const dispatch = (
+        eventName: string,
+        ps: readonly { id: number; x: number; y: number }[],
+      ): void => {
+        for (const p of ps) {
+          canvas.dispatchEvent(
+            new PointerEvent(eventName, {
+              pointerId: p.id,
+              pointerType: "touch",
+              clientX: rect.left + p.x,
+              clientY: rect.top + p.y,
+              bubbles: true,
+              cancelable: true,
+              isPrimary: p.id === 11,
+            }),
+          );
+        }
+      };
+      const cx = (opts.x1 + opts.x2) / 2;
+      const cy = (opts.y1 + opts.y2) / 2;
+      const steps = opts.steps ?? 6;
+      const durationMs = opts.durationMs ?? 60;
+      dispatch("pointerdown", [
+        { id: 11, x: opts.x1, y: opts.y1 },
+        { id: 12, x: opts.x2, y: opts.y2 },
+      ]);
+      const move = (i: number): void => {
+        const t = i / steps;
+        const s = 1 + (opts.scale - 1) * t;
+        const nx1 = cx + (opts.x1 - cx) * s;
+        const ny1 = cy + (opts.y1 - cy) * s;
+        const nx2 = cx + (opts.x2 - cx) * s;
+        const ny2 = cy + (opts.y2 - cy) * s;
+        dispatch("pointermove", [
+          { id: 11, x: nx1, y: ny1 },
+          { id: 12, x: nx2, y: ny2 },
+        ]);
+      };
+      return new Promise((resolve) => {
+        let i = 1;
+        const tick = (): void => {
+          move(i);
+          i += 1;
+          if (i > steps) {
+            const fx1 = cx + (opts.x1 - cx) * opts.scale;
+            const fy1 = cy + (opts.y1 - cy) * opts.scale;
+            const fx2 = cx + (opts.x2 - cx) * opts.scale;
+            const fy2 = cy + (opts.y2 - cy) * opts.scale;
+            dispatch("pointerup", [
+              { id: 11, x: fx1, y: fy1 },
+              { id: 12, x: fx2, y: fy2 },
+            ]);
+            resolve();
+            return;
+          }
+          setTimeout(tick, durationMs / steps);
+        };
+        setTimeout(tick, durationMs / steps);
+      });
+    },
+    /** Visible anchor-handle positions for a drawing (plot-local CSS px). */
+    visibleHandles: (drawingId: string): readonly { key: unknown; x: number; y: number }[] => {
+      const hooks = chart?.drawings.getDevHooks();
+      if (hooks === undefined) {
+        return [];
+      }
+      return hooks.visibleHandlesFor(drawingId);
+    },
+    /** Read-only snapshot of the controller's active drag, or `null`. */
+    getDragState: (): unknown =>
+      chart?.drawings.getDevHooks().getDragState() ?? null,
+    /** Force-cancel any active drag (mirrors the `interval:change` rollback). */
+    cancelActiveDrag: (): void => {
+      chart?.drawings.getDevHooks().cancelActiveDrag();
+    },
+    /**
+     * Detect the WebGL renderer class so perf-canary verdicts can be tagged.
+     * `'software-gl'` for SwiftShader / llvmpipe / Mesa software paths;
+     * `'discrete-gpu'` / `'integrated-gpu'` for known patterns; `'unknown'`
+     * otherwise.
+     */
+    hardwareClass: (): "software-gl" | "discrete-gpu" | "integrated-gpu" | "unknown" => {
+      const probe = document.createElement("canvas");
+      const gl =
+        probe.getContext("webgl2") ?? probe.getContext("webgl") ?? probe.getContext("experimental-webgl");
+      if (gl === null || !(gl instanceof WebGLRenderingContext) && !(gl instanceof WebGL2RenderingContext)) {
+        return "unknown";
+      }
+      const ext = gl.getExtension("WEBGL_debug_renderer_info");
+      if (ext === null) {
+        return "unknown";
+      }
+      const renderer = String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) ?? "");
+      const r = renderer.toLowerCase();
+      if (r.includes("swiftshader") || r.includes("llvmpipe") || r.includes("software")) {
+        return "software-gl";
+      }
+      if (
+        r.includes("nvidia") ||
+        r.includes("amd") ||
+        r.includes("radeon") ||
+        r.includes("apple m") ||
+        r.includes("rtx") ||
+        r.includes("gtx")
+      ) {
+        return "discrete-gpu";
+      }
+      if (r.includes("intel") || r.includes("uhd") || r.includes("hd graphics")) {
+        return "integrated-gpu";
+      }
+      return "unknown";
     },
     // ── Phase 11 cycle A — request log / overlay / live tick / interval ──
     requestLogEntries: (): readonly RequestLogEntry[] => requestLog.snapshot(),

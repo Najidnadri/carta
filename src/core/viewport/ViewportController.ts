@@ -100,6 +100,13 @@ export interface ViewportControllerDeps {
    * here because `activePointers.get(id)` returns `undefined`.
    */
   readonly onPointerDownIntercept?: (e: FederatedPointerEvent) => boolean;
+  /**
+   * Phase 13 Cycle B.3 — fires once when the viewport's gesture FSM enters
+   * `'pinch'` mode (idle/pan → pinch on second pointerdown).  The chart
+   * uses this to roll back any in-flight drawing handle/body drag (parity
+   * with `interval:change` cancellation).  Mid-create FSM is preserved.
+   */
+  readonly onPinchStart?: () => void;
 }
 
 type GestureMode = "idle" | "pan" | "pinch";
@@ -198,6 +205,7 @@ export class ViewportController {
   private readonly onPointerDownIntercept:
     | ((e: FederatedPointerEvent) => boolean)
     | undefined;
+  private readonly onPinchStart: (() => void) | undefined;
 
   private readonly activePointers = new Map<number, PointerState>();
   private activePanPointerId: number | null = null;
@@ -230,6 +238,7 @@ export class ViewportController {
       deps.timerFns?.clearTimeout ??
       ((id): void => { globalThis.clearTimeout(id); });
     this.onPointerDownIntercept = deps.onPointerDownIntercept;
+    this.onPinchStart = deps.onPinchStart;
 
     this.stage.eventMode = "static";
     this.stage.hitArea = this.asScreenHitArea();
@@ -356,10 +365,12 @@ export class ViewportController {
       cancelled: false,
     };
     this.activePointers.set(e.pointerId, state);
-    // Long-press is touch-only, single-pointer, only when not already tracking.
-    // A second pointerdown cancels the timer (we're now in pinch territory).
+    // Long-press is touch / pen, single-pointer, only when not already
+    // tracking.  A second pointerdown cancels the timer (we're now in pinch
+    // territory).  Cycle B.3 widened pen so Apple Pencil long-press fires
+    // `drawing:contextmenu` parity with finger.
     if (this.activePointers.size === 1) {
-      if (!this.trackingMode && type === "touch") {
+      if (!this.trackingMode && (type === "touch" || type === "pen")) {
         this.armLongPress(e.pointerId, e.global.x, e.global.y);
       }
     } else {
@@ -572,6 +583,10 @@ export class ViewportController {
       this.mode = "pinch";
       this.activePanPointerId = null;
       this.cancelLongPressTimer();
+      // Cycle B.3 — let the chart roll back any in-flight drawing drag.
+      // Fires synchronously BEFORE the first `applyPinch` move so the drag
+      // rollback doesn't race the pinch's own window mutations.
+      this.onPinchStart?.();
     }
   }
 

@@ -283,8 +283,18 @@ export interface DrawingsRemovedPayload {
   readonly kind: DrawingKind;
 }
 
+/**
+ * Phase 13 Cycle B.3 — multi-select payload shape.  `drawings` carries the
+ * full selection set (length 0 = nothing selected, length 1 = single-select,
+ * length ≥ 2 = multi).  `primary` is the most recently clicked / focused
+ * drawing — convenience for hosts that want the singular "active" entry
+ * without doing `drawings.length === 1 ? drawings[0] : null`.  Pre-1.0
+ * breaking change from the cycle-A singular `drawing` field; master-plan
+ * §5 explicitly authorizes the migration.
+ */
 export interface DrawingsSelectedPayload {
-  readonly drawing: Drawing | null;
+  readonly drawings: readonly Drawing[];
+  readonly primary: Drawing | null;
 }
 
 export interface DrawingEditPayload {

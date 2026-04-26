@@ -77,6 +77,43 @@
         min-width: 44px;
         min-height: 44px;
       }
+      /* Phase 13 Cycle B.3 — long-press / right-click context menu.  Anchors
+         off `drawing:contextmenu` event (host-rendered DOM, library only emits). */
+      #drawing-context-menu {
+        position: fixed;
+        z-index: 1000;
+        background: var(--panel-bg);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+        padding: 4px;
+        min-width: 160px;
+        font-size: 12px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        display: none;
+      }
+      #drawing-context-menu[data-open="true"] {
+        display: block;
+      }
+      #drawing-context-menu button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        background: transparent;
+        color: inherit;
+        border: 0;
+        border-radius: 4px;
+        padding: 8px 10px;
+        font: inherit;
+        cursor: pointer;
+        min-height: 36px;
+      }
+      #drawing-context-menu button:hover,
+      #drawing-context-menu button:focus {
+        background: var(--button-bg-hover);
+        outline: none;
+      }
       #readout {
         margin-left: auto;
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -402,6 +439,12 @@
           </section>
         </aside>
       </div>
+    </div>
+    <div id="drawing-context-menu" role="menu" aria-label="Drawing actions" data-open="false">
+      <button type="button" data-action="duplicate" role="menuitem">Duplicate</button>
+      <button type="button" data-action="lock" role="menuitem">Toggle lock</button>
+      <button type="button" data-action="bring-front" role="menuitem">Bring to front</button>
+      <button type="button" data-action="delete" role="menuitem">Delete</button>
     </div>
     <script type="module" src="./main.ts"></script>
   </body>
