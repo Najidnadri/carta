@@ -52,7 +52,7 @@ export class HeikinAshiSeries extends Series {
   private lastInterval = -1;
 
   constructor(options: HeikinAshiSeriesOptions) {
-    super(options.channel, "ohlc", `HeikinAshiSeries(${options.channel})`);
+    super(options.channel, "ohlc", `HeikinAshiSeries(${options.channel})`, options);
     this.opts = options;
     this.pool = new ShapePool(this.container);
   }

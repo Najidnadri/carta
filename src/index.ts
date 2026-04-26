@@ -6,6 +6,21 @@ export type {
 export { DarkTheme, LightTheme } from "./core/infra/themes.js";
 export { Renderer } from "./core/render/Renderer.js";
 export type { PlotRect, RendererOptions } from "./core/render/Renderer.js";
+export { Pane } from "./core/pane/Pane.js";
+export type { PaneConstructionOptions } from "./core/pane/Pane.js";
+export { computePaneRects } from "./core/pane/PaneLayout.js";
+export type { PaneLayoutInput, PaneLayoutOptions } from "./core/pane/PaneLayout.js";
+export {
+  OVERLAY_SCALE_ID,
+} from "./core/pane/types.js";
+export type {
+  OverlayScaleId,
+  PaneOptions,
+  PaneRect,
+  PriceScaleId,
+  PriceScaleSide,
+  PriceScaleSlot,
+} from "./core/pane/types.js";
 export { ConfigState } from "./core/chart/ConfigState.js";
 export type { ConfigStateSnapshot } from "./core/chart/ConfigState.js";
 export { InvalidationQueue } from "./core/infra/InvalidationQueue.js";

@@ -44,7 +44,7 @@ export class OhlcBarSeries extends Series {
   private opts: OhlcBarSeriesOptions;
 
   constructor(options: OhlcBarSeriesOptions) {
-    super(options.channel, "ohlc", `OhlcBarSeries(${options.channel})`);
+    super(options.channel, "ohlc", `OhlcBarSeries(${options.channel})`, options);
     this.opts = options;
     this.pool = new ShapePool(this.container);
   }

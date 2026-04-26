@@ -32,6 +32,10 @@ export const DarkTheme: Theme = {
   crosshairTagBg: 0x1f2630,
   crosshairTagText: 0xc9d1d9,
   selection: 0x58a6ff,
+  // Phase 14 Cycle A — pane separator. `#5b6573` ≈ 3.4:1 contrast on
+  // `#0e1116`, passes the WCAG 1.4.11 non-text contrast floor for
+  // interactive UI components.
+  paneSeparator: 0x5b6573,
   fontFamily: DEFAULT_FONT_FAMILY,
   fontSize: DEFAULT_FONT_SIZE,
 };
@@ -64,6 +68,9 @@ export const LightTheme: Theme = {
   crosshairTagBg: 0x24292f,
   crosshairTagText: 0xffffff,
   selection: 0x2962ff,
+  // Phase 14 Cycle A — pane separator. `#9098a1` ≈ 3.5:1 contrast on
+  // `#ffffff`, passes WCAG 1.4.11.
+  paneSeparator: 0x9098a1,
   fontFamily: DEFAULT_FONT_FAMILY,
   fontSize: DEFAULT_FONT_SIZE,
 };

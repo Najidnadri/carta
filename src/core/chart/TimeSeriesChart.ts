@@ -3,27 +3,27 @@ import { ConfigState } from "./ConfigState.js";
 import { CrosshairController } from "../interaction/CrosshairController.js";
 import { DataStore } from "../data/DataStore.js";
 import { DrawingsController, type DrawingsFacade } from "../drawings/DrawingsController.js";
+import { MAIN_PANE_ID, asPaneId, type PaneId } from "../drawings/types.js";
 import { DarkTheme } from "../infra/themes.js";
 import { DebouncedEmitter } from "../infra/DebouncedEmitter.js";
 import { EventBus } from "../infra/EventBus.js";
 import { InvalidationQueue, type DirtyReason } from "../infra/InvalidationQueue.js";
 import { noopLogger } from "../infra/Logger.js";
+import { Pane } from "../pane/Pane.js";
+import { computePaneRects, type PaneLayoutInput } from "../pane/PaneLayout.js";
+import { PaneResizeController } from "../pane/PaneResizeController.js";
+import type { PaneOptions, PaneRect, PriceScaleId } from "../pane/types.js";
 import {
   defaultPriceFormatter,
   PRICE_AXIS_STRIP_WIDTH,
-  PriceAxis,
 } from "../price/PriceAxis.js";
 import type { PriceTickInfo } from "../price/PriceAxis.js";
 import {
   PriceAxisController,
   type PriceAxisDragOptions,
 } from "../price/PriceAxisController.js";
-import {
-  reducePriceRanges,
-  type PriceRange,
-  type PriceRangeProvider,
-} from "../price/PriceRangeProvider.js";
-import { PriceScale } from "../price/PriceScale.js";
+import type { PriceRangeProvider } from "../price/PriceRangeProvider.js";
+import type { PriceScale } from "../price/PriceScale.js";
 import { Renderer, type PlotRect } from "../render/Renderer.js";
 import type { Series, SeriesRenderContext } from "../series/Series.js";
 import { TimeAxis, type TimeAxisOptions } from "../time/TimeAxis.js";
@@ -57,7 +57,6 @@ import {
   type PriceDomain,
   type PriceFormatter,
   type PriceScaleFacade,
-  type PriceScaleMargins,
   type PriceScaleOptions,
   type Range,
   type SizeInfo,
@@ -112,8 +111,6 @@ export interface TimeSeriesChartConstructionOptions extends TimeSeriesChartOptio
   readonly dprListenerHooks?: DprListenerHooks;
 }
 
-const DEFAULT_DOMAIN_MIN = 0;
-const DEFAULT_DOMAIN_MAX = 1;
 const DPR_CAP = 2;
 
 /**
@@ -142,12 +139,13 @@ export class TimeSeriesChart {
   private readonly invalidator: InvalidationQueue;
   private readonly sharedContexts: GraphicsContext[] = [];
   private readonly timeAxis: TimeAxis;
-  private readonly priceAxis: PriceAxis;
   private readonly viewport: ViewportController;
   private readonly priceAxisController: PriceAxisController;
   private readonly crosshair: CrosshairController;
   private readonly drawingsController: DrawingsController;
   private readonly drawingsFacade: DrawingsFacade;
+  private readonly paneResizeController: PaneResizeController;
+  private lastPaneRects: readonly PaneRect[] = [];
   private readonly dataStore: DataStore;
   private readonly emitter: EventBus<CartaEventMap>;
   private readonly dataRequestDebouncer: DebouncedEmitter<void>;
@@ -156,16 +154,15 @@ export class TimeSeriesChart {
   private config: ConfigState;
   private disposed = false;
 
-  private priceDomain: PriceDomain;
-  private autoScaleEnabled = false;
-  private lastRenderedDomain: PriceDomain;
-  private readonly priceRangeProviders = new Set<PriceRangeProvider>();
+  private readonly panesList: Pane[] = [];
+  private readonly panesById = new Map<PaneId, Pane>();
+  private readonly seriesPaneById = new Map<Series, PaneId>();
+  private readonly seriesScaleById = new Map<Series, PriceScaleId>();
   private readonly series: Series[] = [];
   private priceFormatter: PriceFormatter;
-  private readonly priceScaleFacade: PriceScaleFacade;
   private seriesRenderCounter = 0;
   private trackingActive = false;
-  private trackingAnchor: { time: Time; price: Price } | null = null;
+  private trackingAnchor: { time: Time; price: Price; paneId: PaneId } | null = null;
   private documentPointerDownHandler: ((e: PointerEvent) => void) | null = null;
   private currentResolution: number;
   private dprMediaQuery: MediaQueryList | null = null;
@@ -199,21 +196,21 @@ export class TimeSeriesChart {
       () => { this.emitDataRequests(); },
     );
     this.invalidator = new InvalidationQueue((reasons) => { this.flush(reasons); });
+
+    // Phase 14 Cycle A — primary pane wraps the existing single-pane scene
+    // graph. Initial price-axis options propagate to the primary pane only;
+    // future panes get a default `PriceAxis` (cycle B will accept per-pane
+    // axis options).
+    const primary = new Pane({ id: MAIN_PANE_ID });
+    this.panesList.push(primary);
+    this.panesById.set(MAIN_PANE_ID, primary);
+    this.renderer.setPrimaryPane(primary);
+    if (opts.priceScale?.margins !== undefined) {
+      primary.ensureSlot("right", opts.priceScale.margins);
+    }
+
     this.timeAxis = new TimeAxis(renderer.gridLayer, renderer.axesLayer, opts.timeAxis);
-    this.priceAxis = new PriceAxis(renderer.gridLayer, renderer.axesLayer, opts.priceAxis);
-    const initialDomain: PriceDomain = Object.freeze({
-      min: asPrice(DEFAULT_DOMAIN_MIN),
-      max: asPrice(DEFAULT_DOMAIN_MAX),
-    });
-    this.priceDomain = initialDomain;
-    this.lastRenderedDomain = initialDomain;
     this.priceFormatter = opts.priceFormatter;
-    this.priceScaleFacade = {
-      setDomain: (min, max): void => { this.setPriceDomain(min, max); },
-      getDomain: (): PriceDomain => this.lastRenderedDomain,
-      isAutoScale: (): boolean => this.autoScaleEnabled,
-      setAutoScale: (on: boolean): void => { this.setAutoScaleInternal(on); },
-    };
     this.drawingsController = new DrawingsController({
       stage: renderer.app.stage,
       canvas: renderer.app.canvas,
@@ -289,7 +286,7 @@ export class TimeSeriesChart {
     this.priceAxisController = new PriceAxisController({
       axesLayer: renderer.axesLayer,
       plotRect: (): PlotRect => this.computePlotRect(),
-      getRenderedDomain: (): PriceDomain => this.lastRenderedDomain,
+      getRenderedDomain: (): PriceDomain => this.primaryRightSlotDomain(),
       setManualDomain: (min, max): void => { this.applyManualDomain(min, max); },
       setAutoScale: (on): void => { this.setAutoScaleInternal(on); },
       onGestureStart: (): void => { this.viewport.stopKinetic(); },
@@ -303,6 +300,16 @@ export class TimeSeriesChart {
       eventBus: this.emitter,
       logger: opts.logger,
       invalidate: (): void => { this.invalidator.invalidate("crosshair"); },
+    });
+    // Phase 14 Cycle A — drag-to-resize divider between adjacent panes.
+    this.paneResizeController = new PaneResizeController({
+      canvas: renderer.app.canvas,
+      separatorLayer: renderer.separatorLayer,
+      panes: () => this.panesList,
+      paneRects: () => this.lastPaneRects,
+      onResize: (aboveId, aboveH, belowId, belowH): void => {
+        this.applyPaneDragResize(aboveId, aboveH, belowId, belowH);
+      },
     });
   }
 
@@ -623,7 +630,10 @@ export class TimeSeriesChart {
    * `null` if the chart has no drawable plot (degenerate window or 0×0
    * rect). Used by the long-press path and `onTrackingMove`.
    */
-  private dataAnchorAtLocalPixel(localX: number, localY: number): { time: Time; price: Price } | null {
+  private dataAnchorAtLocalPixel(
+    localX: number,
+    localY: number,
+  ): { time: Time; price: Price; paneId: PaneId } | null {
     const plot = this.computePlotRect();
     if (plot.w <= 0 || plot.h <= 0) {
       return null;
@@ -632,7 +642,7 @@ export class TimeSeriesChart {
     const priceScale = this.currentPriceScaleForRect(plot);
     const time = timeScale.pixelToTime(asPixel(localX));
     const price = priceScale.pixelToValue(asPixel(localY));
-    return { time, price };
+    return { time, price, paneId: MAIN_PANE_ID };
   }
 
   /**
@@ -667,19 +677,24 @@ export class TimeSeriesChart {
    * Idempotent: re-entering already-tracking state re-anchors the crosshair
    * but does NOT emit a second `tracking:change` event.
    */
-  private enterTrackingInternal(anchor: { time: Time; price: Price }): void {
+  private enterTrackingInternal(anchor: { time: Time; price: Price; paneId?: PaneId }): void {
     if (this.disposed) {
       return;
     }
+    const fullAnchor: { time: Time; price: Price; paneId: PaneId } = {
+      time: anchor.time,
+      price: anchor.price,
+      paneId: anchor.paneId ?? MAIN_PANE_ID,
+    };
     if (this.trackingActive) {
       // Re-anchor only — no event on idempotent calls.
-      this.trackingAnchor = anchor;
+      this.trackingAnchor = fullAnchor;
       this.reprojectTrackingAnchor();
       this.invalidator.invalidate("crosshair");
       return;
     }
     this.trackingActive = true;
-    this.trackingAnchor = anchor;
+    this.trackingAnchor = fullAnchor;
     this.viewport.setTrackingMode(true);
     this.reprojectTrackingAnchor();
     if (typeof globalThis.document !== "undefined") {
@@ -865,9 +880,186 @@ export class TimeSeriesChart {
     this.viewport.stopKinetic();
   }
 
-  /** Facade for price-scale control. 04a: manual domain only; 04b adds autoScale. */
+  /**
+   * Facade for the **primary pane's right** price-scale. Equivalent to
+   * `chart.primaryPane().priceScale('right')`. Phase 14 Cycle A introduced
+   * panes; pre-cycle-A host code that calls `chart.priceScale()` continues
+   * to work unchanged.
+   */
   priceScale(): PriceScaleFacade {
-    return this.priceScaleFacade;
+    return this.primaryPane().priceScale("right");
+  }
+
+  /**
+   * Phase 14 Cycle A — public read-side accessors for the pane abstraction.
+   * `panes()` returns a top-to-bottom snapshot; `pane(id)` is `null` if
+   * unknown; `primaryPane()` is shorthand for `pane(MAIN_PANE_ID)`.
+   */
+  panes(): readonly Pane[] {
+    return this.panesList;
+  }
+
+  pane(id: PaneId): Pane | null {
+    return this.panesById.get(id) ?? null;
+  }
+
+  primaryPane(): Pane {
+    const p = this.panesById.get(MAIN_PANE_ID);
+    if (p === undefined) {
+      throw new Error("[carta] primaryPane: primary pane not constructed (chart disposed?)");
+    }
+    return p;
+  }
+
+  /**
+   * Phase 14 Cycle A — append a new pane below the existing stack. Auto-
+   * generates a stable id when omitted; throws if the supplied id collides.
+   * Stretch factor defaults to 1; `minHeight` defaults to 50 (hard floor 30
+   * inside `PaneLayout`).
+   */
+  addPane(opts?: PaneOptions): Pane {
+    if (this.disposed) {
+      throw new Error("[carta] addPane: chart is disposed");
+    }
+    const id = opts?.id ?? asPaneId(`pane-${generatePaneIdSuffix()}`);
+    if (this.panesById.has(id)) {
+      throw new Error(`[carta] addPane: id '${String(id)}' already exists`);
+    }
+    const pane = new Pane({
+      id,
+      stretchFactor: opts?.stretchFactor,
+      minHeight: opts?.minHeight,
+    });
+    this.renderer.attachPane(pane);
+    this.panesList.push(pane);
+    this.panesById.set(id, pane);
+    this.invalidator.invalidate("layout");
+    return pane;
+  }
+
+  /**
+   * Phase 14 Cycle A — remove a non-primary pane. Destroys every series
+   * attached to that pane (channel data caches are NOT touched, so re-adding
+   * a series on the same channel works). Throws on the primary pane.
+   */
+  /**
+   * Phase 14 Cycle A — programmatic resize. Pins the pane's height to
+   * `px`. Pass `null` to release the override and let the pane flex via
+   * `stretchFactor`. Emits `pane:resize` with `source: 'programmatic'`.
+   */
+  setPaneHeight(id: PaneId, px: number | null): void {
+    if (this.disposed) {
+      return;
+    }
+    const pane = this.panesById.get(id);
+    if (pane === undefined) {
+      return;
+    }
+    pane.setHeight(px);
+    this.invalidator.invalidate("layout");
+    if (typeof px === "number" && Number.isFinite(px)) {
+      this.emitter.emit("pane:resize", {
+        paneId: id,
+        height: pane.heightOverride ?? Math.floor(px),
+        source: "programmatic",
+      });
+    }
+  }
+
+  /**
+   * Phase 14 Cycle A — toggle pane visibility. Hidden panes occupy 0 px of
+   * layout; the pane's series + scale state are preserved so unhiding
+   * restores the prior visual. Emits `pane:visibility`.
+   */
+  setPaneHidden(id: PaneId, hidden: boolean): void {
+    if (this.disposed) {
+      return;
+    }
+    const pane = this.panesById.get(id);
+    if (pane === undefined) {
+      return;
+    }
+    if (pane.hidden === hidden) {
+      return;
+    }
+    pane.setHidden(hidden);
+    this.invalidator.invalidate("layout");
+    this.emitter.emit("pane:visibility", { paneId: id, hidden });
+    // Phase 14 Cycle A — emit `pane:resize` with `source: 'hidden'` only on
+    // hide (height collapses to 0 in the same frame). On show, the post-flush
+    // chart-resize path emits the restored height; emitting it here would
+    // require querying the not-yet-laid-out rect.
+    if (hidden) {
+      this.emitter.emit("pane:resize", {
+        paneId: id,
+        height: 0,
+        source: "hidden",
+      });
+    }
+  }
+
+  /**
+   * Phase 14 Cycle A — internal callback from `PaneResizeController` when
+   * the user finishes a divider drag. Pins both neighbouring panes to their
+   * new heights and emits one `pane:resize` per pane with `source: 'user-drag'`.
+   */
+  private applyPaneDragResize(
+    aboveId: string,
+    aboveH: number,
+    belowId: string,
+    belowH: number,
+  ): void {
+    const above = this.panesById.get(aboveId as PaneId);
+    const below = this.panesById.get(belowId as PaneId);
+    if (above === undefined || below === undefined) {
+      return;
+    }
+    above.setHeight(aboveH);
+    below.setHeight(belowH);
+    this.invalidator.invalidate("layout");
+    this.emitter.emit("pane:resize", {
+      paneId: above.id,
+      height: above.heightOverride ?? aboveH,
+      source: "user-drag",
+    });
+    this.emitter.emit("pane:resize", {
+      paneId: below.id,
+      height: below.heightOverride ?? belowH,
+      source: "user-drag",
+    });
+  }
+
+  removePane(id: PaneId): void {
+    if (this.disposed) {
+      return;
+    }
+    if (id === MAIN_PANE_ID) {
+      throw new Error("[carta] removePane: cannot remove the primary pane");
+    }
+    const pane = this.panesById.get(id);
+    if (pane === undefined) {
+      return;
+    }
+    // Destroy series owned by this pane.
+    const survivors: Series[] = [];
+    for (const s of this.series) {
+      const sPane = this.seriesPaneById.get(s) ?? MAIN_PANE_ID;
+      if (sPane === id) {
+        s.destroy();
+        this.seriesPaneById.delete(s);
+        this.seriesScaleById.delete(s);
+        continue;
+      }
+      survivors.push(s);
+    }
+    this.series.length = 0;
+    this.series.push(...survivors);
+    this.renderer.detachPane(pane);
+    pane.destroy();
+    this.panesList.splice(this.panesList.indexOf(pane), 1);
+    this.panesById.delete(id);
+    this.crosshair.releasePaneTag(id);
+    this.invalidator.invalidate("layout");
   }
 
   /**
@@ -904,12 +1096,12 @@ export class TimeSeriesChart {
 
   /** Visible price ticks from the most-recent render. Dev/test introspection. */
   visiblePriceTicks(): readonly PriceTickInfo[] {
-    return this.priceAxis.ticks();
+    return this.primaryPane().priceAxis?.ticks() ?? [];
   }
 
   /** Price-label pool capacity (constant after first render). Dev/test introspection. */
   priceAxisPoolSize(): number {
-    return this.priceAxis.poolSize();
+    return this.primaryPane().priceAxis?.poolSize() ?? 0;
   }
 
   /**
@@ -936,9 +1128,23 @@ export class TimeSeriesChart {
       getInterval: () => Number(this.config.snapshot.intervalDuration),
       invalidate: () => { this.invalidator.invalidate("data"); },
     });
-    series.attach(this.renderer.seriesLayer);
+
+    // Phase 14 Cycle A — route the series to its target pane + scale slot.
+    // Default = primary pane / right scale. Throws if the requested pane id
+    // does not exist (host typo / removed pane).
+    const paneId = series.paneId ?? MAIN_PANE_ID;
+    const pane = this.panesById.get(paneId);
+    if (pane === undefined) {
+      throw new Error(
+        `[carta] addSeries: paneId '${String(paneId)}' does not exist`,
+      );
+    }
+    const scaleId: PriceScaleId = series.priceScaleId ?? "right";
+    pane.addSeriesToScale(series, scaleId, series.scaleMargins);
+    series.attach(pane.seriesLayer);
     this.series.push(series);
-    this.priceRangeProviders.add(series);
+    this.seriesPaneById.set(series, paneId);
+    this.seriesScaleById.set(series, scaleId);
     this.invalidator.invalidate("data");
     return series;
   }
@@ -957,23 +1163,32 @@ export class TimeSeriesChart {
       return false;
     }
     this.series.splice(idx, 1);
-    this.priceRangeProviders.delete(series);
+    const paneId = this.seriesPaneById.get(series) ?? MAIN_PANE_ID;
+    const scaleId = this.seriesScaleById.get(series) ?? "right";
+    this.panesById.get(paneId)?.removeSeriesFromScale(series, scaleId);
+    this.seriesPaneById.delete(series);
+    this.seriesScaleById.delete(series);
     series.destroy();
     this.invalidator.invalidate("data");
     return true;
   }
 
-  /** Register a provider for auto-scale reconciliation. Providers are polled
-   *  once per flush while `autoScale` is on. No-op if already registered. */
+  /**
+   * Register a provider for auto-scale reconciliation on the **primary pane's
+   * right scale**. Providers added here participate in the same `'right'`
+   * slot as series. No-op if already registered. Cycle B may add a
+   * pane-aware variant.
+   */
   addPriceRangeProvider(provider: PriceRangeProvider): void {
     if (this.disposed) {
       return;
     }
-    if (this.priceRangeProviders.has(provider)) {
+    const slot = this.primaryRightSlotState();
+    if (slot.providers.has(provider)) {
       return;
     }
-    this.priceRangeProviders.add(provider);
-    if (this.autoScaleEnabled) {
+    slot.providers.add(provider);
+    if (slot.autoScaleEnabled) {
       this.invalidator.invalidate("viewport");
     }
   }
@@ -982,60 +1197,64 @@ export class TimeSeriesChart {
     if (this.disposed) {
       return;
     }
-    if (!this.priceRangeProviders.delete(provider)) {
+    const slot = this.primaryRightSlotState();
+    if (!slot.providers.delete(provider)) {
       return;
     }
-    if (this.autoScaleEnabled) {
+    if (slot.autoScaleEnabled) {
       this.invalidator.invalidate("viewport");
     }
   }
 
-  private setPriceDomain(min: Price | number, max: Price | number): void {
-    const rawMin = Number(min);
-    const rawMax = Number(max);
-    if (!Number.isFinite(rawMin) || !Number.isFinite(rawMax)) {
-      this.opts.logger.warn(
-        "[carta] priceScale.setDomain received non-finite min/max — price axis will hide until valid values are supplied",
-      );
-    } else if (rawMin > rawMax) {
-      this.opts.logger.warn(
-        "[carta] priceScale.setDomain min > max — price axis will hide until corrected",
-      );
-    }
-    const next: PriceDomain = Object.freeze({ min: asPrice(rawMin), max: asPrice(rawMax) });
-    const prevMin = Number(this.priceDomain.min);
-    const prevMax = Number(this.priceDomain.max);
-    const unchanged =
-      ((Number.isNaN(prevMin) && Number.isNaN(rawMin)) || prevMin === rawMin) &&
-      ((Number.isNaN(prevMax) && Number.isNaN(rawMax)) || prevMax === rawMax);
-    const autoWasOn = this.autoScaleEnabled;
-    this.autoScaleEnabled = false;
-    if (unchanged && !autoWasOn) {
-      return;
-    }
-    this.priceDomain = next;
-    this.invalidator.invalidate("viewport");
-  }
-
+  /**
+   * Manual-domain write entrypoint used by the `PriceAxisController` drag
+   * handler. Mutates the primary pane's `'right'` slot in place; `setDomain`
+   * via the public facade flips `autoScale` off, so we mirror that here.
+   */
   private applyManualDomain(min: Price, max: Price): void {
-    const next: PriceDomain = Object.freeze({ min, max });
-    this.priceDomain = next;
+    this.primaryPane().applyManualDomain("right", { min, max });
     this.invalidator.invalidate("viewport");
   }
 
+  /**
+   * Toggle auto-scale on the primary pane's right slot. Public surface goes
+   * through the slot's facade (`chart.priceScale().setAutoScale(on)`); the
+   * internal call exists so the price-axis controller's gesture-end handler
+   * can flip it without re-routing through the facade.
+   */
   private setAutoScaleInternal(on: boolean): void {
     if (this.disposed) {
       return;
     }
-    if (this.autoScaleEnabled === on) {
+    const slot = this.primaryRightSlotState();
+    if (slot.autoScaleEnabled === on) {
       return;
     }
-    this.autoScaleEnabled = on;
+    slot.autoScaleEnabled = on;
     this.invalidator.invalidate("viewport");
   }
 
-  private resolvePriceMargins(): PriceScaleMargins | undefined {
-    return this.opts.priceScale?.margins;
+  // ─── Phase 14 Cycle A — primary pane shorthands ─────────────────────────
+
+  /** Read-only domain accessor for the primary pane's right slot. */
+  private primaryRightSlotDomain(): PriceDomain {
+    return this.primaryPane().priceScale("right").getDomain();
+  }
+
+  /** Internal slot state for direct provider-set / autoScale mutation. */
+  private primaryRightSlotState(): {
+    autoScaleEnabled: boolean;
+    readonly providers: Set<PriceRangeProvider>;
+  } {
+    // Reach into the pane's slot via `ensureSlot` so we get the live state
+    // object rather than a snapshot. The cast is internal-only — the public
+    // `priceScale` facade is the host-facing surface.
+    const slots = this.primaryPane().scales();
+    const right = slots.find((s) => s.id === "right");
+    if (right === undefined) {
+      throw new Error("[carta] primary pane right slot missing");
+    }
+    return right;
   }
 
   private applyWindowInternal(win: WindowInput): void {
@@ -1133,17 +1352,23 @@ export class TimeSeriesChart {
     this.trackingAnchor = null;
     this.disarmDprListener();
     this.drawingsController.destroy();
+    this.paneResizeController.destroy();
     this.crosshair.destroy();
     this.priceAxisController.destroy();
     this.viewport.destroy();
     this.invalidator.dispose();
     this.timeAxis.destroy();
-    this.priceAxis.destroy();
     for (const s of this.series) {
       s.destroy();
     }
     this.series.length = 0;
-    this.priceRangeProviders.clear();
+    this.seriesPaneById.clear();
+    this.seriesScaleById.clear();
+    for (const pane of this.panesList) {
+      pane.destroy();
+    }
+    this.panesList.length = 0;
+    this.panesById.clear();
     this.dataStore.clearAll();
     this.emitter.removeAllListeners();
     for (const ctx of this.sharedContexts) {
@@ -1158,16 +1383,30 @@ export class TimeSeriesChart {
       return;
     }
 
+    // Layout panes once per flush (also used by the crosshair fast path).
+    const paneRects = this.computePaneRects();
+    this.lastPaneRects = paneRects;
+    for (let i = 0; i < this.panesList.length; i += 1) {
+      const pane = this.panesList[i];
+      const rect = paneRects[i];
+      if (pane !== undefined && rect !== undefined) {
+        pane.applyRect(rect);
+      }
+    }
+    const primaryRect = paneRects[0] ?? { x: 0, y: 0, w: 0, h: 0 };
+    const snap = this.config.snapshot;
+
     // Fast path: pointer moves that only set the `'crosshair'` dirty flag
     // must not redraw series / axes / grid. Uses the current plot rect +
     // scales against the last committed window — no layout work.
     if (reasons.size === 1 && reasons.has("crosshair")) {
-      const plotRect = this.computePlotRect();
-      const snap = this.config.snapshot;
+      const priceScalesByPane = this.collectPriceScalesByPane();
       this.crosshair.redraw({
-        plotRect,
-        timeScale: this.currentTimeScaleForRect(plotRect),
-        priceScale: this.currentPriceScaleForRect(plotRect),
+        plotRect: primaryRect,
+        paneRects: this.paneRectsForCrosshair(paneRects),
+        priceScalesByPane,
+        timeScale: this.currentTimeScaleForRect(primaryRect),
+        priceScale: this.primaryPane().currentPriceScaleForSlot("right"),
         theme: snap.theme,
         dataStore: this.dataStore,
         series: this.series,
@@ -1181,9 +1420,7 @@ export class TimeSeriesChart {
 
     // Phase 09 cycle B — when tracking is active, every full-path flush
     // (window/size/layout/data change) must re-project the stored data
-    // anchor through the new scales BEFORE the crosshair redraws. Without
-    // this, a pinch / pan / DPR change would leave the crosshair pinned to
-    // its old pixel even though the bar underneath moved.
+    // anchor through the new scales BEFORE the crosshair redraws.
     if (
       this.trackingActive &&
       this.trackingAnchor !== null &&
@@ -1192,36 +1429,51 @@ export class TimeSeriesChart {
       this.reprojectTrackingAnchor();
     }
 
-    const plotRect = this.computePlotRect();
-    this.renderer.layout(plotRect);
-    this.renderer.renderFrame(
-      this.config.snapshot.theme,
-      this.config.snapshot.width,
-      this.config.snapshot.height,
-      plotRect,
-    );
-    this.reconcileRenderedDomain();
+    this.renderer.renderFrame(snap.theme, snap.width, snap.height, paneRects);
+    this.paneResizeController.render(snap.theme);
+    // Reconcile each pane's scales (auto-scale → lastRenderedDomain).
+    const winStart = Number(snap.startTime);
+    const winEnd = Number(snap.endTime);
+    for (const pane of this.panesList) {
+      pane.reconcileEachScale(winStart, winEnd);
+    }
     this.priceAxisController.syncHitArea();
-    const scale = this.currentTimeScaleForRect(plotRect);
-    const priceScale = this.currentPriceScaleForRect(plotRect);
-    if (this.series.length > 0 && (reasons.has("data") || reasons.has("viewport") || reasons.has("size") || reasons.has("layout") || reasons.has("theme"))) {
-      const snap = this.config.snapshot;
-      const ctx: SeriesRenderContext = {
-        startTime: snap.startTime,
-        endTime: snap.endTime,
-        intervalDuration: snap.intervalDuration,
-        plotWidth: plotRect.w,
-        plotHeight: plotRect.h,
-        timeScale: scale,
-        priceScale,
-        dataStore: this.dataStore,
-        theme: snap.theme,
-      };
+    const timeScale = this.currentTimeScaleForRect(primaryRect);
+
+    if (
+      this.series.length > 0 &&
+      (reasons.has("data") ||
+        reasons.has("viewport") ||
+        reasons.has("size") ||
+        reasons.has("layout") ||
+        reasons.has("theme"))
+    ) {
       for (const s of this.series) {
+        const paneId = this.seriesPaneById.get(s) ?? MAIN_PANE_ID;
+        const scaleId = this.seriesScaleById.get(s) ?? "right";
+        const pane = this.panesById.get(paneId);
+        if (pane === undefined) {
+          continue;
+        }
+        const paneRect = pane.getRect();
+        const ctx: SeriesRenderContext = {
+          startTime: snap.startTime,
+          endTime: snap.endTime,
+          intervalDuration: snap.intervalDuration,
+          plotWidth: paneRect.w,
+          plotHeight: paneRect.h,
+          timeScale,
+          priceScale: pane.currentPriceScaleForSlot(scaleId),
+          dataStore: this.dataStore,
+          theme: snap.theme,
+        };
         s.render(ctx);
         this.seriesRenderCounter += 1;
       }
     }
+
+    // Drawings are pinned to the primary pane in cycle A — cycle B opens
+    // them up to non-primary panes via the anchor's `paneId` field.
     if (
       reasons.has("drawings") ||
       reasons.has("viewport") ||
@@ -1230,26 +1482,25 @@ export class TimeSeriesChart {
       reasons.has("theme")
     ) {
       this.drawingsController.render({
-        plotRect,
-        timeScale: scale,
-        priceScale,
-        theme: this.config.snapshot.theme,
+        plotRect: primaryRect,
+        timeScale,
+        priceScale: this.primaryPane().currentPriceScaleForSlot("right"),
+        theme: snap.theme,
         dpr: this.currentResolution,
       });
     }
-    this.timeAxis.render(scale, plotRect, this.config.snapshot.theme);
-    this.priceAxis.render(
-      priceScale,
-      plotRect,
-      this.config.snapshot.theme,
-      this.priceFormatter,
-      this.opts.logger,
-    );
-    // Keep the crosshair in sync with whatever scales / data / theme just
-    // changed — without this branch, a pan drag would leave the hair pointing
-    // at the bar under the cursor *before* the drag, and a theme swap while
-    // the crosshair is visible would strand stale colours until the next
-    // pointer move.
+
+    // Time axis renders against the bottom of the entire pane stack so its
+    // labels sit in the bottom margin — single-pane invocation matches the
+    // prior `plotRect` shape exactly.
+    const stackRect: PlotRect = paneStackBottomRect(primaryRect, paneRects);
+    this.timeAxis.render(timeScale, stackRect, snap.theme);
+
+    // Per-pane price axes — each pane owns its own labels.
+    for (const pane of this.panesList) {
+      pane.renderPriceAxis(snap.theme, this.priceFormatter, this.opts.logger);
+    }
+
     if (
       reasons.has("crosshair") ||
       reasons.has("viewport") ||
@@ -1258,11 +1509,12 @@ export class TimeSeriesChart {
       reasons.has("size") ||
       reasons.has("theme")
     ) {
-      const snap = this.config.snapshot;
       this.crosshair.redraw({
-        plotRect,
-        timeScale: scale,
-        priceScale,
+        plotRect: primaryRect,
+        paneRects: this.paneRectsForCrosshair(paneRects),
+        priceScalesByPane: this.collectPriceScalesByPane(),
+        timeScale,
+        priceScale: this.primaryPane().currentPriceScaleForSlot("right"),
         theme: snap.theme,
         dataStore: this.dataStore,
         series: this.series,
@@ -1273,6 +1525,28 @@ export class TimeSeriesChart {
     }
     this.renderer.render();
     this.maybeEmitWindowChange(reasons);
+  }
+
+  /** Pane-aware `priceScalesByPane` snapshot — primary pane's right scale only. */
+  private collectPriceScalesByPane(): ReadonlyMap<PaneId, PriceScale> {
+    const out = new Map<PaneId, PriceScale>();
+    for (const pane of this.panesList) {
+      out.set(pane.id, pane.currentPriceScaleForSlot("right"));
+    }
+    return out;
+  }
+
+  private paneRectsForCrosshair(rects: readonly PaneRect[]): readonly { id: PaneId; rect: PaneRect }[] {
+    const out: { id: PaneId; rect: PaneRect }[] = [];
+    for (let i = 0; i < this.panesList.length; i += 1) {
+      const pane = this.panesList[i];
+      const rect = rects[i];
+      if (pane === undefined || rect === undefined) {
+        continue;
+      }
+      out.push({ id: pane.id, rect });
+    }
+    return out;
   }
 
   /**
@@ -1377,33 +1651,13 @@ export class TimeSeriesChart {
     return this.dataRequestDebouncer.hasPending();
   }
 
-  /** Pull-based reconciliation of the rendered price domain. Runs once per
-   *  flush, writes `lastRenderedDomain` only. Never calls `invalidate`. */
-  private reconcileRenderedDomain(): void {
-    if (!this.autoScaleEnabled) {
-      this.lastRenderedDomain = this.priceDomain;
-      return;
-    }
-    const snap = this.config.snapshot;
-    const reduced: PriceRange | null = reducePriceRanges(
-      this.priceRangeProviders,
-      snap.startTime,
-      snap.endTime,
-    );
-    if (reduced === null) {
-      // Retain the prior rendered domain — don't collapse to [0, 1].
-      return;
-    }
-    this.lastRenderedDomain = Object.freeze({ min: reduced.min, max: reduced.max });
-  }
-
-  private currentPriceScaleForRect(plotRect: PlotRect): PriceScale {
-    return new PriceScale({
-      domainMin: this.lastRenderedDomain.min,
-      domainMax: this.lastRenderedDomain.max,
-      pixelHeight: plotRect.h,
-      margins: this.resolvePriceMargins(),
-    });
+  /**
+   * Phase 14 Cycle A — read the primary pane's right scale at the current
+   * primary pane rect height. Used by `dataAnchorAtLocalPixel` and
+   * `reprojectTrackingAnchor` for tracking-mode reprojection.
+   */
+  private currentPriceScaleForRect(_plotRect: PlotRect): PriceScale {
+    return this.primaryPane().currentPriceScaleForSlot("right");
   }
 
   private currentTimeScale(): TimeScale {
@@ -1420,14 +1674,35 @@ export class TimeSeriesChart {
     });
   }
 
+  /**
+   * Phase 14 Cycle A — primary pane plot rect. Single-pane charts: returns
+   * the same shape as the legacy `computePlotRect`. Multi-pane charts:
+   * returns the primary pane's rect computed by `PaneLayout`.
+   */
   private computePlotRect(): PlotRect {
+    const rects = this.computePaneRects();
+    return rects[0] ?? { x: 0, y: 0, w: 0, h: 0 };
+  }
+
+  /**
+   * Phase 14 Cycle A — distribute the chart canvas across panes. Panes
+   * occupy the canvas minus `BOTTOM_MARGIN` (time-axis gutter) and minus
+   * `PRICE_AXIS_STRIP_WIDTH` on the right (each pane's PriceAxis renders
+   * inside its own subtree, so the rect's `w` is canvas - strip).
+   */
+  private computePaneRects(): PaneRect[] {
     const { width, height } = this.config.snapshot;
-    return {
-      x: 0,
-      y: 0,
-      w: Math.max(0, width - PRICE_AXIS_STRIP_WIDTH),
-      h: Math.max(0, height - BOTTOM_MARGIN),
-    };
+    const usableW = Math.max(0, width - PRICE_AXIS_STRIP_WIDTH);
+    const inputs: PaneLayoutInput[] = this.panesList.map((p) => ({
+      stretchFactor: p.stretchFactor,
+      minHeight: p.minHeight,
+      hidden: p.hidden,
+      heightOverride: p.heightOverride,
+    }));
+    return computePaneRects(usableW, height, inputs, {
+      bottomMargin: BOTTOM_MARGIN,
+      minHeight: 50,
+    });
   }
 
   private onAutoResize(): void {
@@ -1447,6 +1722,40 @@ interface ResolvedWindow {
   readonly startTime: Time;
   readonly endTime: Time;
   readonly intervalDuration: Interval;
+}
+
+/**
+ * Phase 14 Cycle A — short stable suffix for auto-generated `PaneId`s. Uses
+ * `crypto.randomUUID()` when available, falls back to a monotonic counter
+ * for environments without WebCrypto.
+ */
+let __paneIdCounter = 0;
+function generatePaneIdSuffix(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (c?.randomUUID !== undefined) {
+    return c.randomUUID().slice(0, 8);
+  }
+  __paneIdCounter += 1;
+  return `auto${String(__paneIdCounter)}`;
+}
+
+/**
+ * Phase 14 Cycle A — shape passed to `TimeAxis.render`. `x` matches the
+ * primary pane's `x` (= 0), `w` matches the primary pane's `w` (= canvas −
+ * price-axis strip), `y + h` lands at the bottom of the bottom-most pane so
+ * tick labels render in the bottom-margin gutter.
+ */
+function paneStackBottomRect(primary: PlotRect, rects: readonly PaneRect[]): PlotRect {
+  if (rects.length === 0) {
+    return primary;
+  }
+  const last = rects[rects.length - 1] ?? primary;
+  return {
+    x: primary.x,
+    y: primary.y,
+    w: primary.w,
+    h: Math.max(0, last.y + last.h - primary.y),
+  };
 }
 
 function resolveWindow(

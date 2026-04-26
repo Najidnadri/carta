@@ -61,7 +61,7 @@ export class LineSeries extends Series {
   private readonly graphics: Graphics;
 
   constructor(options: LineSeriesOptions) {
-    super(options.channel, "point", `LineSeries(${options.channel})`);
+    super(options.channel, "point", `LineSeries(${options.channel})`, options);
     this.opts = options;
     this.graphics = new Graphics();
     this.container.addChild(this.graphics);

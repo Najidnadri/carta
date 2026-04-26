@@ -42,7 +42,7 @@ export class CandlestickSeries extends Series {
   private opts: CandlestickSeriesOptions;
 
   constructor(options: CandlestickSeriesOptions) {
-    super(options.channel, "ohlc", `CandlestickSeries(${options.channel})`);
+    super(options.channel, "ohlc", `CandlestickSeries(${options.channel})`, options);
     this.opts = options;
     this.pool = new ShapePool(this.container);
   }

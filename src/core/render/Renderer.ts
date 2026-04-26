@@ -1,4 +1,5 @@
 import { Application, Container, Graphics } from "pixi.js";
+import type { Pane } from "../pane/Pane.js";
 import type { Theme } from "../../types.js";
 
 export interface RendererOptions {
@@ -18,38 +19,40 @@ export interface PlotRect {
 }
 
 /**
- * Owns the Pixi `Application` and the 9-layer scene graph.
+ * Owns the Pixi `Application` and the chart-level scene graph. Per-pane
+ * subtrees (`gridLayer`, `plotClip`, `seriesLayer`, …) live inside `Pane`
+ * instances and are appended under `paneRoot`.
  *
  *   stage
- *     ├─ bgLayer                (full-canvas background + placeholder frame)
- *     ├─ gridLayer              (future: grid lines; reserved for cacheAsTexture)
- *     ├─ plotClip               (rect mask → scissor; non-render-group)
- *     │    ├─ seriesLayer       (isRenderGroup = true)
- *     │    ├─ overlaysLayer
- *     │    └─ drawingsLayer
- *     ├─ crosshairLinesLayer    (hair lines; below axes so they can't cover tick labels)
- *     ├─ axesLayer
- *     ├─ drawingsHandlesLayer   (anchor handles — escape plot clip; eventMode: 'none')
- *     ├─ crosshairTagsLayer     (price / time readout tags; above axes so they cover ticks)
+ *     ├─ bgLayer                (full-canvas background; per-pane frames)
+ *     ├─ paneRoot               (one child Container per pane, translated by layout)
+ *     │    └─ paneContainer × N
+ *     │         ├─ gridLayer
+ *     │         ├─ plotClip (mask → scissor)
+ *     │         │    ├─ seriesLayer (isRenderGroup = true)
+ *     │         │    ├─ overlaysLayer
+ *     │         │    └─ drawingsLayer
+ *     │         └─ priceAxis labels (siblings of plotClip)
+ *     ├─ crosshairLinesLayer    (chart-wide vert + active-pane horz)
+ *     ├─ axesLayer              (TimeAxis only — PriceAxis lives per-pane)
+ *     ├─ drawingsHandlesLayer
+ *     ├─ crosshairTagsLayer     (per-pane price tags + chart-wide time tag)
  *     ├─ legendLayer
  *     └─ tooltipLayer
  *
- * Only `seriesLayer` is a render group — see research §13 ("mask on render
- * group is valid but less optimized than mask on a plain container").
- * Crosshair layers + drawings-handles layer are `eventMode = 'none'`; the
- * chart-level hit-tester finds drawing handles by data, not via Pixi's
- * per-display-object dispatch (see `DrawingsController`).
+ * Phase 14 cycle A back-compat: the legacy `plotClip` / `seriesLayer` /
+ * `gridLayer` / `overlaysLayer` / `drawingsLayer` getters delegate to the
+ * primary pane's containers so existing host code that touches them keeps
+ * working. Cycle B's drag-resize work removes the delegates.
  */
 export class Renderer {
   readonly app: Application;
   readonly stage: Container;
 
   readonly bgLayer = new Container({ label: "bgLayer" });
-  readonly gridLayer = new Container({ label: "gridLayer" });
-  readonly plotClip = new Container({ label: "plotClip" });
-  readonly seriesLayer = new Container({ label: "seriesLayer", isRenderGroup: true });
-  readonly overlaysLayer = new Container({ label: "overlaysLayer" });
-  readonly drawingsLayer = new Container({ label: "drawingsLayer" });
+  readonly paneRoot = new Container({ label: "paneRoot" });
+  /** Phase 14 Cycle A — separator lines + drag handles between panes. */
+  readonly separatorLayer = new Container({ label: "separatorLayer" });
   readonly crosshairLinesLayer = new Container({ label: "crosshairLinesLayer", eventMode: "none" });
   readonly axesLayer = new Container({ label: "axesLayer" });
   readonly drawingsHandlesLayer = new Container({ label: "drawingsHandlesLayer", eventMode: "none" });
@@ -58,8 +61,8 @@ export class Renderer {
   readonly tooltipLayer = new Container({ label: "tooltipLayer" });
 
   private readonly bgGraphics = new Graphics();
-  private readonly clipMask = new Graphics();
   private destroyed = false;
+  private primary: Pane | null = null;
 
   private constructor(app: Application) {
     this.app = app;
@@ -67,14 +70,10 @@ export class Renderer {
 
     this.bgLayer.addChild(this.bgGraphics);
 
-    this.plotClip.addChild(this.seriesLayer, this.overlaysLayer, this.drawingsLayer);
-    this.plotClip.addChild(this.clipMask);
-    this.plotClip.mask = this.clipMask;
-
     this.stage.addChild(
       this.bgLayer,
-      this.gridLayer,
-      this.plotClip,
+      this.paneRoot,
+      this.separatorLayer,
       this.crosshairLinesLayer,
       this.axesLayer,
       this.drawingsHandlesLayer,
@@ -97,10 +96,7 @@ export class Renderer {
       sharedTicker: false,
       // Phase 13 Cycle C.3 — preserve the GL back buffer between frames so
       // hosts (and the test harness) can `readPixels` / `canvas.toDataURL`
-      // / `app.renderer.extract.canvas` without a black-frame race. Adds
-      // ~one extra back-buffer worth of GPU memory; acceptable for a
-      // charting library where pixel capture is a common requirement
-      // (PNG export, visual-regression tests, third-party screenshot tools).
+      // / `app.renderer.extract.canvas` without a black-frame race.
       preserveDrawingBuffer: true,
     });
     const canvasStyle = app.canvas.style;
@@ -109,22 +105,11 @@ export class Renderer {
     canvasStyle.height = "100%";
     canvasStyle.touchAction = "none";
     canvasStyle.userSelect = "none";
-    // Phase 13 Cycle B1 — keyboard discoverability. `tabIndex=0` puts the
-    // canvas in tab order so cold-load Tab focuses it; `outline:none`
-    // suppresses the default focus ring (host-level a11y is phase 17).
     app.canvas.tabIndex = 0;
     canvasStyle.outline = "none";
-    // Vendor-prefixed properties (-webkit-user-select for iOS Safari,
-    // -webkit-tap-highlight-color for tap-flash suppression) routed via
-    // `setProperty` to dodge the deprecation hints + stay zero-`any`.
     canvasStyle.setProperty("-webkit-user-select", "none");
     canvasStyle.setProperty("-webkit-tap-highlight-color", "transparent");
-    // `overscroll-behavior` only takes effect on scroll containers — a
-    // <canvas> is not one, so apply it to the host's container element.
     options.container.style.overscrollBehavior = "contain";
-    // Phase 13 Cycle D — DOM-overlay siblings (text editor, styling panel)
-    // need to be positioned relative to the container, so guarantee the
-    // container is a positioning context.
     if (options.container.style.position === "" || options.container.style.position === "static") {
       options.container.style.position = "relative";
     }
@@ -136,16 +121,70 @@ export class Renderer {
 
   /**
    * Phase 13 Cycle D — host container exposed for DOM-overlay siblings
-   * (text editor, future styling panel). Set by `Renderer.create` and read
-   * by `DrawingsController` when mounting / repositioning the editor.
+   * (text editor, future styling panel).
    */
   hostContainer: HTMLElement | null = null;
 
   /**
-   * Update the renderer's resolution (DPR) and resize. Used by the chart's
-   * DPR-change listener so a window dragged across monitors with different
-   * scaling stays sharp. Caller is responsible for invalidating the dirty
-   * queue afterwards — `setResolution` does NOT call `render()`.
+   * Bind the primary pane. Called once during chart construction so the
+   * renderer's legacy getters (`plotClip`, `seriesLayer`, etc.) delegate to
+   * its containers.
+   */
+  setPrimaryPane(pane: Pane): void {
+    if (this.primary === pane) {
+      return;
+    }
+    this.primary = pane;
+    if (pane.paneContainer.parent !== this.paneRoot) {
+      this.paneRoot.addChild(pane.paneContainer);
+    }
+  }
+
+  /** Append a non-primary pane's container under `paneRoot`. */
+  attachPane(pane: Pane): void {
+    if (pane.paneContainer.parent !== this.paneRoot) {
+      this.paneRoot.addChild(pane.paneContainer);
+    }
+  }
+
+  /** Detach a pane's container from `paneRoot`. Caller still owns destroy. */
+  detachPane(pane: Pane): void {
+    if (pane.paneContainer.parent === this.paneRoot) {
+      this.paneRoot.removeChild(pane.paneContainer);
+    }
+  }
+
+  // ─── Legacy getter shims (cycle A back-compat) ──────────────────────────
+
+  get gridLayer(): Container {
+    return this.requirePrimary().gridLayer;
+  }
+
+  get plotClip(): Container {
+    return this.requirePrimary().plotClip;
+  }
+
+  get seriesLayer(): Container {
+    return this.requirePrimary().seriesLayer;
+  }
+
+  get overlaysLayer(): Container {
+    return this.requirePrimary().overlaysLayer;
+  }
+
+  get drawingsLayer(): Container {
+    return this.requirePrimary().drawingsLayer;
+  }
+
+  private requirePrimary(): Pane {
+    if (this.primary === null) {
+      throw new Error("[carta] Renderer: legacy layer accessed before primary pane was bound");
+    }
+    return this.primary;
+  }
+
+  /**
+   * Update the renderer's resolution (DPR) and resize.
    */
   setResolution(dpr: number): void {
     if (this.destroyed) {
@@ -158,28 +197,23 @@ export class Renderer {
     this.app.renderer.resize(this.app.renderer.width / dpr, this.app.renderer.height / dpr);
   }
 
-  /** Applies a new plot rect: moves & resizes the clip mask. */
-  layout(plotRect: PlotRect): void {
-    const safeW = Math.max(0, plotRect.w);
-    const safeH = Math.max(0, plotRect.h);
-    this.plotClip.position.set(plotRect.x, plotRect.y);
-    this.clipMask
-      .clear()
-      .rect(0, 0, safeW, safeH)
-      .fill(0xffffff);
-  }
-
-  /** Draws the dark background + the placeholder plot frame. */
-  renderFrame(theme: Theme, canvasW: number, canvasH: number, plotRect: PlotRect): void {
+  /**
+   * Phase 14 Cycle A — paint the canvas background plus one frame stroke
+   * per pane rect. Single-pane invocation paints a single rect identical to
+   * the prior single-pane output.
+   */
+  renderFrame(theme: Theme, canvasW: number, canvasH: number, paneRects: readonly PlotRect[]): void {
     this.bgGraphics
       .clear()
       .rect(0, 0, Math.max(0, canvasW), Math.max(0, canvasH))
       .fill(theme.background);
 
-    if (plotRect.w > 0 && plotRect.h > 0) {
-      this.bgGraphics
-        .rect(plotRect.x + 0.5, plotRect.y + 0.5, plotRect.w - 1, plotRect.h - 1)
-        .stroke({ width: 1, color: theme.frame, alpha: 1 });
+    for (const rect of paneRects) {
+      if (rect.w > 0 && rect.h > 0) {
+        this.bgGraphics
+          .rect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1)
+          .stroke({ width: 1, color: theme.frame, alpha: 1 });
+      }
     }
   }
 
@@ -203,7 +237,7 @@ export class Renderer {
       return;
     }
     this.destroyed = true;
-    this.plotClip.mask = null;
+    this.primary = null;
     this.app.destroy(
       { removeView: true },
       { children: true, texture: true, textureSource: true, context: true },

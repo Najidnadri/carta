@@ -102,7 +102,7 @@ export class MarkerOverlay extends Series {
   private destroyed = false;
 
   constructor(options: MarkerOverlayOptions) {
-    super(options.channel, "marker", `MarkerOverlay(${options.channel})`);
+    super(options.channel, "marker", `MarkerOverlay(${options.channel})`, options);
     this.opts = options;
     this.shapeCtxs = buildShapeContexts();
   }

@@ -151,6 +151,32 @@ let activeSyntheticProvider: PriceRangeProvider | null = null;
 
 const DEMO_OHLC_CHANNEL = "demo-ohlc";
 const DEMO_VOLUME_CHANNEL = "demo-volume";
+/**
+ * Phase 14 Cycle A — id of the dedicated volume pane created when
+ * `volumePlacement === 'pane'`. Stable string keeps the host's references
+ * round-trip-safe across remounts.
+ */
+const VOLUME_PANE_ID = CartaExports.asPaneId("volume");
+
+/**
+ * Phase 14 Cycle A — compact integer formatter for the volume pane's price
+ * axis. Maps 12,540 → "12.5K", 1,400,000 → "1.4M". Negative / non-finite
+ * values fall back to the default formatter so the axis never renders
+ * `NaN` / `Infinity`.
+ */
+const formatVolume: CartaExports.PriceFormatter = (v) => {
+  if (!Number.isFinite(v)) {
+    return "—";
+  }
+  const abs = Math.abs(v);
+  if (abs >= 1_000_000) {
+    return `${(v / 1_000_000).toFixed(1)}M`;
+  }
+  if (abs >= 1_000) {
+    return `${(v / 1_000).toFixed(1)}K`;
+  }
+  return Math.round(v).toString();
+};
 const DEMO_SMA_CHANNEL = "demo-sma";
 const DEMO_MARKER_CHANNEL = "demo-markers";
 const SMA_PERIOD = 20;
@@ -179,10 +205,19 @@ interface MountResult {
   readonly volume: HistogramSeries;
 }
 
+/**
+ * Phase 14 Cycle A — placement strategy for the volume histogram. `pane` is
+ * the default and demonstrates the dedicated-pane recipe (`addPane({ id:
+ * 'volume', stretchFactor: 0.25 })`); `overlay` demonstrates the overlay
+ * recipe (`priceScaleId: ''` + `scaleMargins: { top: 0.8, bottom: 0 }`).
+ */
+type VolumePlacement = "pane" | "overlay";
+
 interface MountOptions {
   readonly primaryType: PrimarySeriesType;
   readonly lineStyle: LineStyle;
   readonly lineType: LineType;
+  readonly volumePlacement: VolumePlacement;
 }
 
 interface DprStub {
@@ -271,15 +306,39 @@ async function mount(mountOpts: MountOptions): Promise<MountResult> {
       lineType: mountOpts.lineType,
     }),
   );
-  const volume = chart.addSeries(
-    new HistogramSeries({
-      channel: DEMO_VOLUME_CHANNEL,
-      // Volume is pre-scaled host-side into the bottom 15% of the candle
-      // range; opt out of auto-scale so the series doesn't drag the domain
-      // down to `base` and crush the candle band.
-      participatesInAutoScale: false,
-    }),
-  );
+
+  // Phase 14 Cycle A — volume placement.
+  let volume: HistogramSeries;
+  if (mountOpts.volumePlacement === "pane") {
+    // Dedicated volume pane recipe. Pane stretchFactor 0.25 mirrors the TV
+    // LWC convention; the pane's right scale auto-scales independently from
+    // the candle's so the volume bars fill the pane height regardless of
+    // the candle range.
+    const volumePane = chart.addPane({ id: VOLUME_PANE_ID, stretchFactor: 0.25 });
+    volumePane.priceScale("right").setAutoScale(true);
+    // Phase 14 Cycle A — volume pane gets a compact integer formatter
+    // (`12.5K`, `1.4M`) so the y-axis is scannable without trailing decimals.
+    volumePane.setPriceFormatter(formatVolume);
+    volume = chart.addSeries(
+      new HistogramSeries({
+        channel: DEMO_VOLUME_CHANNEL,
+        paneId: VOLUME_PANE_ID,
+      }),
+    );
+  } else {
+    // Overlay-on-main-pane recipe — `priceScaleId: ''` opts the histogram
+    // into the canonical overlay slot, with `scaleMargins: { top: 0.8,
+    // bottom: 0 }` constraining the bars to the bottom 20 % of the main
+    // pane without pulling the candle's auto-scale.
+    chart.primaryPane().priceScale("").setAutoScale(true);
+    volume = chart.addSeries(
+      new HistogramSeries({
+        channel: DEMO_VOLUME_CHANNEL,
+        priceScaleId: "",
+        scaleMargins: { top: 0.8, bottom: 0 },
+      }),
+    );
+  }
   return { chart, primary, sma, volume };
 }
 
@@ -403,7 +462,12 @@ async function main(): Promise<void> {
       return;
     }
     if (req.channelId === DEMO_VOLUME_CHANNEL) {
-      const points = sharedMockSource.fetchVolume(iv, start, end);
+      // Phase 14 Cycle A — dedicated-pane recipe gets raw volume so the
+      // pane's own auto-scale fills it; overlay recipe stays pre-scaled.
+      const points =
+        currentVolumePlacement === "pane"
+          ? sharedMockSource.fetchRawVolume(iv, start, end)
+          : sharedMockSource.fetchVolume(iv, start, end);
       if (points.length > 0) {
         chart.supplyData(req.channelId, iv, points);
       }
@@ -454,11 +518,15 @@ async function main(): Promise<void> {
   let markerOverlay: MarkerOverlay | null = null;
   let currentLineStyle: LineStyle = "solid";
   let currentLineType: LineType = "simple";
+  // Phase 14 Cycle A — default to dedicated volume pane so the multi-pane
+  // recipe is on screen at cold load. Toggle in the demo toolbar.
+  let currentVolumePlacement: VolumePlacement = "pane";
 
   const buildMountOpts = (): MountOptions => ({
     primaryType,
     lineStyle: currentLineStyle,
     lineType: currentLineType,
+    volumePlacement: currentVolumePlacement,
   });
 
   const primaryLabelFor = (type: PrimarySeriesType): string => {
@@ -577,6 +645,7 @@ async function main(): Promise<void> {
       liveTickDriver?.start();
       updateLiveTickBtn();
     }
+    updateToggleVolumePaneBtn();
   };
 
   const setPrimaryType = (next: PrimarySeriesType): void => {
@@ -880,7 +949,10 @@ async function main(): Promise<void> {
     if (bars.length > 0) {
       chart.supplyData(DEMO_OHLC_CHANNEL, ivNum, bars);
     }
-    const volumePoints = sharedMockSource.fetchVolume(ivNum, s, e);
+    const volumePoints =
+      currentVolumePlacement === "pane"
+        ? sharedMockSource.fetchRawVolume(ivNum, s, e)
+        : sharedMockSource.fetchVolume(ivNum, s, e);
     if (volumePoints.length > 0) {
       chart.supplyData(DEMO_VOLUME_CHANNEL, ivNum, volumePoints);
     }
@@ -946,6 +1018,69 @@ async function main(): Promise<void> {
     });
   }
 
+  // Phase 14 Cycle A — volume-placement toggle. Switches between the
+  // dedicated-pane recipe and the overlay-on-main-pane recipe by remounting
+  // the chart with the new placement.
+  const volumePlacementSelect = document.getElementById(
+    "volume-placement",
+  ) as HTMLSelectElement | null;
+  if (volumePlacementSelect !== null) {
+    volumePlacementSelect.value = currentVolumePlacement;
+    volumePlacementSelect.addEventListener("change", () => {
+      const raw = volumePlacementSelect.value;
+      if (raw === "pane" || raw === "overlay") {
+        if (currentVolumePlacement === raw) {
+          return;
+        }
+        currentVolumePlacement = raw;
+        void remount();
+      }
+    });
+  }
+
+  // Phase 14 Cycle A — hide / show the dedicated volume pane. Only relevant
+  // when `volumePlacement === 'pane'`; otherwise the button is visible but
+  // toggles a no-op pane id (the volume pane doesn't exist in overlay mode).
+  const toggleVolumePaneBtn = document.getElementById("toggle-volume-pane");
+  const updateToggleVolumePaneBtn = (): void => {
+    if (toggleVolumePaneBtn === null || chart === null) {
+      return;
+    }
+    const volumePane = chart.pane(VOLUME_PANE_ID);
+    if (volumePane === null) {
+      toggleVolumePaneBtn.textContent = "Hide volume pane";
+      toggleVolumePaneBtn.setAttribute("disabled", "true");
+      toggleVolumePaneBtn.style.opacity = "0.4";
+      return;
+    }
+    toggleVolumePaneBtn.removeAttribute("disabled");
+    toggleVolumePaneBtn.style.opacity = "1";
+    toggleVolumePaneBtn.textContent = volumePane.hidden ? "Show volume pane" : "Hide volume pane";
+    toggleVolumePaneBtn.setAttribute("aria-pressed", String(volumePane.hidden));
+  };
+  toggleVolumePaneBtn?.addEventListener("click", () => {
+    if (chart === null) {
+      return;
+    }
+    const volumePane = chart.pane(VOLUME_PANE_ID);
+    if (volumePane === null) {
+      return;
+    }
+    chart.setPaneHidden(VOLUME_PANE_ID, !volumePane.hidden);
+    updateToggleVolumePaneBtn();
+  });
+
+  // Phase 14 Cycle A — reset pane height overrides (clears drag-resize
+  // pins so panes flex back to their stretchFactor distribution).
+  document.getElementById("reset-pane-heights")?.addEventListener("click", () => {
+    if (chart === null) {
+      return;
+    }
+    for (const pane of chart.panes()) {
+      chart.setPaneHeight(pane.id, null);
+    }
+  });
+
   const markerBtn = document.getElementById("toggle-markers");
   const updateMarkerBtn = (): void => {
     if (markerBtn === null) {
@@ -964,6 +1099,7 @@ async function main(): Promise<void> {
     updateMarkerBtn();
   });
   updateMarkerBtn();
+  updateToggleVolumePaneBtn();
 
   // Phase 10 — theme toggle. Persists across remounts so a user who flipped
   // to Light gets a Light chart back after `Remount chart`.

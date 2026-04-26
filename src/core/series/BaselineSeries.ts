@@ -170,7 +170,7 @@ export class BaselineSeries extends Series {
   private gradientKey: string | null = null;
 
   constructor(options: BaselineSeriesOptions) {
-    super(options.channel, "point", `BaselineSeries(${options.channel})`);
+    super(options.channel, "point", `BaselineSeries(${options.channel})`, options);
     this.opts = options;
     this.aboveFill = new Graphics();
     this.belowFill = new Graphics();

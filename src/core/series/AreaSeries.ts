@@ -57,7 +57,7 @@ export class AreaSeries extends Series {
   private gradientKey: string | null = null;
 
   constructor(options: AreaSeriesOptions) {
-    super(options.channel, "point", `AreaSeries(${options.channel})`);
+    super(options.channel, "point", `AreaSeries(${options.channel})`, options);
     this.opts = options;
     this.fillGraphics = new Graphics();
     this.strokeGraphics = new Graphics();

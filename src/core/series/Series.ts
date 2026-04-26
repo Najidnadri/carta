@@ -1,11 +1,13 @@
 import { Container } from "pixi.js";
 import type { DataStore } from "../data/DataStore.js";
+import type { PaneId } from "../drawings/types.js";
 import type { PriceRange, PriceRangeProvider } from "../price/PriceRangeProvider.js";
 import type { PriceScale } from "../price/PriceScale.js";
 import type { TimeScale } from "../time/TimeScale.js";
 import type {
   ChannelKind,
   Interval,
+  PriceScaleMargins,
   Theme,
   Time,
 } from "../../types.js";
@@ -34,6 +36,17 @@ export interface SeriesQueryContext {
 }
 
 /**
+ * Phase 14 Cycle A — pane / scale routing options accepted by every series'
+ * constructor. Concrete series subclasses pull these out of their own
+ * options interface and forward them to `super()`.
+ */
+export interface SeriesRoutingOptions {
+  readonly paneId?: PaneId | undefined;
+  readonly priceScaleId?: string | undefined;
+  readonly scaleMargins?: PriceScaleMargins | undefined;
+}
+
+/**
  * Abstract base for every chart series. Series are channel-bound and
  * store-backed — they never hold their own data arrays. Two invocation
  * points:
@@ -52,12 +65,41 @@ export abstract class Series implements PriceRangeProvider {
   readonly container: Container;
   readonly channel: string;
   readonly kind: ChannelKind;
+  /**
+   * Phase 14 Cycle A — pane this series should render in. Read by
+   * `chart.addSeries` and used to route the series' container under the
+   * matching pane's `seriesLayer`. Defaults to the primary pane.
+   */
+  readonly paneId?: PaneId | undefined;
+  /**
+   * Phase 14 Cycle A — id of the price-scale slot this series binds to.
+   * Defaults to the pane's `'right'` slot. The empty string `''` selects
+   * the canonical overlay-scale slot (TradingView Lightweight-Charts
+   * convention: a series with `priceScaleId: ''` participates in its own
+   * auto-scale group rather than the pane's right axis).
+   */
+  readonly priceScaleId?: string | undefined;
+  /**
+   * Phase 14 Cycle A — when this series binds to an overlay or otherwise-empty
+   * scale slot, these margins propagate to the slot. Volume overlays use
+   * `{ top: 0.8, bottom: 0 }` so volume bars render in the bottom 20 % of
+   * the pane without affecting the candle's auto-scale.
+   */
+  readonly scaleMargins?: PriceScaleMargins | undefined;
   protected query: SeriesQueryContext | null = null;
 
-  protected constructor(channel: string, kind: ChannelKind, label: string) {
+  protected constructor(
+    channel: string,
+    kind: ChannelKind,
+    label: string,
+    routing?: SeriesRoutingOptions,
+  ) {
     this.channel = channel;
     this.kind = kind;
     this.container = new Container({ label });
+    this.paneId = routing?.paneId;
+    this.priceScaleId = routing?.priceScaleId;
+    this.scaleMargins = routing?.scaleMargins;
   }
 
   /** Called by `TimeSeriesChart.addSeries`; binds the store + interval getter. */

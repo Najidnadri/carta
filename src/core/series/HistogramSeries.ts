@@ -52,7 +52,7 @@ export class HistogramSeries extends Series {
   private opts: HistogramSeriesOptions;
 
   constructor(options: HistogramSeriesOptions) {
-    super(options.channel, "point", `HistogramSeries(${options.channel})`);
+    super(options.channel, "point", `HistogramSeries(${options.channel})`, options);
     this.opts = options;
     this.pool = new ShapePool(this.container);
   }

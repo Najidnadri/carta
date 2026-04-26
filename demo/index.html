@@ -406,6 +406,19 @@
             <option value="heikin-ashi">Heikin-Ashi</option>
           </select>
         </label>
+        <label for="volume-placement" style="font-size: 12px; color: var(--muted);" title="Phase 14 Cycle A — multi-pane recipe">
+          Volume
+          <select id="volume-placement" data-testid="volume-placement" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:3px 6px;font-size:12px;margin-left:4px;">
+            <option value="pane">Dedicated pane</option>
+            <option value="overlay">Overlay on main</option>
+          </select>
+        </label>
+        <button id="toggle-volume-pane" data-testid="toggle-volume-pane" type="button" title="Hide / show the dedicated volume pane" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:4px 10px;font-size:12px;">
+          Hide volume pane
+        </button>
+        <button id="reset-pane-heights" data-testid="reset-pane-heights" type="button" title="Reset pane heights to default (clears drag overrides)" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:4px 10px;font-size:12px;">
+          Reset pane sizes
+        </button>
         <div id="readout">
           <span>start <b id="readout-start">—</b></span>
           <span>end <b id="readout-end">—</b></span>

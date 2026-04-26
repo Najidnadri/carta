@@ -5,7 +5,9 @@ import {
   type FederatedPointerEvent,
 } from "pixi.js";
 import type { DataStore } from "../data/DataStore.js";
+import { MAIN_PANE_ID, type PaneId } from "../drawings/types.js";
 import type { EventBus } from "../infra/EventBus.js";
+import type { PaneRect } from "../pane/types.js";
 import type { PlotRect } from "../render/Renderer.js";
 import type { PriceScale } from "../price/PriceScale.js";
 import type { Series } from "../series/Series.js";
@@ -51,6 +53,19 @@ export interface CrosshairRenderContext {
    * real bar regardless of finger position.
    */
   readonly inTrackingMode?: boolean;
+  /**
+   * Phase 14 Cycle A — top-to-bottom list of pane rects. Single-pane
+   * charts pass `[{id: MAIN_PANE_ID, rect: plotRect}]`; multi-pane charts
+   * pass one entry per pane. Used to compute active-pane membership for
+   * the `paneId` payload + per-pane price-tag positioning.
+   */
+  readonly paneRects?: readonly { readonly id: PaneId; readonly rect: PaneRect }[];
+  /**
+   * Phase 14 Cycle A — per-pane price scales for tag price readouts. Keyed
+   * by `PaneId`. When omitted (legacy callers), every pane reads from the
+   * single `priceScale` field above.
+   */
+  readonly priceScalesByPane?: ReadonlyMap<PaneId, PriceScale>;
 }
 
 export interface CrosshairControllerDeps {
@@ -101,6 +116,12 @@ export class CrosshairController {
   private readonly vertLine: Graphics;
   private readonly horzLine: Graphics;
   private readonly priceTag: Tag;
+  /**
+   * Phase 14 Cycle A — extra price tags for non-primary panes. Lazy-allocated
+   * on first render of each pane; released by `releasePaneTag(id)` when a
+   * pane is removed.
+   */
+  private readonly extraPriceTags = new Map<PaneId, Tag>();
   private readonly timeTag: Tag;
   private readonly attachedListeners: (() => void)[] = [];
 
@@ -271,6 +292,11 @@ export class CrosshairController {
     this.priceTag.container.destroy({ children: true });
     this.timeTag.container.parent?.removeChild(this.timeTag.container);
     this.timeTag.container.destroy({ children: true });
+    for (const tag of this.extraPriceTags.values()) {
+      tag.container.parent?.removeChild(tag.container);
+      tag.container.destroy({ children: true });
+    }
+    this.extraPriceTags.clear();
   }
 
   // ─── Internals ─────────────────────────────────────────────────────────
@@ -348,6 +374,33 @@ export class CrosshairController {
     this.horzLine.visible = false;
     this.priceTag.container.visible = false;
     this.timeTag.container.visible = false;
+    for (const tag of this.extraPriceTags.values()) {
+      tag.container.visible = false;
+    }
+  }
+
+  /**
+   * Phase 14 Cycle A — destroy a pane's price tag when the pane is removed.
+   * Called by `TimeSeriesChart.removePane`. Idempotent.
+   */
+  releasePaneTag(paneId: PaneId): void {
+    const tag = this.extraPriceTags.get(paneId);
+    if (tag === undefined) {
+      return;
+    }
+    tag.container.destroy({ children: true });
+    this.extraPriceTags.delete(paneId);
+  }
+
+  private getOrCreateExtraTag(paneId: PaneId): Tag {
+    const existing = this.extraPriceTags.get(paneId);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const tag = this.createTag(`priceTag:${String(paneId)}`);
+    this.deps.tagsLayer.addChild(tag.container);
+    this.extraPriceTags.set(paneId, tag);
+    return tag;
   }
 
   private emitLeave(pending: PendingState, ctx: CrosshairRenderContext): void {
@@ -361,38 +414,68 @@ export class CrosshairController {
         y: asPixel(lastY - ctx.plotRect.y),
       },
       seriesData: new Map<CrosshairSeriesKey, DataRecord | null>(),
+      paneId: null,
     };
     this.emitCount += 1;
     this.deps.eventBus.emit("crosshair:move", payload);
     this.pending = null;
   }
 
-  private drawActive(pending: PendingState, ctx: CrosshairRenderContext): void {
-    const { plotRect, timeScale, priceScale, theme } = ctx;
-    const rawLocalX = pending.localX - plotRect.x;
-    const rawLocalY = pending.localY - plotRect.y;
+  /**
+   * Phase 14 Cycle A — find the pane whose rect contains the given canvas-Y
+   * coordinate. Returns `null` when y lies outside every pane (time-axis
+   * gutter, separator gap in cycle B, or off-canvas).
+   */
+  private activePaneAt(
+    canvasY: number,
+    paneRects: readonly { id: PaneId; rect: PaneRect }[] | undefined,
+  ): { id: PaneId; rect: PaneRect } | null {
+    if (paneRects === undefined || paneRects.length === 0) {
+      return null;
+    }
+    for (const entry of paneRects) {
+      const r = entry.rect;
+      if (canvasY >= r.y && canvasY < r.y + r.h) {
+        return entry;
+      }
+    }
+    return null;
+  }
 
-    // Phase 09 — in tracking mode the persistent crosshair must not flicker
-    // off when the finger drifts over the price-axis strip or the time-axis
-    // gutter. Clamp to plot bounds and continue drawing at the clamped point.
+  private drawActive(pending: PendingState, ctx: CrosshairRenderContext): void {
+    const { plotRect, timeScale, theme } = ctx;
+    const rawLocalX = pending.localX - plotRect.x;
+
     if (plotRect.w <= 0 || plotRect.h <= 0) {
       this.hideVisuals();
       this.emitLeave(pending, ctx);
       return;
     }
+
+    // Phase 14 Cycle A — paneRects defaults to the single primary pane when
+    // the chart hasn't supplied them (test helpers, legacy callers).
+    const paneRects =
+      ctx.paneRects && ctx.paneRects.length > 0
+        ? ctx.paneRects
+        : [{ id: MAIN_PANE_ID, rect: plotRect }];
+    const stackTop = paneRects[0]?.rect.y ?? plotRect.y;
+    const stackBottomEntry = paneRects[paneRects.length - 1];
+    const stackBottom = (stackBottomEntry?.rect.y ?? plotRect.y) + (stackBottomEntry?.rect.h ?? plotRect.h);
     const inTracking = ctx.inTrackingMode === true;
+
+    // Active pane: which rect contains the canvas-Y of the pointer? Tracking
+    // mode falls back to the primary pane when the finger drifts off-stack.
+    const canvasY = pending.localY;
+    let activePane = this.activePaneAt(canvasY, paneRects);
+    if (activePane === null && inTracking) {
+      activePane = paneRects[0] ?? null;
+    }
+
     const localX = inTracking
       ? Math.max(0, Math.min(plotRect.w, rawLocalX))
       : rawLocalX;
-    const localY = inTracking
-      ? Math.max(0, Math.min(plotRect.h, rawLocalY))
-      : rawLocalY;
-
-    const outside =
-      !inTracking &&
-      (rawLocalX < 0 || rawLocalX > plotRect.w || rawLocalY < 0 || rawLocalY > plotRect.h);
-
-    if (outside) {
+    const outsideX = !inTracking && (rawLocalX < 0 || rawLocalX > plotRect.w);
+    if (outsideX || activePane === null) {
       this.hideVisuals();
       this.emitLeave(pending, ctx);
       return;
@@ -405,54 +488,84 @@ export class CrosshairController {
       return;
     }
 
-    // Cycle B — clamp the raw slot snap to the visible-window data range so
-    // the hair sticks to the last/first data bar when the cursor drifts into
-    // an empty future-or-past gutter. No-op when the cursor is already inside
-    // the data range or when no non-marker series in this window has any data.
     const effectiveTime = this.clampSnappedTimeToDataRange(snap.time, ctx);
     const snappedTime = effectiveTime;
-    // Single source of truth for the hair's pixel X. Using `timeToPixel`
-    // regardless of whether the clamp kicked in avoids a 1 px flicker at the
-    // boundary when `snap.x` (possibly integer-rounded) disagrees with a
-    // fresh `timeToPixel(effectiveTime)` by a sub-pixel.
     const snappedX = Number(timeScale.timeToPixel(effectiveTime));
-    const rawPrice = Number(priceScale.pixelToValue(asPixel(localY)));
-    const finitePrice = Number.isFinite(rawPrice) ? rawPrice : null;
 
-    // Hair lines (stage-root container; draw using plotRect-global coords).
+    // Active pane's local Y inside its own rect.
+    const activeRect = activePane.rect;
+    const activeLocalY = inTracking
+      ? Math.max(0, Math.min(activeRect.h, canvasY - activeRect.y))
+      : canvasY - activeRect.y;
+
+    // Vertical hair line: spans the full pane stack.
     this.vertLine.visible = true;
     this.vertLine
       .clear()
-      .moveTo(plotRect.x + snappedX, plotRect.y)
-      .lineTo(plotRect.x + snappedX, plotRect.y + plotRect.h)
+      .moveTo(plotRect.x + snappedX, stackTop)
+      .lineTo(plotRect.x + snappedX, stackBottom)
       .stroke({ color: theme.crosshairLine, width: 1, pixelLine: true });
 
+    // Horizontal hair line: drawn inside the active pane only.
     this.horzLine.visible = true;
     this.horzLine
       .clear()
-      .moveTo(plotRect.x, plotRect.y + localY)
-      .lineTo(plotRect.x + plotRect.w, plotRect.y + localY)
+      .moveTo(plotRect.x, activeRect.y + activeLocalY)
+      .lineTo(plotRect.x + activeRect.w, activeRect.y + activeLocalY)
       .stroke({ color: theme.crosshairLine, width: 1, pixelLine: true });
 
-    // Tags.
+    // Time tag at the bottom of the pane stack.
     const timeLabel = this.formatTime(snappedTime, ctx.intervalDuration);
     this.updateTag(
       this.timeTag,
       timeLabel,
       plotRect.x + snappedX,
-      plotRect.y + plotRect.h,
+      stackBottom,
       theme,
       "centerX-topY",
     );
-    const priceLabel = finitePrice !== null ? this.formatPrice(finitePrice, ctx.priceFormatter) : "—";
-    this.updateTag(
-      this.priceTag,
-      priceLabel,
-      plotRect.x + plotRect.w,
-      plotRect.y + localY,
-      theme,
-      "leftX-centerY",
-    );
+
+    // Per-pane price tags. Each pane reads its own scale; the active pane's
+    // tag follows the cursor's local Y, all other panes' tags hide.
+    const priceScalesByPane = ctx.priceScalesByPane;
+    const activePriceScale =
+      priceScalesByPane?.get(activePane.id) ?? ctx.priceScale;
+    const rawPrice = Number(activePriceScale.pixelToValue(asPixel(activeLocalY)));
+    const finitePrice = Number.isFinite(rawPrice) ? rawPrice : null;
+
+    // Update the primary pane's bound `priceTag` if it IS the active one;
+    // otherwise hide it and show the appropriate extra tag.
+    if (activePane.id === MAIN_PANE_ID) {
+      const priceLabel = finitePrice !== null ? this.formatPrice(finitePrice, ctx.priceFormatter) : "—";
+      this.updateTag(
+        this.priceTag,
+        priceLabel,
+        plotRect.x + activeRect.w,
+        activeRect.y + activeLocalY,
+        theme,
+        "leftX-centerY",
+      );
+      // Hide non-primary tags.
+      for (const tag of this.extraPriceTags.values()) {
+        tag.container.visible = false;
+      }
+    } else {
+      this.priceTag.container.visible = false;
+      // Hide every extra tag first, then show the active one.
+      for (const tag of this.extraPriceTags.values()) {
+        tag.container.visible = false;
+      }
+      const tag = this.getOrCreateExtraTag(activePane.id);
+      const priceLabel = finitePrice !== null ? this.formatPrice(finitePrice, ctx.priceFormatter) : "—";
+      this.updateTag(
+        tag,
+        priceLabel,
+        plotRect.x + activeRect.w,
+        activeRect.y + activeLocalY,
+        theme,
+        "leftX-centerY",
+      );
+    }
 
     // Collect seriesData.
     const seriesData = this.collectSeriesData(
@@ -465,8 +578,9 @@ export class CrosshairController {
     const payload: CrosshairInfo = {
       time: snappedTime,
       price: finitePrice === null ? null : asPrice(finitePrice),
-      point: { x: asPixel(localX), y: asPixel(localY) },
+      point: { x: asPixel(localX), y: asPixel(activeLocalY) },
       seriesData,
+      paneId: activePane.id,
     };
     this.emitCount += 1;
     this.deps.eventBus.emit("crosshair:move", payload);

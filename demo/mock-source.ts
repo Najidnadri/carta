@@ -66,7 +66,16 @@ export class MockSource {
     const close = Math.max(0.01, open + drift);
     const high = Math.max(open, close) + rng() * this.basePrice * 0.005;
     const low = Math.min(open, close) - rng() * this.basePrice * 0.005;
-    const volume = Math.floor(rng() * 5000) + 100;
+    // Phase 14 Cycle A — volatile volume profile. Combines: a slow sinusoidal
+    // trend (so the histogram has shape), a high-frequency random component
+    // (per-bar jitter), and pseudo-random burst spikes (~5 % of bars get
+    // 3-8× the baseline). Produces an obviously irregular silhouette in the
+    // dedicated volume pane.
+    const trend = 1 + 0.6 * Math.sin(time / (MIN * 13));
+    const jitter = 0.4 + rng() * 1.6; // 0.4–2.0
+    const burstRoll = rng();
+    const burstFactor = burstRoll > 0.95 ? 3 + rng() * 5 : 1;
+    const volume = Math.max(50, Math.floor(800 * trend * jitter * burstFactor));
     const bar: BaseBar = {
       time,
       open,
@@ -139,6 +148,27 @@ export class MockSource {
   fetchVolume(intervalDuration: number, start: number, end: number): PointRecord[] {
     const bars = this.fetchOhlc(intervalDuration, start, end);
     return scaleVolumeForOverlay(bars);
+  }
+
+  /**
+   * Phase 14 Cycle A — raw volume points (un-scaled) for the dedicated-pane
+   * recipe. Returns each bar's raw `volume` field as the histogram value,
+   * with up/down color from the OHLC close vs open. The dedicated pane's
+   * own `'right'` scale auto-scales these to fill the pane height.
+   */
+  fetchRawVolume(intervalDuration: number, start: number, end: number): PointRecord[] {
+    const bars = this.fetchOhlc(intervalDuration, start, end);
+    const out: PointRecord[] = [];
+    for (const b of bars) {
+      const v = b.volume ?? 0;
+      const isUp = Number(b.close) >= Number(b.open);
+      out.push({
+        time: b.time,
+        value: asPrice(v),
+        color: isUp ? VOLUME_UP_COLOR : VOLUME_DOWN_COLOR,
+      });
+    }
+    return out;
   }
 
   /**

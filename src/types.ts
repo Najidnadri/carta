@@ -10,6 +10,7 @@ import type {
   DrawingsChangedPayload,
   DrawingsRemovedPayload,
   DrawingsSelectedPayload,
+  PaneId,
 } from "./core/drawings/types.js";
 
 // ─── Branded units ─────────────────────────────────────────────────────────
@@ -140,6 +141,13 @@ export interface CrosshairInfo {
     readonly y: Pixel;
   };
   readonly seriesData: ReadonlyMap<CrosshairSeriesKey, DataRecord | null>;
+  /**
+   * Phase 14 Cycle A — pane the pointer is currently over. `null` when the
+   * pointer is outside any pane (canvas leave, time-axis gutter, future
+   * separator gutters). Single-pane charts emit `MAIN_PANE_ID` whenever the
+   * pointer is inside the plot rect.
+   */
+  readonly paneId: PaneId | null;
 }
 
 /**
@@ -223,12 +231,30 @@ export interface KeyboardHotkeyPayload {
  * Event map for `chart.on` / `off` / `once`. Keys are stable string literals,
  * payload types propagate so handlers get full TS inference.
  */
+/**
+ * Phase 14 Cycle A — payload of `pane:resize`. `source` distinguishes
+ * user-driven drag from chart-resize-induced rebalance + programmatic API
+ * calls. Heights are post-clamp (≥ minHeight, integer pixels).
+ */
+export interface PaneResizePayload {
+  readonly paneId: PaneId;
+  readonly height: number;
+  readonly source: "user-drag" | "programmatic" | "chart-resize" | "hidden";
+}
+
+export interface PaneVisibilityPayload {
+  readonly paneId: PaneId;
+  readonly hidden: boolean;
+}
+
 export interface CartaEventMap extends Record<string, unknown> {
   readonly "window:change": ChartWindow;
   readonly "interval:change": IntervalChange;
   readonly "data:request": DataRequest;
   readonly "crosshair:move": CrosshairInfo;
   readonly "tracking:change": TrackingChange;
+  readonly "pane:resize": PaneResizePayload;
+  readonly "pane:visibility": PaneVisibilityPayload;
   readonly resize: SizeInfo;
   readonly "drawings:created": DrawingsChangedPayload;
   readonly "drawings:updated": DrawingsChangedPayload;
@@ -284,6 +310,15 @@ export interface Theme {
   readonly crosshairLine: number;
   readonly crosshairTagBg: number;
   readonly crosshairTagText: number;
+
+  // ─── Pane separators (Phase 14 Cycle A) ─────────────────────
+  /**
+   * Stroke color for the divider line drawn between adjacent panes. Must
+   * have ≥ 3:1 contrast against `background` for accessibility (separator
+   * is interactive — drag-to-resize hit zone). Falls back to a brighter
+   * `frame` if the host omits it (pre-1.0 hosts using prior theme objects).
+   */
+  readonly paneSeparator: number;
 
   // ─── Drawings ────────────────────────────────────────────────
   /**
@@ -385,7 +420,23 @@ export interface ApplyOptions {
 }
 
 // ─── Series options ────────────────────────────────────────────────────────
-export interface CandlestickSeriesOptions {
+
+/**
+ * Phase 14 Cycle A — pane / scale routing fields shared by every series. A
+ * series with no `paneId` defaults to the primary pane (`MAIN_PANE_ID`); no
+ * `priceScaleId` defaults to that pane's `'right'` slot. Setting
+ * `priceScaleId: ''` opts the series into the canonical overlay slot — the
+ * volume-on-main-pane recipe pairs `priceScaleId: ''` with
+ * `scaleMargins: { top: 0.8, bottom: 0 }` so volume bars draw in the bottom
+ * 20 % of the pane without affecting the candle's auto-scale.
+ */
+export interface SeriesPaneRoutingOptions {
+  readonly paneId?: PaneId;
+  readonly priceScaleId?: string;
+  readonly scaleMargins?: PriceScaleMargins;
+}
+
+export interface CandlestickSeriesOptions extends SeriesPaneRoutingOptions {
   readonly channel: string;
   readonly upColor?: number;
   readonly downColor?: number;
@@ -393,7 +444,7 @@ export interface CandlestickSeriesOptions {
   readonly bodyGapPx?: number;
 }
 
-export interface OhlcBarSeriesOptions {
+export interface OhlcBarSeriesOptions extends SeriesPaneRoutingOptions {
   readonly channel: string;
   /** Colour for bars where `close >= open`. Defaults to `theme.up`. */
   readonly upColor?: number;
@@ -409,7 +460,7 @@ export interface OhlcBarSeriesOptions {
   readonly thinBars?: boolean;
 }
 
-export interface HeikinAshiSeriesOptions {
+export interface HeikinAshiSeriesOptions extends SeriesPaneRoutingOptions {
   readonly channel: string;
   readonly upColor?: number;
   readonly downColor?: number;
@@ -420,7 +471,7 @@ export interface HeikinAshiSeriesOptions {
 export type LineStyle = "solid" | "dashed" | "dotted";
 export type LineType = "simple" | "stepped";
 
-export interface LineSeriesOptions {
+export interface LineSeriesOptions extends SeriesPaneRoutingOptions {
   readonly channel: string;
   readonly color?: number;
   readonly lineWidth?: number;
@@ -430,7 +481,7 @@ export interface LineSeriesOptions {
   readonly lineType?: LineType;
 }
 
-export interface AreaSeriesOptions {
+export interface AreaSeriesOptions extends SeriesPaneRoutingOptions {
   readonly channel: string;
   /** Gradient-top color (near the polyline). Defaults to `theme.areaTop`. */
   readonly topColor?: number;
@@ -450,7 +501,7 @@ export interface AreaSeriesOptions {
   readonly baseline?: number;
 }
 
-export interface HistogramSeriesOptions {
+export interface HistogramSeriesOptions extends SeriesPaneRoutingOptions {
   readonly channel: string;
   /** Default color for bars without a per-record `color` override. Defaults to `theme.line`. */
   readonly color?: number;
@@ -476,7 +527,7 @@ export interface MarkerPriceReference {
   readonly field?: MarkerPriceField;
 }
 
-export interface MarkerOverlayOptions {
+export interface MarkerOverlayOptions extends SeriesPaneRoutingOptions {
   readonly channel: string;
   /** Channel-and-field that provides the Y anchor for each marker. */
   readonly priceReference: MarkerPriceReference;
@@ -492,7 +543,7 @@ export interface MarkerOverlayOptions {
 
 export type BaselineMode = number | "first" | "average";
 
-export interface BaselineSeriesOptions {
+export interface BaselineSeriesOptions extends SeriesPaneRoutingOptions {
   readonly channel: string;
   /** Baseline price. Numeric, or `'first'` / `'average'` of visible finite values. Defaults to 0. */
   readonly baseline?: BaselineMode;
