@@ -141,6 +141,29 @@ export class PaneResizeController {
     this.dragState = null;
   }
 
+  /**
+   * Phase 14 Cycle B — abort any in-flight divider drag. Called by the
+   * chart from `removePane` and reorder paths so the drag's stale
+   * `aboveIndex` / `belowIndex` snapshots can't mis-resize the wrong
+   * panes after a splice. Idempotent — no-op when no drag is active.
+   */
+  cancelDrag(): void {
+    if (this.dragState === null) {
+      return;
+    }
+    const { pointerId } = this.dragState;
+    this.dragState = null;
+    if (this.deps.canvas.hasPointerCapture(pointerId)) {
+      this.deps.canvas.releasePointerCapture(pointerId);
+    }
+    this.deps.canvas.style.cursor = "";
+  }
+
+  /** Dev/test introspection — whether a divider drag is currently active. */
+  isDragging(): boolean {
+    return this.dragState !== null;
+  }
+
   // ─── Internals ─────────────────────────────────────────────────────────
 
   private attach(): void {

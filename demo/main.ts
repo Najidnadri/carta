@@ -44,6 +44,7 @@ import { __internals__ as timeFormatInternals } from "../src/core/time/timeForma
 import { computePivotMarkers, MockSource } from "./mock-source.js";
 import { LiveTickDriver } from "./live-tick-driver.js";
 import { RequestLog, type RequestLogEntry } from "./request-log.js";
+import { computeMacd, computeRsi14, computeZScore } from "./indicators/index.js";
 
 (globalThis as unknown as { Carta?: typeof CartaExports }).Carta = CartaExports;
 
@@ -157,6 +158,15 @@ const DEMO_VOLUME_CHANNEL = "demo-volume";
  * round-trip-safe across remounts.
  */
 const VOLUME_PANE_ID = CartaExports.asPaneId("volume");
+/** Phase 14 Cycle B — pane / channel ids for the 5-pane RSI / MACD preset. */
+const RSI_PANE_ID = CartaExports.asPaneId("rsi");
+const MACD_PANE_ID = CartaExports.asPaneId("macd");
+const ZSCORE_PANE_ID = CartaExports.asPaneId("zscore");
+const DEMO_RSI_CHANNEL = "demo-rsi";
+const DEMO_MACD_LINE_CHANNEL = "demo-macd-line";
+const DEMO_MACD_SIGNAL_CHANNEL = "demo-macd-signal";
+const DEMO_MACD_HIST_CHANNEL = "demo-macd-hist";
+const DEMO_ZSCORE_CHANNEL = "demo-zscore";
 
 /**
  * Phase 14 Cycle A — compact integer formatter for the volume pane's price
@@ -203,6 +213,14 @@ interface MountResult {
   readonly primary: PrimarySeries;
   readonly sma: LineSeries;
   readonly volume: HistogramSeries;
+  /** Phase 14 Cycle B — populated only when layoutPreset === '5pane'. */
+  readonly indicatorSeries: {
+    readonly rsi: LineSeries | null;
+    readonly macdLine: LineSeries | null;
+    readonly macdSignal: LineSeries | null;
+    readonly macdHist: HistogramSeries | null;
+    readonly zscore: LineSeries | null;
+  };
 }
 
 /**
@@ -213,11 +231,20 @@ interface MountResult {
  */
 type VolumePlacement = "pane" | "overlay";
 
+/**
+ * Phase 14 Cycle B — layout preset selector. `2pane` is the cycle-A default
+ * (candles + volume). `5pane` is the canonical trader stack (candles +
+ * volume + RSI + MACD + Z-score) used to exercise the cycle-B reorder /
+ * bounded / applyOptions APIs end-to-end.
+ */
+type LayoutPreset = "2pane" | "5pane";
+
 interface MountOptions {
   readonly primaryType: PrimarySeriesType;
   readonly lineStyle: LineStyle;
   readonly lineType: LineType;
   readonly volumePlacement: VolumePlacement;
+  readonly layoutPreset: LayoutPreset;
 }
 
 interface DprStub {
@@ -339,7 +366,91 @@ async function mount(mountOpts: MountOptions): Promise<MountResult> {
       }),
     );
   }
-  return { chart, primary, sma, volume };
+
+  // Phase 14 Cycle B — 5-pane preset. Adds RSI / MACD / Z-score panes on
+  // top of the existing candle + volume layout. Each indicator pane uses
+  // the cycle-B `bounded` price-scale mode (RSI 0-100, Z-score ±3) or the
+  // standard auto-scale (MACD has no natural bounds).
+  let indicatorSeries: MountResult["indicatorSeries"] = {
+    rsi: null,
+    macdLine: null,
+    macdSignal: null,
+    macdHist: null,
+    zscore: null,
+  };
+  if (mountOpts.layoutPreset === "5pane") {
+    chart.defineChannel({ id: DEMO_RSI_CHANNEL, kind: "point" });
+    chart.defineChannel({ id: DEMO_MACD_LINE_CHANNEL, kind: "point" });
+    chart.defineChannel({ id: DEMO_MACD_SIGNAL_CHANNEL, kind: "point" });
+    chart.defineChannel({ id: DEMO_MACD_HIST_CHANNEL, kind: "point" });
+    chart.defineChannel({ id: DEMO_ZSCORE_CHANNEL, kind: "point" });
+
+    // RSI pane — bounded [0, 100] with 5 % pad so the line never sits
+    // flush against the pane frame.
+    const rsiPane = chart.addPane({ id: RSI_PANE_ID, stretchFactor: 0.4 });
+    rsiPane.priceScale("right").setMode({ kind: "bounded", min: 0, max: 100, pad: 0.05 });
+    rsiPane.priceScale("right").setAutoScale(true);
+    const rsiSeries = chart.addSeries(
+      new LineSeries({
+        channel: DEMO_RSI_CHANNEL,
+        paneId: RSI_PANE_ID,
+        color: 0xa78bfa,
+        lineWidth: 1,
+      }),
+    );
+
+    // MACD pane — auto-scale (signed values centered on 0). Three series:
+    // MACD line + signal line + histogram for the divergence.
+    const macdPane = chart.addPane({ id: MACD_PANE_ID, stretchFactor: 0.4 });
+    macdPane.priceScale("right").setAutoScale(true);
+    const macdLine = chart.addSeries(
+      new LineSeries({
+        channel: DEMO_MACD_LINE_CHANNEL,
+        paneId: MACD_PANE_ID,
+        color: 0x60a5fa,
+        lineWidth: 1,
+      }),
+    );
+    const macdSignal = chart.addSeries(
+      new LineSeries({
+        channel: DEMO_MACD_SIGNAL_CHANNEL,
+        paneId: MACD_PANE_ID,
+        color: 0xf59e0b,
+        lineWidth: 1,
+      }),
+    );
+    const macdHist = chart.addSeries(
+      new HistogramSeries({
+        channel: DEMO_MACD_HIST_CHANNEL,
+        paneId: MACD_PANE_ID,
+        color: 0x4b5563,
+      }),
+    );
+
+    // Z-score pane — bounded [-3, 3] with 10 % pad. Custom oscillator
+    // demonstrates bounded mode with negative bounds.
+    const zscorePane = chart.addPane({ id: ZSCORE_PANE_ID, stretchFactor: 0.3 });
+    zscorePane.priceScale("right").setMode({ kind: "bounded", min: -3, max: 3, pad: 0.1 });
+    zscorePane.priceScale("right").setAutoScale(true);
+    const zscoreSeries = chart.addSeries(
+      new LineSeries({
+        channel: DEMO_ZSCORE_CHANNEL,
+        paneId: ZSCORE_PANE_ID,
+        color: 0x34d399,
+        lineWidth: 1,
+      }),
+    );
+
+    indicatorSeries = {
+      rsi: rsiSeries,
+      macdLine,
+      macdSignal,
+      macdHist,
+      zscore: zscoreSeries,
+    };
+  }
+
+  return { chart, primary, sma, volume, indicatorSeries };
 }
 
 function formatDurationMs(ms: number): string {
@@ -452,6 +563,13 @@ async function main(): Promise<void> {
       if (markers.length > 0) {
         chart.supplyData(DEMO_MARKER_CHANNEL, iv, markers);
       }
+      // Phase 14 Cycle B — pre-supply indicator points derived from the
+      // same OHLC bars. Indicators fire their own data:request normally
+      // but pre-supplying avoids a second pass and keeps the panes in
+      // sync with the candle pane's data.
+      if (currentLayoutPreset === "5pane") {
+        supplyIndicators(chart, iv, bars);
+      }
       return;
     }
     if (req.channelId === DEMO_SMA_CHANNEL) {
@@ -471,6 +589,21 @@ async function main(): Promise<void> {
       if (points.length > 0) {
         chart.supplyData(req.channelId, iv, points);
       }
+      return;
+    }
+    // Phase 14 Cycle B — indicator channels in the 5-pane preset. When the
+    // chart asks for a window the OHLC bars haven't covered yet, we fetch
+    // the underlying OHLC bars and recompute. Idempotent — re-supplying
+    // the same window is a no-op against the cache.
+    if (
+      req.channelId === DEMO_RSI_CHANNEL ||
+      req.channelId === DEMO_MACD_LINE_CHANNEL ||
+      req.channelId === DEMO_MACD_SIGNAL_CHANNEL ||
+      req.channelId === DEMO_MACD_HIST_CHANNEL ||
+      req.channelId === DEMO_ZSCORE_CHANNEL
+    ) {
+      const bars = sharedMockSource.fetchOhlc(iv, start, end);
+      supplyIndicators(chart, iv, bars);
     }
   };
 
@@ -521,13 +654,76 @@ async function main(): Promise<void> {
   // Phase 14 Cycle A — default to dedicated volume pane so the multi-pane
   // recipe is on screen at cold load. Toggle in the demo toolbar.
   let currentVolumePlacement: VolumePlacement = "pane";
+  // Phase 14 Cycle B — layout preset (2pane = candles + volume, 5pane =
+  // candles + volume + RSI + MACD + Z-score). Read from URL ?layout=5pane
+  // for deterministic Playwright runs; defaults to 2pane otherwise.
+  let currentLayoutPreset: LayoutPreset =
+    new URLSearchParams(globalThis.location.search).get("layout") === "5pane"
+      ? "5pane"
+      : "2pane";
 
   const buildMountOpts = (): MountOptions => ({
     primaryType,
     lineStyle: currentLineStyle,
     lineType: currentLineType,
     volumePlacement: currentVolumePlacement,
+    layoutPreset: currentLayoutPreset,
   });
+
+  /**
+   * Phase 14 Cycle B — derive RSI / MACD / Z-score from OHLC closes and
+   * push the resulting points into Carta. Closes are extracted in time
+   * order; null / NaN warmup outputs are dropped before supply (Carta
+   * point-record validation rejects non-finite values upstream).
+   */
+  const supplyIndicators = (
+    c: TimeSeriesChart,
+    iv: number,
+    bars: readonly OhlcRecord[],
+  ): void => {
+    if (bars.length === 0) {
+      return;
+    }
+    const closes: number[] = bars.map((b) => Number(b.close));
+    const times: Time[] = bars.map((b) => b.time);
+    const rsi = computeRsi14(closes, 14);
+    const macd = computeMacd(closes, 12, 26, 9);
+    const zscore = computeZScore(closes, 20);
+    const pointFor = (
+      values: readonly (number | null)[],
+    ): PointRecord[] => {
+      const out: PointRecord[] = [];
+      for (let i = 0; i < values.length; i += 1) {
+        const v = values[i];
+        const t = times[i];
+        if (v === null || v === undefined || !Number.isFinite(v) || t === undefined) {
+          continue;
+        }
+        out.push({ time: t, value: asPrice(v) });
+      }
+      return out;
+    };
+    const rsiPoints = pointFor(rsi);
+    if (rsiPoints.length > 0) {
+      c.supplyData(DEMO_RSI_CHANNEL, iv, rsiPoints);
+    }
+    const macdLine = pointFor(macd.macd);
+    if (macdLine.length > 0) {
+      c.supplyData(DEMO_MACD_LINE_CHANNEL, iv, macdLine);
+    }
+    const macdSignal = pointFor(macd.signal);
+    if (macdSignal.length > 0) {
+      c.supplyData(DEMO_MACD_SIGNAL_CHANNEL, iv, macdSignal);
+    }
+    const macdHist = pointFor(macd.hist);
+    if (macdHist.length > 0) {
+      c.supplyData(DEMO_MACD_HIST_CHANNEL, iv, macdHist);
+    }
+    const zPoints = pointFor(zscore);
+    if (zPoints.length > 0) {
+      c.supplyData(DEMO_ZSCORE_CHANNEL, iv, zPoints);
+    }
+  };
 
   const primaryLabelFor = (type: PrimarySeriesType): string => {
     switch (type) {
@@ -1079,6 +1275,58 @@ async function main(): Promise<void> {
     for (const pane of chart.panes()) {
       chart.setPaneHeight(pane.id, null);
     }
+  });
+
+  // ── Phase 14 Cycle B — layout preset + reorder + applyOptions wiring ──
+  const layoutPresetSelect = document.getElementById(
+    "layout-preset",
+  ) as HTMLSelectElement | null;
+  if (layoutPresetSelect !== null) {
+    layoutPresetSelect.value = currentLayoutPreset;
+    layoutPresetSelect.addEventListener("change", () => {
+      const raw = layoutPresetSelect.value;
+      if (raw === "2pane" || raw === "5pane") {
+        if (currentLayoutPreset === raw) {
+          return;
+        }
+        currentLayoutPreset = raw;
+        void remount();
+      }
+    });
+  }
+
+  // Phase 14 Cycle B — chart.swapPanes('rsi', 'macd'). Only meaningful
+  // when both panes exist (5pane preset). Logs warn otherwise — handled
+  // by the chart-side implementation.
+  document.getElementById("swap-rsi-macd")?.addEventListener("click", () => {
+    if (chart === null) {
+      return;
+    }
+    const rsi = chart.pane(RSI_PANE_ID);
+    const macd = chart.pane(MACD_PANE_ID);
+    if (rsi === null || macd === null) {
+      return;
+    }
+    chart.swapPanes(RSI_PANE_ID, MACD_PANE_ID);
+  });
+
+  // Phase 14 Cycle B — pane.applyOptions({ height: 100 }) on the RSI pane.
+  document.getElementById("pin-rsi-100")?.addEventListener("click", () => {
+    const rsi = chart?.pane(RSI_PANE_ID);
+    if (rsi === undefined || rsi === null) {
+      return;
+    }
+    rsi.applyOptions({ height: 100 });
+  });
+
+  // Phase 14 Cycle B — pane.moveTo(1) on the Z-score pane (lifts it to
+  // the slot directly under the primary candle pane).
+  document.getElementById("move-zscore-top")?.addEventListener("click", () => {
+    const z = chart?.pane(ZSCORE_PANE_ID);
+    if (z === undefined || z === null) {
+      return;
+    }
+    z.moveTo(1);
   });
 
   const markerBtn = document.getElementById("toggle-markers");

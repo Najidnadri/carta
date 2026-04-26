@@ -154,6 +154,31 @@ export class Renderer {
     }
   }
 
+  /**
+   * Phase 14 Cycle B — re-order a pane's `paneContainer` under `paneRoot`.
+   * Visual y-translate alone keeps non-overlapping content on canvas, but
+   * PixiJS hit-test + event-bubble walks `children` in array order — so
+   * the divider's 24 CSS-px touch hit zone (which overlaps into adjacent
+   * panes by 12 px) needs the child order to match logical pane order.
+   *
+   * No-op when the pane is not currently parented to `paneRoot` (e.g.,
+   * caller is mid-detach).
+   */
+  reorderPane(pane: Pane, newIndex: number): void {
+    if (this.destroyed) {
+      return;
+    }
+    if (pane.paneContainer.parent !== this.paneRoot) {
+      return;
+    }
+    const len = this.paneRoot.children.length;
+    if (len === 0) {
+      return;
+    }
+    const safeIndex = Math.max(0, Math.min(newIndex, len - 1));
+    this.paneRoot.setChildIndex(pane.paneContainer, safeIndex);
+  }
+
   // ─── Legacy getter shims (cycle A back-compat) ──────────────────────────
 
   get gridLayer(): Container {

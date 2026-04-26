@@ -9,7 +9,7 @@ import { DebouncedEmitter } from "../infra/DebouncedEmitter.js";
 import { EventBus } from "../infra/EventBus.js";
 import { InvalidationQueue, type DirtyReason } from "../infra/InvalidationQueue.js";
 import { noopLogger } from "../infra/Logger.js";
-import { Pane } from "../pane/Pane.js";
+import { Pane, type PaneOwner, type PrePatchPaneSnapshot } from "../pane/Pane.js";
 import { computePaneRects, type PaneLayoutInput } from "../pane/PaneLayout.js";
 import { PaneResizeController } from "../pane/PaneResizeController.js";
 import type { PaneOptions, PaneRect, PriceScaleId } from "../pane/types.js";
@@ -373,6 +373,12 @@ export class TimeSeriesChart {
 
     chart.invalidator.invalidate("layout");
     chart.invalidator.invalidate("theme");
+    // Phase 14 Cycle B fix-up — invalidate `viewport` on initial bootstrap so
+    // the first flush emits `window:change` + queues the debounced
+    // `data:request` for the chart's initial window. Without this, hosts
+    // that auto-supply data on `data:request` see empty panes until the
+    // user pans/zooms (which is the first viewport-invalidating gesture).
+    chart.invalidator.invalidate("viewport");
 
     return chart;
   }
@@ -916,6 +922,12 @@ export class TimeSeriesChart {
    * generates a stable id when omitted; throws if the supplied id collides.
    * Stretch factor defaults to 1; `minHeight` defaults to 50 (hard floor 30
    * inside `PaneLayout`).
+   *
+   * Phase 14 Cycle B — emits `pane:add` synchronously after the pane is in
+   * `panesList` + `panesById` + attached to `paneRoot`, but BEFORE the
+   * layout invalidation flushes. Handlers can call `chart.pane(id)` /
+   * `chart.addSeries({ paneId: id, ... })`; they cannot rely on
+   * `pane.getRect()` returning a non-zero rect (layout hasn't run yet).
    */
   addPane(opts?: PaneOptions): Pane {
     if (this.disposed) {
@@ -929,11 +941,30 @@ export class TimeSeriesChart {
       id,
       stretchFactor: opts?.stretchFactor,
       minHeight: opts?.minHeight,
+      logger: this.opts.logger,
+      paneOwner: this.paneOwnerForPane(),
     });
+    if (opts?.height !== undefined) {
+      pane.setHeight(opts.height);
+    }
+    if (opts?.hidden === true) {
+      pane.setHidden(true);
+    }
+    if (opts?.priceFormatter !== undefined) {
+      pane.setPriceFormatter(opts.priceFormatter);
+    }
+    if (opts?.priceScales?.right?.mode !== undefined) {
+      pane.priceScale("right").setMode(opts.priceScales.right.mode);
+    }
+    if (opts?.priceScales?.left?.mode !== undefined) {
+      pane.priceScale("left").setMode(opts.priceScales.left.mode);
+    }
     this.renderer.attachPane(pane);
     this.panesList.push(pane);
     this.panesById.set(id, pane);
+    const index = this.panesList.length - 1;
     this.invalidator.invalidate("layout");
+    this.emitter.emit("pane:add", { paneId: id, index });
     return pane;
   }
 
@@ -1029,6 +1060,13 @@ export class TimeSeriesChart {
     });
   }
 
+  /**
+   * Phase 14 Cycle B fix-up F-4 — set during the synchronous emission of
+   * `pane:remove` so a handler that calls `chart.removePane(sameId)` is
+   * silently no-oped (the pane is already mid-detach; double-destroy is
+   * unsound). Mirrors `reorderInFlight` for the reorder API.
+   */
+  private removingPaneIds = new Set<PaneId>();
   removePane(id: PaneId): void {
     if (this.disposed) {
       return;
@@ -1036,9 +1074,34 @@ export class TimeSeriesChart {
     if (id === MAIN_PANE_ID) {
       throw new Error("[carta] removePane: cannot remove the primary pane");
     }
+    if (this.removingPaneIds.has(id)) {
+      this.opts.logger.warn(
+        `[carta] removePane: reentrant call for pane '${String(id)}' (already being removed); ignored`,
+      );
+      return;
+    }
     const pane = this.panesById.get(id);
     if (pane === undefined) {
       return;
+    }
+    const previousIndex = this.panesList.indexOf(pane);
+    // Phase 14 Cycle B — cancel any in-flight divider drag if the dragged
+    // pane is being removed; the drag's `aboveIndex` / `belowIndex`
+    // snapshots become stale after the splice.
+    this.paneResizeController.cancelDrag();
+    // Phase 14 Cycle B fix-up F-4 — guard against reentrant
+    // `removePane(sameId)` from inside a `pane:remove` handler. The
+    // synchronous emission can recurse into user code that calls back in;
+    // without the guard, each level destroys + tries to splice a stale
+    // index, producing an event storm before the JS stack bails.
+    this.removingPaneIds.add(id);
+    try {
+      // Phase 14 Cycle B — emit `pane:remove` synchronously BEFORE the pane
+      // is destroyed. Handlers can still call `chart.pane(id)` and read
+      // pane state during the emit chain.
+      this.emitter.emit("pane:remove", { paneId: id, previousIndex });
+    } finally {
+      this.removingPaneIds.delete(id);
     }
     // Destroy series owned by this pane.
     const survivors: Series[] = [];
@@ -1056,10 +1119,204 @@ export class TimeSeriesChart {
     this.series.push(...survivors);
     this.renderer.detachPane(pane);
     pane.destroy();
-    this.panesList.splice(this.panesList.indexOf(pane), 1);
+    this.panesList.splice(previousIndex, 1);
     this.panesById.delete(id);
     this.crosshair.releasePaneTag(id);
     this.invalidator.invalidate("layout");
+  }
+
+  /**
+   * Phase 14 Cycle B — true 2-element swap: pane `a` lands where pane `b`
+   * was, and vice versa. Same-id is a silent no-op (no event). Either id
+   * missing logs warn + no-ops. Either id === MAIN_PANE_ID throws — primary
+   * stays at index 0 so the bottom-anchored time-axis + crosshair invariants
+   * hold.
+   *
+   * Reentrant calls from inside a `pane:reorder` handler are rejected with
+   * a `logger.warn` (the `reorderInFlight` guard); other pane mutations
+   * (addPane / removePane / setPaneHeight / applyOptions) are NOT blocked
+   * during reorder.
+   */
+  swapPanes(a: PaneId, b: PaneId): void {
+    if (this.disposed) {
+      return;
+    }
+    if (a === b) {
+      return;
+    }
+    if (a === MAIN_PANE_ID || b === MAIN_PANE_ID) {
+      throw new Error("[carta] swapPanes: cannot displace the primary pane");
+    }
+    const paneA = this.panesById.get(a);
+    const paneB = this.panesById.get(b);
+    if (paneA === undefined || paneB === undefined) {
+      this.opts.logger.warn(
+        `[carta] swapPanes: unknown pane id (a='${String(a)}' b='${String(b)}'); ignored`,
+      );
+      return;
+    }
+    const fromIndex = this.panesList.indexOf(paneA);
+    const toIndex = this.panesList.indexOf(paneB);
+    const order: PaneId[] = this.panesList.map((p) => p.id);
+    [order[fromIndex], order[toIndex]] = [order[toIndex] as PaneId, order[fromIndex] as PaneId];
+    this.applyReorder(order, paneA.id, fromIndex, toIndex);
+  }
+
+  /**
+   * Phase 14 Cycle B — owner-side `moveTo`: insert `pane` at `newIndex`,
+   * shifting other panes. Primary pane is pinned to index 0; non-primary
+   * `newIndex === 0` throws. Out-of-range clamps to `[1, panes.length-1]`;
+   * non-finite warns + no-ops; `newIndex === currentIndex` is a silent no-op.
+   */
+  private movePaneToInternal(pane: Pane, newIndex: number): void {
+    if (this.disposed) {
+      return;
+    }
+    if (pane.id === MAIN_PANE_ID) {
+      throw new Error("[carta] pane.moveTo: cannot move the primary pane");
+    }
+    if (!Number.isFinite(newIndex)) {
+      this.opts.logger.warn(
+        `[carta] pane.moveTo: non-finite index (${String(newIndex)}); ignored`,
+      );
+      return;
+    }
+    // Phase 14 Cycle B fix-up F-3 — non-integer indices were silently
+    // floor()-ed in cycle B, which produced surprising behavior
+    // (`moveTo(1.5)` reorders to slot 1 with no warn). Reject + warn so
+    // the caller's typo / float-math bug surfaces.
+    if (!Number.isInteger(newIndex)) {
+      this.opts.logger.warn(
+        `[carta] pane.moveTo: non-integer index (${String(newIndex)}); ignored`,
+      );
+      return;
+    }
+    const len = this.panesList.length;
+    let target = newIndex;
+    if (target < 0) {
+      this.opts.logger.warn(
+        `[carta] pane.moveTo: negative index (${String(newIndex)}); ignored`,
+      );
+      return;
+    }
+    if (target === 0) {
+      throw new Error("[carta] pane.moveTo: index 0 is reserved for the primary pane");
+    }
+    if (target > len - 1) {
+      target = len - 1;
+    }
+    const fromIndex = this.panesList.indexOf(pane);
+    if (fromIndex === target) {
+      return;
+    }
+    const order: PaneId[] = this.panesList.map((p) => p.id);
+    order.splice(fromIndex, 1);
+    order.splice(target, 0, pane.id);
+    this.applyReorder(order, pane.id, fromIndex, target);
+  }
+
+  /**
+   * Phase 14 Cycle B — drives a reorder transaction. Mutates `panesList`,
+   * calls `renderer.reorderPane(p, i)` for each pane so PixiJS hit-test +
+   * event-bubble order stays in sync with logical order, cancels any
+   * in-flight divider drag, invalidates `'layout'`, and emits one
+   * `pane:reorder` synchronously.
+   *
+   * The `reorderInFlight` flag rejects reentrant `swapPanes` / `moveTo`
+   * calls fired from a `pane:reorder` handler with a `logger.warn`; this
+   * keeps the event chain deterministic.
+   */
+  private reorderInFlight = false;
+  private applyReorder(
+    newOrder: readonly PaneId[],
+    moved: PaneId,
+    fromIndex: number,
+    toIndex: number,
+  ): void {
+    if (this.reorderInFlight) {
+      this.opts.logger.warn(
+        `[carta] reorder: reentrant call from inside a pane:reorder handler; ignored`,
+      );
+      return;
+    }
+    // Cancel any in-flight divider drag before the splice — drag-state
+    // indices become stale after the panesList mutation.
+    this.paneResizeController.cancelDrag();
+    // Build a new top-to-bottom panesList from the id order.
+    const next: Pane[] = [];
+    for (const id of newOrder) {
+      const pane = this.panesById.get(id);
+      if (pane === undefined) {
+        this.opts.logger.warn(
+          `[carta] reorder: id '${String(id)}' missing from panesById; aborting`,
+        );
+        return;
+      }
+      next.push(pane);
+    }
+    this.panesList.length = 0;
+    this.panesList.push(...next);
+    for (let i = 0; i < this.panesList.length; i += 1) {
+      const pane = this.panesList[i];
+      if (pane !== undefined) {
+        this.renderer.reorderPane(pane, i);
+      }
+    }
+    this.invalidator.invalidate("layout");
+    this.reorderInFlight = true;
+    try {
+      this.emitter.emit("pane:reorder", {
+        order: Object.freeze([...newOrder]),
+        moved,
+        fromIndex,
+        toIndex,
+      });
+    } finally {
+      this.reorderInFlight = false;
+    }
+  }
+
+  /**
+   * Phase 14 Cycle B — single instance shared across every pane this chart
+   * constructs. The owner delegate forwards `Pane.moveTo` and post-
+   * `applyOptions` notifications to the chart so layout invalidation +
+   * `pane:resize` / `pane:visibility` event emission stay in one place.
+   */
+  private cachedPaneOwner: PaneOwner | null = null;
+  private paneOwnerForPane(): PaneOwner {
+    this.cachedPaneOwner ??= {
+        movePaneTo: (pane: Pane, newIndex: number): void => {
+          this.movePaneToInternal(pane, newIndex);
+        },
+        paneOptionsApplied: (pane: Pane, patch: Partial<PaneOptions>, prePatch: PrePatchPaneSnapshot): void => {
+          this.invalidator.invalidate("layout");
+          // Emit `pane:resize` if height changed (programmatic source).
+          if (
+            patch.height !== undefined &&
+            pane.heightOverride !== prePatch.heightOverride
+          ) {
+            this.emitter.emit("pane:resize", {
+              paneId: pane.id,
+              height: pane.heightOverride ?? 0,
+              source: "programmatic",
+            });
+          }
+          // Emit `pane:visibility` (always) + `pane:resize {source: 'hidden'}`
+          // (only on hide-transitions) if hidden flipped — same shape as
+          // chart.setPaneHidden.
+          if (patch.hidden !== undefined && pane.hidden !== prePatch.hidden) {
+            this.emitter.emit("pane:visibility", { paneId: pane.id, hidden: pane.hidden });
+            if (pane.hidden) {
+              this.emitter.emit("pane:resize", {
+                paneId: pane.id,
+                height: 0,
+                source: "hidden",
+              });
+            }
+          }
+        },
+      };
+    return this.cachedPaneOwner;
   }
 
   /**
@@ -1094,9 +1351,43 @@ export class TimeSeriesChart {
     }
   }
 
-  /** Visible price ticks from the most-recent render. Dev/test introspection. */
+  /**
+   * Visible price ticks from the most-recent render. Dev/test introspection.
+   *
+   * Phase 14 Cycle B fix-up F-5 — returns the primary pane's ticks for
+   * back-compat with pre-cycle-B callers. Use `visiblePriceTicksByPane()`
+   * to introspect every pane's axis (necessary for asserting
+   * bounded-mode boundary ticks across the full pane stack).
+   */
   visiblePriceTicks(): readonly PriceTickInfo[] {
     return this.primaryPane().priceAxis?.ticks() ?? [];
+  }
+
+  /**
+   * Phase 14 Cycle B fix-up F-5 — per-pane axis tick snapshot. Returns one
+   * row per `(paneId, scaleId)` slot whose axis rendered ticks on the most
+   * recent flush. Used by tests + host integrations that need to verify
+   * bounded-mode boundaries (RSI 0/100, Stochastic 0/100, Z-score ±3) are
+   * actually painted at every viewport.
+   *
+   * `scaleId` is currently always `'right'` since cycle A only renders the
+   * right axis per pane; left-axis support will land in cycle C.
+   */
+  visiblePriceTicksByPane(): readonly {
+    readonly paneId: PaneId;
+    readonly scaleId: PriceScaleId;
+    readonly ticks: readonly PriceTickInfo[];
+  }[] {
+    const out: {
+      paneId: PaneId;
+      scaleId: PriceScaleId;
+      ticks: readonly PriceTickInfo[];
+    }[] = [];
+    for (const pane of this.panesList) {
+      const ticks = pane.priceAxis?.ticks() ?? [];
+      out.push({ paneId: pane.id, scaleId: "right", ticks });
+    }
+    return out;
   }
 
   /** Price-label pool capacity (constant after first render). Dev/test introspection. */

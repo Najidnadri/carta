@@ -6,6 +6,7 @@ import {
   type PriceFormatter,
   type PriceScaleFacade,
   type PriceScaleMargins,
+  type PriceScaleMode,
   type Theme,
 } from "../../types.js";
 import { defaultPriceFormatter, PriceAxis } from "../price/PriceAxis.js";
@@ -15,7 +16,7 @@ import {
   type PriceRangeProvider,
 } from "../price/PriceRangeProvider.js";
 import { DEFAULT_PRICE_MARGINS, PriceScale } from "../price/PriceScale.js";
-import type { PaneId, PaneRect, PriceScaleId, PriceScaleSide } from "./types.js";
+import type { PaneId, PaneOptions, PaneRect, PriceScaleId, PriceScaleSide } from "./types.js";
 
 const DEFAULT_DOMAIN_MIN = 0;
 const DEFAULT_DOMAIN_MAX = 1;
@@ -25,12 +26,49 @@ const FROZEN_DEFAULT_DOMAIN: PriceDomain = Object.freeze({
   max: asPrice(DEFAULT_DOMAIN_MAX),
 });
 
+/**
+ * Phase 14 Cycle B — chart-side delegate that owns reorder + post-mutation
+ * notification on this pane's behalf. Wired by `chart.addPane`. When
+ * `null` (the pane is detached or constructed for a unit test), `pane.moveTo`
+ * logs a warn and no-ops; `applyOptions` still mutates state but the chart
+ * never sees the change so no events fire.
+ */
+export interface PaneOwner {
+  /** Move the calling pane to `newIndex`. Owner enforces clamping + primary-pin. */
+  movePaneTo(pane: Pane, newIndex: number): void;
+  /**
+   * Notify the chart that `applyOptions` mutated this pane. The chart
+   * invalidates `'layout'` and emits `pane:resize` / `pane:visibility`
+   * events for any field that changed. The patch is the original input;
+   * the chart compares against pre-patch state for diff detection.
+   */
+  paneOptionsApplied(pane: Pane, patch: Partial<PaneOptions>, prePatchSnapshot: PrePatchPaneSnapshot): void;
+}
+
+/**
+ * Phase 14 Cycle B — pre-applyOptions snapshot the chart uses to detect
+ * which fields actually changed (so `pane:resize` / `pane:visibility` only
+ * emit on real transitions).
+ */
+export interface PrePatchPaneSnapshot {
+  readonly heightOverride: number | null;
+  readonly hidden: boolean;
+}
+
 export interface PaneConstructionOptions {
   readonly id: PaneId;
   readonly stretchFactor?: number | undefined;
   readonly minHeight?: number | undefined;
   /** When true, this pane owns a `PriceAxis` rendered on the right strip. */
   readonly hasRightAxis?: boolean | undefined;
+  /** Phase 14 Cycle B — diagnostic logger; defaults to a noop. */
+  readonly logger?: Logger | undefined;
+  /**
+   * Phase 14 Cycle B — chart-side delegate for reorder operations. Wired by
+   * `chart.addPane`; tests that construct `Pane` directly without a chart
+   * pass `undefined` and `moveTo` becomes a warn-and-noop.
+   */
+  readonly paneOwner?: PaneOwner | undefined;
 }
 
 interface PriceScaleSlotState {
@@ -43,6 +81,15 @@ interface PriceScaleSlotState {
   readonly providers: Set<PriceRangeProvider>;
   /** Stable facade so external refs survive re-renders. */
   readonly facade: PriceScaleFacade;
+  /**
+   * Phase 14 Cycle B — slot mode. Defaults to `{ kind: 'auto' }` *only*
+   * after `setAutoScale(true)` is called; the pre-cycle-B default was
+   * "manual with priceDomain `[0, 1]` until first setDomain", and we
+   * preserve that behavior by initializing to `{ kind: 'manual', min: 0,
+   * max: 1 }` at construction. `setMode` is the single source of truth.
+   * `setDomain` / `setAutoScale` are sugar that delegate.
+   */
+  mode: PriceScaleMode;
 }
 
 /**
@@ -70,6 +117,8 @@ export class Pane {
   private readonly slots = new Map<string, PriceScaleSlotState>();
   private rect: PaneRect = { x: 0, y: 0, w: 0, h: 0 };
   private destroyed = false;
+  private readonly logger: Logger | null;
+  private readonly paneOwner: PaneOwner | null;
 
   stretchFactor: number;
   minHeight: number;
@@ -96,6 +145,8 @@ export class Pane {
 
   constructor(options: PaneConstructionOptions) {
     this.id = options.id;
+    this.logger = options.logger ?? null;
+    this.paneOwner = options.paneOwner ?? null;
     this.stretchFactor =
       Number.isFinite(options.stretchFactor) && (options.stretchFactor ?? 0) > 0
         ? (options.stretchFactor ?? 1)
@@ -177,9 +228,24 @@ export class Pane {
       return;
     }
     if (!Number.isFinite(px) || px < 0) {
+      this.logger?.warn(
+        `[carta] pane.setHeight: non-finite or negative px (${String(px)}) — ignored`,
+      );
       return;
     }
-    this.heightOverride = Math.max(this.minHeight, Math.floor(px));
+    // Phase 14 Cycle B fix-up F-2 — cap at 65535 px (way beyond any real
+    // display). Without this cap, `applyOptions({ height: MAX_SAFE_INTEGER })`
+    // produces a 9e15-px-tall pane rect that overflows the price-tick
+    // generator's inner loop. Warn at the boundary so the host sees the
+    // degenerate input.
+    const PANE_HEIGHT_CEILING = 65535;
+    if (px > PANE_HEIGHT_CEILING) {
+      this.logger?.warn(
+        `[carta] pane.setHeight: ${String(px)} exceeds ceiling ${String(PANE_HEIGHT_CEILING)} — clamping`,
+      );
+    }
+    const clamped = Math.min(PANE_HEIGHT_CEILING, Math.floor(px));
+    this.heightOverride = Math.max(this.minHeight, clamped);
   }
 
   /** Current pane rect in canvas coords (set by `applyRect`). */
@@ -225,7 +291,12 @@ export class Pane {
       lastRenderedDomain: FROZEN_DEFAULT_DOMAIN,
       providers: new Set(),
       facade: {} as PriceScaleFacade, // backfilled below
+      // Phase 14 Cycle B — initial mode is `manual` with the default
+      // [0, 1] domain so the pre-cycle-B behavior is unchanged for hosts
+      // that only call `setDomain` then `setAutoScale(true)`.
+      mode: { kind: "manual", min: DEFAULT_DOMAIN_MIN, max: DEFAULT_DOMAIN_MAX },
     };
+    const logger = this.logger;
     (slot as { facade: PriceScaleFacade }).facade = {
       setDomain: (min, max): void => {
         const rawMin = Number(min);
@@ -236,12 +307,46 @@ export class Pane {
         });
         slot.priceDomain = next;
         slot.autoScaleEnabled = false;
+        // Bounded mode: keep mode object intact (the bound bracket survives
+        // a `setDomain`); auto / manual modes flip to manual semantics.
+        if (slot.mode.kind !== "bounded") {
+          slot.mode = { kind: "manual", min: rawMin, max: rawMax };
+        } else if (rawMin < slot.mode.min || rawMax > slot.mode.max) {
+          logger?.warn(
+            `[carta] bounded scale: setDomain(${String(rawMin)}, ${String(rawMax)}) clipped to bounds [${String(slot.mode.min)}, ${String(slot.mode.max)}]`,
+          );
+        }
       },
       getDomain: (): PriceDomain => slot.lastRenderedDomain,
       isAutoScale: (): boolean => slot.autoScaleEnabled,
       setAutoScale: (on: boolean): void => {
         slot.autoScaleEnabled = on;
+        // Mirror the mode toggle for bookkeeping; bounded mode keeps its
+        // bracket but autoScale is a separate axis (bounded + auto is the
+        // RSI recipe; bounded + manual is the RSI-frozen-zoom recipe).
+        if (slot.mode.kind !== "bounded") {
+          slot.mode = on ? { kind: "auto" } : slot.mode.kind === "manual" ? slot.mode : { kind: "manual", min: DEFAULT_DOMAIN_MIN, max: DEFAULT_DOMAIN_MAX };
+        }
       },
+      setMode: (mode: PriceScaleMode): void => {
+        const sanitized = sanitizePriceScaleMode(mode, logger);
+        if (sanitized === null) {
+          return;
+        }
+        slot.mode = sanitized;
+        if (sanitized.kind === "manual") {
+          slot.priceDomain = Object.freeze({
+            min: asPrice(sanitized.min),
+            max: asPrice(sanitized.max),
+          });
+          slot.autoScaleEnabled = false;
+        } else if (sanitized.kind === "auto") {
+          slot.autoScaleEnabled = true;
+        }
+        // Bounded keeps the existing autoScale flag (bounded + auto is
+        // legal — autoscale runs first, then clamp).
+      },
+      getMode: (): PriceScaleMode => slot.mode,
     };
     this.slots.set(String(id), slot);
     return slot;
@@ -283,27 +388,143 @@ export class Pane {
    * Per-flush reconciliation. For each slot: if auto-scale is on, query its
    * providers and update `lastRenderedDomain`; otherwise mirror the manual
    * `priceDomain`.
+   *
+   * Phase 14 Cycle B — bounded slots run autoscale (or use the manual
+   * priceDomain) first, then intersect the result with `[mode.min,
+   * mode.max]` (with optional fractional `pad` widening on both sides).
+   * RSI's `[0, 100]` autoscale output passes through unchanged; a buggy
+   * `[0, 999]` gets clamped to `[0, 100]` and the spike is clipped by
+   * `plotClip`.
    */
   reconcileEachScale(startTime: number, endTime: number): void {
     for (const slot of this.slots.values()) {
+      let next: PriceDomain;
       if (!slot.autoScaleEnabled) {
-        slot.lastRenderedDomain = slot.priceDomain;
-        continue;
+        next = slot.priceDomain;
+      } else {
+        // Cast through `unknown` — the auto-scale path runs against the chart's
+        // window times which arrive as plain numbers; the reducer reads them
+        // back via `Number(...)` so the brand is irrelevant at runtime.
+        const reduced: PriceRange | null = reducePriceRanges(
+          slot.providers,
+          startTime as never,
+          endTime as never,
+        );
+        if (reduced === null) {
+          // Retain prior rendered domain — don't collapse to [0, 1].
+          continue;
+        }
+        next = Object.freeze({ min: reduced.min, max: reduced.max });
       }
-      // Cast through `unknown` — the auto-scale path runs against the chart's
-      // window times which arrive as plain numbers; the reducer reads them
-      // back via `Number(...)` so the brand is irrelevant at runtime.
-      const reduced: PriceRange | null = reducePriceRanges(
-        slot.providers,
-        startTime as never,
-        endTime as never,
-      );
-      if (reduced === null) {
-        // Retain prior rendered domain — don't collapse to [0, 1].
-        continue;
+      if (slot.mode.kind === "bounded") {
+        next = clampDomainToBounded(next, slot.mode);
       }
-      slot.lastRenderedDomain = Object.freeze({ min: reduced.min, max: reduced.max });
+      slot.lastRenderedDomain = next;
     }
+  }
+
+  /**
+   * Phase 14 Cycle B — declarative patch for pane state. Routes each
+   * known field to its setter and emits at most one layout invalidation
+   * (the chart's `invalidator` deduplicates `'layout'` reasons across
+   * multiple `setHeight` / `setHidden` calls). `id` is immutable and
+   * triggers a `logger.warn` if patched. Unknown keys are warned + ignored
+   * (forward-compat for plugins).
+   *
+   * Precedence: when both `height` and `stretchFactor` are present in the
+   * patch, `height` wins (sticky via `heightOverride`). Stretch is applied
+   * first, then height.
+   *
+   * `applyOptions({})` is a silent no-op — no events, no invalidation.
+   * Callers (the chart) own invalidation; this method only mutates state.
+   */
+  applyOptions(patch: Partial<PaneOptions>): void {
+    if (this.destroyed) {
+      return;
+    }
+    if (Object.keys(patch).length === 0) {
+      return;
+    }
+    const prePatch: PrePatchPaneSnapshot = {
+      heightOverride: this.heightOverride,
+      hidden: this.hidden,
+    };
+    const knownKeys = new Set([
+      "id",
+      "stretchFactor",
+      "minHeight",
+      "height",
+      "hidden",
+      "priceFormatter",
+      "priceScales",
+    ]);
+    for (const key of Object.keys(patch)) {
+      if (!knownKeys.has(key)) {
+        this.logger?.warn(`[carta] pane.applyOptions: unknown key '${key}' ignored`);
+      }
+    }
+    if (patch.id !== undefined) {
+      this.logger?.warn(
+        `[carta] pane.applyOptions: 'id' is immutable; ignored`,
+      );
+    }
+    if (patch.stretchFactor !== undefined) {
+      const sf = patch.stretchFactor;
+      if (Number.isFinite(sf) && sf > 0) {
+        this.stretchFactor = sf;
+      } else {
+        this.logger?.warn(
+          `[carta] pane.applyOptions: stretchFactor must be a positive number; got ${String(patch.stretchFactor)}`,
+        );
+      }
+    }
+    if (patch.minHeight !== undefined) {
+      const mh = patch.minHeight;
+      if (Number.isFinite(mh) && mh > 0) {
+        this.minHeight = Math.max(30, Math.floor(mh));
+      } else {
+        this.logger?.warn(
+          `[carta] pane.applyOptions: minHeight must be a positive number; got ${String(patch.minHeight)}`,
+        );
+      }
+    }
+    if (patch.height !== undefined) {
+      this.setHeight(patch.height);
+    }
+    if (patch.hidden !== undefined) {
+      this.setHidden(patch.hidden);
+    }
+    if (patch.priceFormatter !== undefined) {
+      this.setPriceFormatter(patch.priceFormatter);
+    }
+    if (patch.priceScales !== undefined) {
+      if (patch.priceScales.right?.mode !== undefined) {
+        this.priceScale("right").setMode(patch.priceScales.right.mode);
+      }
+      if (patch.priceScales.left?.mode !== undefined) {
+        this.priceScale("left").setMode(patch.priceScales.left.mode);
+      }
+    }
+    this.paneOwner?.paneOptionsApplied(this, patch, prePatch);
+  }
+
+  /**
+   * Phase 14 Cycle B — request the chart to move this pane to `newIndex`
+   * (insertion semantics: existing panes shift to make room; primary pane
+   * is pinned to index 0). When constructed without an owner (test setup),
+   * logs a warn and no-ops.
+   */
+  moveTo(newIndex: number): void {
+    if (this.destroyed) {
+      return;
+    }
+    if (this.paneOwner === null) {
+      this.logger?.warn(
+        `[carta] pane.moveTo: pane '${String(this.id)}' has no chart owner; ignored`,
+      );
+      return;
+    }
+    this.paneOwner.movePaneTo(this, newIndex);
   }
 
   /**
@@ -320,9 +541,25 @@ export class Pane {
   currentPriceScaleForSlot(scaleId: PriceScaleId = "right"): PriceScale {
     const slot = this.ensureSlot(scaleId);
     const margins = slot.side === "overlay" ? translateOverlayMargins(slot.margins) : slot.margins;
+    // Phase 14 Cycle B — bounded mode with `pad` widens the rendered
+    // domain by `pad · (max - min)` on both sides so the data doesn't
+    // sit flush against the pane frame. Applied as an effective domain
+    // expansion (NOT via the existing `margins` field which uses
+    // headroom-additive semantics that would compound with `pad`).
+    let effectiveMin = slot.lastRenderedDomain.min;
+    let effectiveMax = slot.lastRenderedDomain.max;
+    if (slot.mode.kind === "bounded") {
+      const pad = sanitizePad(slot.mode.pad, this.logger);
+      if (pad > 0) {
+        const span = slot.mode.max - slot.mode.min;
+        const widen = span * pad;
+        effectiveMin = asPrice(Math.min(Number(effectiveMin), slot.mode.min - widen));
+        effectiveMax = asPrice(Math.max(Number(effectiveMax), slot.mode.max + widen));
+      }
+    }
     return new PriceScale({
-      domainMin: slot.lastRenderedDomain.min,
-      domainMax: slot.lastRenderedDomain.max,
+      domainMin: effectiveMin,
+      domainMax: effectiveMax,
       pixelHeight: this.rect.h,
       margins,
     });
@@ -344,12 +581,22 @@ export class Pane {
     const scale = this.currentPriceScaleForSlot("right");
     // Phase 14 Cycle A — per-pane formatter wins over the chart-level one.
     const effective = this.priceFormatterOverride ?? formatter;
+    // Phase 14 Cycle B fix-up F-1 — bounded slots emit a tick envelope so
+    // the axis labels include the boundary values (e.g. 0 and 100 for
+    // RSI). Without this, small-pane viewports collapse to a single
+    // boundary-misaligned tick.
+    const rightSlot = this.slots.get("right");
+    const tickEnvelope =
+      rightSlot?.mode.kind === "bounded"
+        ? { min: rightSlot.mode.min, max: rightSlot.mode.max }
+        : null;
     this.priceAxis.render(
       scale,
       { x: 0, y: 0, w: this.rect.w, h: this.rect.h },
       theme,
       effective,
       logger,
+      tickEnvelope,
     );
   }
 
@@ -397,4 +644,86 @@ function translateOverlayMargins(tv: PriceScaleMargins): PriceScaleMargins {
     return tv;
   }
   return Object.freeze({ top: t / denom, bottom: b / denom });
+}
+
+/**
+ * Phase 14 Cycle B — validate + freeze a `PriceScaleMode` patch. Returns
+ * `null` on invalid input (caller treats as no-op). Bounded mode requires
+ * finite `min < max`; equal/inverted bounds are rejected with `logger.warn`.
+ */
+export function sanitizePriceScaleMode(
+  mode: PriceScaleMode,
+  logger: Logger | null,
+): PriceScaleMode | null {
+  if (mode.kind === "auto") {
+    return Object.freeze({ kind: "auto" });
+  }
+  if (mode.kind === "manual") {
+    const { min, max } = mode;
+    if (!Number.isFinite(min) || !Number.isFinite(max) || min > max) {
+      logger?.warn(
+        `[carta] PriceScaleMode 'manual' requires finite min <= max; got [${String(mode.min)}, ${String(mode.max)}]`,
+      );
+      return null;
+    }
+    return Object.freeze({ kind: "manual", min, max });
+  }
+  // bounded
+  const { min, max } = mode;
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) {
+    logger?.warn(
+      `[carta] PriceScaleMode 'bounded' requires finite min < max; got [${String(mode.min)}, ${String(mode.max)}]`,
+    );
+    return null;
+  }
+  const pad = mode.pad === undefined ? 0 : sanitizePad(mode.pad, logger);
+  return Object.freeze({ kind: "bounded", min, max, pad });
+}
+
+/**
+ * Phase 14 Cycle B — clamp `pad` to `[0, 1]`. Negative or non-finite values
+ * warn and resolve to 0; values >= 1 clamp to 1.
+ */
+function sanitizePad(pad: number | undefined, logger: Logger | null): number {
+  if (pad === undefined) {
+    return 0;
+  }
+  const n = pad;
+  if (!Number.isFinite(n)) {
+    logger?.warn(
+      `[carta] bounded scale: non-finite pad (${String(pad)}) — treating as 0`,
+    );
+    return 0;
+  }
+  if (n < 0) {
+    logger?.warn(
+      `[carta] bounded scale: negative pad (${String(pad)}) — treating as 0`,
+    );
+    return 0;
+  }
+  if (n > 1) {
+    return 1;
+  }
+  return n;
+}
+
+/**
+ * Phase 14 Cycle B — intersect a `PriceDomain` with the bounded mode's
+ * `[min, max]` interval. Used inside `reconcileEachScale` after autoscale
+ * (or the manual `priceDomain`) is computed. Pad is NOT applied here —
+ * the domain stays inside the mathematical bounds; padding is a renderer
+ * concern that widens the visible space without the data leaving its bounds.
+ */
+function clampDomainToBounded(
+  domain: PriceDomain,
+  mode: { readonly kind: "bounded"; readonly min: number; readonly max: number },
+): PriceDomain {
+  const dMin = domain.min as number;
+  const dMax = domain.max as number;
+  const cMin = Math.max(mode.min, Math.min(dMin, mode.max));
+  const cMax = Math.max(mode.min, Math.min(dMax, mode.max));
+  if (cMin === dMin && cMax === dMax) {
+    return domain;
+  }
+  return Object.freeze({ min: asPrice(cMin), max: asPrice(cMax) });
 }

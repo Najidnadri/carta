@@ -247,6 +247,55 @@ export interface PaneVisibilityPayload {
   readonly hidden: boolean;
 }
 
+/**
+ * Phase 14 Cycle B — payload of `pane:add`. Fires synchronously inside
+ * `chart.addPane(...)`, AFTER the pane is in `chart.panes()` and reachable
+ * via `chart.pane(id)`, but BEFORE the layout invalidation flushes. So
+ * handlers can immediately call `chart.addSeries({ paneId: id, ... })`
+ * but cannot rely on `pane.getRect()` returning a non-zero rect.
+ *
+ * `index` is the pane's top-to-bottom slot at emit time; primary is `0`.
+ */
+export interface PaneAddPayload {
+  readonly paneId: PaneId;
+  readonly index: number;
+}
+
+/**
+ * Phase 14 Cycle B — payload of `pane:remove`. Fires synchronously inside
+ * `chart.removePane(...)`, BEFORE the pane is destroyed — handlers can
+ * still call `chart.pane(id)` and read pane state during the emit chain.
+ * After all handlers return, the pane is detached, its series destroyed,
+ * and the pane container destroyed.
+ *
+ * `previousIndex` is the pane's top-to-bottom slot at the moment of
+ * removal (before the splice).
+ */
+export interface PaneRemovePayload {
+  readonly paneId: PaneId;
+  readonly previousIndex: number;
+}
+
+/**
+ * Phase 14 Cycle B — payload of `pane:reorder`. Fires once per
+ * `chart.swapPanes(...)` / `pane.moveTo(...)` call, after the pane list
+ * is mutated and `paneRoot.setChildIndex` calls have completed, but
+ * before layout flush. `order` is the full top-to-bottom snapshot
+ * (frozen `readonly`); `(moved, fromIndex, toIndex)` describes the
+ * specific transition for analytics.
+ *
+ * Same-id swap (`swapPanes(a, a)`) is a silent no-op — no event.
+ * Programmatic re-entry (`swapPanes` from inside a `pane:reorder`
+ * handler) is rejected with a `logger.warn` to keep the event chain
+ * deterministic.
+ */
+export interface PaneReorderPayload {
+  readonly order: readonly PaneId[];
+  readonly moved: PaneId;
+  readonly fromIndex: number;
+  readonly toIndex: number;
+}
+
 export interface CartaEventMap extends Record<string, unknown> {
   readonly "window:change": ChartWindow;
   readonly "interval:change": IntervalChange;
@@ -255,6 +304,9 @@ export interface CartaEventMap extends Record<string, unknown> {
   readonly "tracking:change": TrackingChange;
   readonly "pane:resize": PaneResizePayload;
   readonly "pane:visibility": PaneVisibilityPayload;
+  readonly "pane:add": PaneAddPayload;
+  readonly "pane:remove": PaneRemovePayload;
+  readonly "pane:reorder": PaneReorderPayload;
   readonly resize: SizeInfo;
   readonly "drawings:created": DrawingsChangedPayload;
   readonly "drawings:updated": DrawingsChangedPayload;
@@ -353,7 +405,30 @@ export interface PriceScaleMargins {
   readonly bottom: number;
 }
 
-export type PriceScaleMode = "linear";
+/**
+ * Phase 14 Cycle B — discriminated union of price-scale modes.
+ *
+ * - `auto` — autoScale runs every flush against the registered
+ *   `PriceRangeProvider`s; the rendered domain is whatever the reducer
+ *   returns (with the standard inflate-if-flat fallback).
+ * - `manual` — the rendered domain is `[min, max]` verbatim. Equivalent
+ *   to `setAutoScale(false) + setDomain(min, max)`.
+ * - `bounded` — autoScale (or manual drag) runs first, then the result
+ *   is intersected with `[min, max]`. `pad` is fractional of `(max - min)`,
+ *   added on both sides — `pad: 0.05` on `[0, 100]` widens render bounds
+ *   to `[-5, 105]`. Clamped to `[0, 1]`; negative values warn + treat as 0.
+ *   RSI / Stochastic / percent panes use this so manual price-axis drag
+ *   stalls at the bound instead of stretching past `[0, 100]`.
+ */
+export type PriceScaleMode =
+  | { readonly kind: "auto" }
+  | { readonly kind: "manual"; readonly min: number; readonly max: number }
+  | {
+      readonly kind: "bounded";
+      readonly min: number;
+      readonly max: number;
+      readonly pad?: number;
+    };
 
 export interface PriceScaleOptions {
   readonly margins?: PriceScaleMargins;
@@ -379,6 +454,15 @@ export interface PriceScaleFacade {
   getDomain(): PriceDomain;
   isAutoScale(): boolean;
   setAutoScale(on: boolean): void;
+  /**
+   * Phase 14 Cycle B — set the slot's mode declaratively. `setMode` is the
+   * single source of truth; `setDomain` / `setAutoScale` are sugar that
+   * delegate. Bounded mode clamps the rendered domain to `[min, max]`
+   * even when autoScale or a manual drag would otherwise widen it.
+   */
+  setMode(mode: PriceScaleMode): void;
+  /** Phase 14 Cycle B — current mode snapshot. */
+  getMode(): PriceScaleMode;
 }
 
 // ─── Viewport options ──────────────────────────────────────────────────────

@@ -133,3 +133,23 @@ describe("targetTickCountForHeight", () => {
     expect(targetTickCountForHeight(800, 40)).toBe(20);
   });
 });
+
+describe("phase 14 cycle B fix-up F-2 — defensive cap", () => {
+  it("does not throw RangeError when targetCount is astronomical", () => {
+    // Pre-fix: this would loop ~1.5e14 times and hit RangeError on the
+    // out array's growth; post-fix the target is capped at 1024.
+    expect(() => generatePriceTicks(0, 100, Number.MAX_SAFE_INTEGER)).not.toThrow();
+    const ticks = generatePriceTicks(0, 100, Number.MAX_SAFE_INTEGER);
+    // The exact number depends on the natural step the algorithm picks,
+    // but it must be bounded.
+    expect(ticks.length).toBeLessThanOrEqual(2048);
+  });
+
+  it("targetTickCountForHeight returns a sane minimum for huge heights (input)", () => {
+    // The function still returns the raw quotient — the cap lives inside
+    // generatePriceTicks. Verify the integration: huge height + tick gen
+    // does not throw.
+    const target = targetTickCountForHeight(Number.MAX_SAFE_INTEGER, 60);
+    expect(() => generatePriceTicks(0, 100, target)).not.toThrow();
+  });
+});

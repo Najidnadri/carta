@@ -6,8 +6,8 @@ export type {
 export { DarkTheme, LightTheme } from "./core/infra/themes.js";
 export { Renderer } from "./core/render/Renderer.js";
 export type { PlotRect, RendererOptions } from "./core/render/Renderer.js";
-export { Pane } from "./core/pane/Pane.js";
-export type { PaneConstructionOptions } from "./core/pane/Pane.js";
+export { Pane, sanitizePriceScaleMode } from "./core/pane/Pane.js";
+export type { PaneConstructionOptions, PaneOwner, PrePatchPaneSnapshot } from "./core/pane/Pane.js";
 export { computePaneRects } from "./core/pane/PaneLayout.js";
 export type { PaneLayoutInput, PaneLayoutOptions } from "./core/pane/PaneLayout.js";
 export {

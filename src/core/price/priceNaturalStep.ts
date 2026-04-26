@@ -14,6 +14,16 @@
 
 const MAX_TICKS_FACTOR = 2;
 const MIN_TARGET = 2;
+/**
+ * Phase 14 Cycle B fix-up F-2 — defensive cap on the requested target tick
+ * count. Any chart with a sane viewport will request <100 ticks; a request
+ * for 1024+ means the caller passed a degenerate `pixelHeight` (e.g. an
+ * unclamped `applyOptions({ height: MAX_SAFE_INTEGER })`). Without this
+ * cap, the inner loop allocates an astronomical array and throws
+ * `RangeError`. We cap silently because the caller's degenerate input was
+ * already warned at the API boundary (`Pane.setHeight`).
+ */
+const MAX_TARGET = 1024;
 
 /**
  * Returns the "nicest" number ≤ or ≥ `range` drawn from the
@@ -71,7 +81,7 @@ export function generatePriceTicks(
   ) {
     return [];
   }
-  const target = Math.max(MIN_TARGET, Math.floor(targetCount));
+  const target = Math.min(MAX_TARGET, Math.max(MIN_TARGET, Math.floor(targetCount)));
   const range = niceNumber(max - min, false);
   const step = niceNumber(range / (target - 1), true);
   if (step <= 0 || !Number.isFinite(step)) {

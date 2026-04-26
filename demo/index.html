@@ -413,11 +413,27 @@
             <option value="overlay">Overlay on main</option>
           </select>
         </label>
+        <label for="layout-preset" style="font-size: 12px; color: var(--muted);" title="Phase 14 Cycle B — multi-pane preset">
+          Layout
+          <select id="layout-preset" data-testid="layout-preset" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:3px 6px;font-size:12px;margin-left:4px;">
+            <option value="2pane">2 pane</option>
+            <option value="5pane">5 pane (RSI + MACD)</option>
+          </select>
+        </label>
         <button id="toggle-volume-pane" data-testid="toggle-volume-pane" type="button" title="Hide / show the dedicated volume pane" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:4px 10px;font-size:12px;">
           Hide volume pane
         </button>
         <button id="reset-pane-heights" data-testid="reset-pane-heights" type="button" title="Reset pane heights to default (clears drag overrides)" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:4px 10px;font-size:12px;">
           Reset pane sizes
+        </button>
+        <button id="swap-rsi-macd" data-testid="swap-rsi-macd" type="button" title="Phase 14 Cycle B — chart.swapPanes('rsi', 'macd')" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:4px 10px;font-size:12px;">
+          Swap RSI ↔ MACD
+        </button>
+        <button id="pin-rsi-100" data-testid="pin-rsi-100" type="button" title="Phase 14 Cycle B — pane.applyOptions({ height: 100 })" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:4px 10px;font-size:12px;">
+          Pin RSI 100 px
+        </button>
+        <button id="move-zscore-top" data-testid="move-zscore-top" type="button" title="Phase 14 Cycle B — pane.moveTo(1)" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:4px 10px;font-size:12px;">
+          Z-score → top
         </button>
         <div id="readout">
           <span>start <b id="readout-start">—</b></span>

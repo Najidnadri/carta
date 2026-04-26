@@ -8,7 +8,7 @@
  */
 
 import { type PaneId, asPaneId, MAIN_PANE_ID } from "../drawings/types.js";
-import type { PriceScaleMargins } from "../../types.js";
+import type { PriceFormatter, PriceScaleMargins, PriceScaleOptions } from "../../types.js";
 
 export { asPaneId, MAIN_PANE_ID };
 export type { PaneId };
@@ -26,13 +26,47 @@ export interface PaneRect {
 
 /**
  * Options accepted by `chart.addPane(opts?)` and the internal primary-pane
- * constructor. Cycle A surface — extended in cycle B with `header`,
- * `priceScales`, `showTimeAxis`. Pre-1.0 so missing fields are not breaking.
+ * constructor. Pre-1.0 so missing fields are not breaking.
+ *
+ * Cycle B-extended fields (`height`, `hidden`, `priceFormatter`,
+ * `priceScales`) are also accepted by `pane.applyOptions(patch)`; the
+ * patcher routes them to the matching `set*` methods. `id` is read on
+ * `addPane` only — passing `id` to `applyOptions` warns and ignores.
  */
 export interface PaneOptions {
   readonly id?: PaneId;
   readonly stretchFactor?: number;
   readonly minHeight?: number;
+  /**
+   * Phase 14 Cycle B — pinned pixel height. When set, the pane is
+   * subtracted from `availableHeight` first and the remainder is
+   * distributed by `stretchFactor` across remaining flex panes. `null`
+   * clears the pin. `applyOptions` precedence: when both `height` and
+   * `stretchFactor` are present in a patch, `height` wins (sticky via
+   * `heightOverride`).
+   */
+  readonly height?: number | null;
+  /**
+   * Phase 14 Cycle B — pane visibility. Hidden panes occupy 0 px of
+   * layout; subtree state (series, scales, drawings) is preserved.
+   */
+  readonly hidden?: boolean;
+  /**
+   * Phase 14 Cycle B — per-pane price formatter override. `null` falls
+   * back to the chart's `priceFormatter`. Useful for the volume pane's
+   * `12.5K` / `1.4M` formatting versus the candle pane's 2-decimal price.
+   */
+  readonly priceFormatter?: PriceFormatter | null;
+  /**
+   * Phase 14 Cycle B — per-slot scale options patch. Cycle B routes only
+   * the `mode` sub-field through `applyOptions` (margins are set on slot
+   * creation via `addSeriesToScale`'s `marginsHint`). Future cycles may
+   * widen this.
+   */
+  readonly priceScales?: {
+    readonly right?: PriceScaleOptions;
+    readonly left?: PriceScaleOptions;
+  };
 }
 
 /**

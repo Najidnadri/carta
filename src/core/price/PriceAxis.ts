@@ -24,6 +24,19 @@ export interface PriceTickInfo {
   readonly label: string;
 }
 
+/**
+ * Phase 14 Cycle B fix-up F-1 — anchors tick generation to a bounded
+ * envelope so the axis labels include the boundaries (e.g. `0` and `100`
+ * for RSI) regardless of where the natural-step algorithm would otherwise
+ * place ticks. `min` and `max` are the bounded mode's bounds; the tick
+ * generator runs against this range and the boundaries are pinned post-hoc
+ * if the natural step skipped them.
+ */
+export interface TickEnvelope {
+  readonly min: number;
+  readonly max: number;
+}
+
 const DEFAULT_MIN_LABEL_PX = 80;
 const DEFAULT_LABEL_PADDING_X = 6;
 const POOL_FLOOR = 32;
@@ -77,6 +90,15 @@ export class PriceAxis {
    * Renders grid + labels for the given scale/plotRect/theme/formatter. Safe
    * on every flush. Catches formatter throws once per render and falls back
    * to the default formatter for the remainder of the frame.
+   *
+   * Phase 14 Cycle B fix-up F-1 — when `tickEnvelope` is provided (bounded
+   * scale modes), tick generation runs against the envelope's `[min, max]`
+   * rather than the projection scale's effective domain, AND both boundary
+   * values are pinned to the tick list if the natural-step generator
+   * skipped them. This guarantees RSI's `0`/`100`, Stochastic's `0`/`100`,
+   * Z-score's `±3`, etc. always render as visible axis labels even when
+   * the pane height forces the natural step to a value larger than the
+   * bounded range.
    */
   render(
     scale: PriceScale,
@@ -84,6 +106,7 @@ export class PriceAxis {
     theme: Theme,
     formatter: PriceFormatter = defaultPriceFormatter,
     logger?: Logger,
+    tickEnvelope?: TickEnvelope | null,
   ): void {
     if (this.destroyed) {
       return;
@@ -100,7 +123,7 @@ export class PriceAxis {
       return;
     }
 
-    const ticks = this.computeTicks(scale, plotRect, formatter, logger);
+    const ticks = this.computeTicks(scale, plotRect, formatter, logger, tickEnvelope ?? null);
     this.lastTicks = ticks;
 
     this.drawGrid(ticks, plotRect, theme);
@@ -186,9 +209,20 @@ export class PriceAxis {
     plotRect: PlotRect,
     formatter: PriceFormatter,
     logger: Logger | undefined,
+    tickEnvelope: TickEnvelope | null,
   ): readonly PriceTickInfo[] {
     const target = targetTickCountForHeight(plotRect.h, this.minLabelPx);
-    const values = generatePriceTicks(scale.effectiveMin, scale.effectiveMax, target);
+    // Phase 14 Cycle B fix-up F-1 — when bounded, generate ticks against
+    // the bounded envelope so the natural-step picks "nice" subdivisions
+    // of `[min, max]` (e.g. 0/25/50/75/100 for RSI), not subdivisions of
+    // the wider effective domain that could place 0 and 100 outside the
+    // chosen step's grid.
+    const generatorMin = tickEnvelope !== null ? tickEnvelope.min : scale.effectiveMin;
+    const generatorMax = tickEnvelope !== null ? tickEnvelope.max : scale.effectiveMax;
+    let values = generatePriceTicks(generatorMin, generatorMax, target);
+    if (tickEnvelope !== null) {
+      values = pinBoundaryTicks(values, tickEnvelope.min, tickEnvelope.max);
+    }
 
     let activeFormatter = formatter;
     let formatterFailed = false;
@@ -281,4 +315,45 @@ export class PriceAxis {
       }
     }
   }
+}
+
+/**
+ * Phase 14 Cycle B fix-up F-1 — given the natural-step generator output and a
+ * bounded envelope, return a tick list that includes both `min` and `max`. If
+ * the generator already includes them (within float tolerance), the result is
+ * unchanged. Otherwise, the boundary values are spliced in at the
+ * appropriate position so the final list stays monotonically increasing.
+ *
+ * Boundary pinning is critical for bounded scales (RSI 0/100, Stochastic
+ * 0/100, Z-score ±3 …) because traders read the boundary lines as decision
+ * thresholds, not as decoration.
+ */
+export function pinBoundaryTicks(
+  values: readonly number[],
+  min: number,
+  max: number,
+): readonly number[] {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) {
+    return values;
+  }
+  const tol = (max - min) * 1e-9;
+  const has = (target: number): boolean =>
+    values.some((v) => Math.abs(v - target) <= tol);
+  const out: number[] = [...values];
+  if (!has(min)) {
+    out.push(min);
+  }
+  if (!has(max)) {
+    out.push(max);
+  }
+  out.sort((a, b) => a - b);
+  // Dedupe with float tolerance.
+  const unique: number[] = [];
+  for (const v of out) {
+    const last = unique.length > 0 ? unique[unique.length - 1] : undefined;
+    if (last === undefined || Math.abs(v - last) > tol) {
+      unique.push(v);
+    }
+  }
+  return unique;
 }
