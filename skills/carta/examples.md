@@ -148,7 +148,7 @@ lines.push(127.50);
 chart.priceScale().setAutoScale(true); // re-trigger if you've manually zoomed
 ```
 
-This is how phase-13 drawing tools will integrate (when shipped). For now you can use it for legend "buy/sell" markers, alert lines, etc.
+Use this for host-managed alert lines, session ranges, support/resistance overlays. Built-in drawing tools (`chart.drawings`) feed their auto-scale through this same mechanism internally — you can add your own provider alongside without conflict.
 
 ## 5. Multi-chart dashboard (linked crosshair)
 
@@ -366,7 +366,133 @@ chart.exitTrackingMode();
 
 `enterTrackingMode` is idempotent — re-entering while already active does NOT fire a second event. Same for exit.
 
-## 14. Carta in a resize-observable container (CSS grid, drawer, modal)
+## 14. Multi-pane layout — candle + volume + RSI + MACD
+
+```ts
+import {
+  TimeSeriesChart, CandlestickSeries, HistogramSeries, LineSeries,
+} from 'carta';
+
+const chart = await TimeSeriesChart.create({
+  container, startTime, endTime, intervalDuration: 60_000,
+});
+
+chart.addSeries(new CandlestickSeries({ channel: 'primary' }));     // primary pane
+
+const volume = chart.addPane({ stretchFactor: 0.25, header: { title: 'Volume' } });
+chart.addSeries(new HistogramSeries({ channel: 'volume', paneId: volume.id }));
+volume.applyOptions({
+  priceFormatter: v => v >= 1e6 ? `${(v/1e6).toFixed(1)}M`
+                    :  v >= 1e3 ? `${(v/1e3).toFixed(1)}K`
+                    : `${v}`,
+});
+
+const rsi = chart.addPane({
+  stretchFactor: 0.20,
+  header: { title: 'RSI 14' },
+  priceScales: { right: { mode: { kind: 'bounded', min: 0, max: 100 } } },
+});
+chart.addSeries(new LineSeries({ channel: 'rsi14', paneId: rsi.id, color: 0xa78bfa }));
+
+const macd = chart.addPane({
+  stretchFactor: 0.20,
+  header: { title: 'MACD 12/26/9' },
+});
+chart.addSeries(new LineSeries({ channel: 'macd-line',   paneId: macd.id, color: 0x58a6ff }));
+chart.addSeries(new LineSeries({ channel: 'macd-signal', paneId: macd.id, color: 0xff9e3b }));
+chart.addSeries(new HistogramSeries({ channel: 'macd-hist', paneId: macd.id }));
+
+// Drag-resize separators are automatic. Programmatic moves:
+chart.swapPanes(rsi.id, macd.id);          // RSI ↔ MACD
+chart.setPaneCollapsed(macd.id, true);      // header-only
+chart.setPaneHidden(volume.id, true);       // hide entirely
+
+chart.on('pane:settings', e => openSettingsDrawer(e.paneId));   // gear button click
+chart.on('pane:reorder',  e => persistPaneOrder(e.order));      // user drag-reorder
+```
+
+The `data:request` handler still routes by `channelId` — pane-routing is purely about *where* the series renders, not *which* data feeds it.
+
+## 15. Drawing tools — full lifecycle
+
+```ts
+import {
+  TimeSeriesChart, CandlestickSeries, installHotkeys,
+  asTime, asPrice, asDrawingId, MAIN_PANE_ID,
+} from 'carta';
+import type { TrendlineDrawing, FibRetracementDrawing, DrawingsSnapshot } from 'carta';
+
+const chart = await TimeSeriesChart.create({ container, startTime, endTime, intervalDuration: 60_000 });
+chart.addSeries(new CandlestickSeries({ channel: 'primary' }));
+
+// 1. Hotkeys: Alt+T trendline, Alt+H horizontal, Alt+R rectangle, Alt+F fib, Alt+Shift+L long, …
+const disposeHotkeys = installHotkeys(chart);
+
+// 2. Magnet snap to OHLC for clean fibs.
+chart.setMagnet('weak');                                          // 'off' | 'weak' | 'strong'
+
+// 3. Programmatic create — clicks place anchors.
+chart.drawings.beginCreate('fibRetracement', {
+  levels: [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1],
+  showPrices: true,
+});
+
+// 4. Or insert a fully-formed drawing.
+const trend: TrendlineDrawing = {
+  id: asDrawingId(''),                                            // empty → auto-uuid
+  kind: 'trendline',
+  schemaVersion: 1,
+  locked: false, visible: true, z: 0,
+  style: { stroke: { color: 0x58a6ff, width: 2 } },
+  anchors: [
+    { time: asTime(t1), price: asPrice(100), paneId: MAIN_PANE_ID },
+    { time: asTime(t2), price: asPrice(105), paneId: MAIN_PANE_ID },
+  ],
+};
+chart.drawings.add(trend);
+
+// 5. Selection / edit / context-menu.
+chart.on('drawings:selected', e => {
+  console.log('count:', e.drawings.length, 'primary:', e.primary?.kind);
+});
+chart.on('drawing:edit',        e => openMyEditor(e.drawing));
+chart.on('drawing:contextmenu', e => openMyContextMenu(e.drawing, e.screen));
+
+// 6. Hotkey: extend or pre-empt.
+chart.on('keyboard:hotkey', e => {
+  if (e.binding === 'arrow') {
+    e.originalEvent.preventDefault();        // suppress Carta's beginCreate('arrow')
+    myCustomArrowFlow();                      // your own UI
+  }
+});
+
+// 7. Persist via your own storage adapter.
+chart.drawings.attachStorage({
+  async load(scope) {
+    const raw = localStorage.getItem(`drawings:${scope.symbol}`);
+    return raw ? JSON.parse(raw) as DrawingsSnapshot : null;
+  },
+  async save(scope, snapshot) {
+    localStorage.setItem(`drawings:${scope.symbol}`, JSON.stringify(snapshot));
+  },
+}, { symbol: 'AAPL' });
+
+// 8. Versioned snapshot dump/load (e.g. server-side persistence).
+const snap = chart.drawings.getSnapshot();           // { schemaVersion: 1, drawings: [...] }
+const result = chart.drawings.loadSnapshot(unknown);  // { droppedCount, droppedKinds }
+if (result.droppedCount > 0) {
+  toast(`Skipped ${result.droppedCount} drawings: ${result.droppedKinds.join(', ')}`);
+}
+
+// On unmount:
+disposeHotkeys();
+chart.drawings.detachStorage();
+chart.destroy();
+```
+
+**Drawing on a non-primary pane.** The drawing's anchor `paneId` decides *which* pane it lives in. Once a pane is created, drag-creating via the toolbar lands in whichever pane the user clicks; programmatic insertion must carry `paneId: thatPane.id`.
+
+## 16. Carta in a resize-observable container (CSS grid, drawer, modal)
 
 `autoResize: true` (the default) listens to `ResizeObserver` on the container. If your container doesn't change size via CSS layout (e.g., it's transformed via `scale()` instead of `width`/`height`), Carta won't see it. Drive resize manually:
 

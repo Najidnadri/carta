@@ -77,6 +77,53 @@ interface TimeSeriesChartOptions {
 | `isTrackingMode()` | `boolean` |
 | `isKineticActive()` | `boolean` |
 | `stopKinetic()` | `void` |
+| `getMagnet()` | `MagnetMode` (`'off' \| 'weak' \| 'strong'`) |
+| `setMagnet(mode)` | `void` — drawing anchor snap; existing drawings unchanged |
+
+### Panes (Phase 14)
+
+| Method | Returns |
+|---|---|
+| `panes()` | `readonly Pane[]` — top-to-bottom, primary at index 0 |
+| `pane(id)` | `Pane \| null` |
+| `primaryPane()` | `Pane` — same as `panes()[0]` |
+| `addPane(opts?)` | `Pane` — fires `pane:add` |
+| `removePane(id)` | `void` — fires `pane:remove` synchronously *before* destroy |
+| `swapPanes(a, b)` | `void` — fires `pane:reorder`. Primary stays pinned at index 0. |
+| `setPaneHeight(id, px \| null)` | `void` — fires `pane:resize{source:'programmatic'}` |
+| `setPaneHidden(id, bool)` | `void` — fires `pane:visibility` |
+| `setPaneCollapsed(id, bool)` | `void` — fires `pane:collapse`. Primary rejected (warn). |
+
+`Pane` instance methods: `priceScale(scaleId?)`, `getRect()`, `setHeight(px)`, `setHidden(bool)`, `setCollapsed(bool)`, `setHeaderOptions(opts)`, `setPriceFormatter(fn)`, `applyOptions(patch)`, `moveTo(idx)`. The `applyOptions` patch accepts `{ height, hidden, collapsed, header, priceFormatter, priceScales: { right?: { mode } | left?: { mode } } }`.
+
+### Drawings (Phase 13)
+
+`chart.drawings` is the public facade.
+
+| Method | Returns |
+|---|---|
+| `beginCreate(kind, options?)` | `void` — enter create-mode |
+| `cancelCreate()` | `void` |
+| `isCreating()` | `boolean` |
+| `list()` | `readonly Drawing[]` |
+| `getById(id)` | `Drawing \| null` |
+| `add(drawing)` | `void` — fires `drawings:created` |
+| `update<K>(id, patch)` | `boolean` — fires `drawings:updated` |
+| `remove(id)` | `boolean` — fires `drawings:removed` |
+| `clear()` | `void` — fires `drawings:removed` per drawing |
+| `getSelectedIds()` | `readonly DrawingId[]` |
+| `getPrimarySelectedId()` | `DrawingId \| null` |
+| `select(id \| null)` | `void` — fires `drawings:selected` |
+| `toggleSelection(id)` | `void` — multi-select; fires `drawings:selected` |
+| `getSnapshot()` | `DrawingsSnapshot` |
+| `loadSnapshot(snap)` | `{ droppedCount: number; droppedKinds: readonly string[] }` |
+| `attachStorage(adapter, scope)` | `void` — debounced auto-save |
+| `detachStorage()` | `void` |
+| `getDevHooks()` | `DrawingsDevHooks` (test-only, unstable) |
+
+Also exported:
+- `installHotkeys(chart, options?): () => void` — `Alt+letter` document-scope listener with `RECOMMENDED_HOTKEY_BINDINGS`.
+- `MAIN_PANE_ID`, `OVERLAY_SCALE_ID`, `asPaneId`, `asDrawingId`, `formatDuration`, `clampLongPosition`, `clampShortPosition`, `computePositionStats`, `formatPositionLine`.
 
 ### Theme & price scale
 
@@ -110,12 +157,80 @@ interface TimeSeriesChartOptions {
 
 ```ts
 interface CartaEventMap {
-  'window:change':   ChartWindow;          // pan/zoom/setWindow/setInterval — debounced
-  'interval:change': IntervalChange;       // after setInterval — previous bucket invalidated
-  'data:request':    DataRequest;          // visible window has uncached records
-  'crosshair:move':  CrosshairInfo;        // pointer move OR programmatic tracking-mode update
-  'tracking:change': TrackingChange;       // long-press OR enterTrackingMode/exitTrackingMode
-  'resize':          SizeInfo;             // container dimensions changed
+  // Core (6)
+  'window:change':   ChartWindow;
+  'interval:change': IntervalChange;
+  'data:request':    DataRequest;
+  'crosshair:move':  CrosshairInfo;            // includes paneId
+  'tracking:change': TrackingChange;
+  'resize':          SizeInfo;
+  // Panes (Phase 14)
+  'pane:add':        PaneAddPayload;           // { paneId, index } — sync, before flush
+  'pane:remove':     PaneRemovePayload;        // { paneId, previousIndex } — sync, before destroy
+  'pane:reorder':    PaneReorderPayload;       // { order, moved, fromIndex, toIndex }
+  'pane:resize':     PaneResizePayload;        // { paneId, height, source }
+  'pane:visibility': PaneVisibilityPayload;    // { paneId, hidden, source? }
+  'pane:collapse':   PaneCollapsePayload;      // { paneId, collapsed, source }
+  'pane:settings':   PaneSettingsPayload;      // { paneId } — gear icon click
+  // Drawings (Phase 13)
+  'drawings:created':  DrawingsChangedPayload;
+  'drawings:updated':  DrawingsChangedPayload;
+  'drawings:removed':  DrawingsRemovedPayload; // { id, kind }
+  'drawings:selected': DrawingsSelectedPayload;// { drawings, primary }
+  'drawing:edit':      DrawingEditPayload;
+  'drawing:contextmenu':DrawingContextMenuPayload; // { drawing, screen, source: 'long-press' | 'right-click' }
+  // Hotkeys
+  'keyboard:hotkey': KeyboardHotkeyPayload;    // Alt+letter; preventDefault to suppress beginCreate
+}
+```
+
+### `PaneResizePayload`
+```ts
+{ paneId: PaneId; height: number; source: 'user-drag' | 'programmatic' | 'chart-resize' | 'hidden' }
+```
+
+### `PaneVisibilityPayload`
+```ts
+{ paneId: PaneId; hidden: boolean; source?: 'programmatic' | 'header-chevron' | 'chart-resize' }
+```
+
+### `PaneCollapsePayload`
+```ts
+{ paneId: PaneId; collapsed: boolean; source: 'programmatic' | 'header-chevron' }
+```
+
+Auto-collapse on narrow viewports does NOT emit `pane:collapse` — those panes go truly hidden via `pane:visibility{source:'chart-resize'}`.
+
+### `PaneAddPayload` / `PaneRemovePayload` / `PaneReorderPayload`
+```ts
+{ paneId: PaneId; index: number }                                                  // pane:add
+{ paneId: PaneId; previousIndex: number }                                          // pane:remove
+{ order: readonly PaneId[]; moved: PaneId; fromIndex: number; toIndex: number }    // pane:reorder
+```
+
+### `DrawingsSelectedPayload`
+```ts
+{ drawings: readonly Drawing[]; primary: Drawing | null }
+```
+
+Pre-1.0 breaking change from the cycle-A singular `drawing` field. Use `primary` for "the active drawing"; `drawings.length` for multi-select cardinality.
+
+### `DrawingContextMenuPayload`
+```ts
+{
+  drawing: Drawing;
+  screen:  { x: number; y: number };
+  source:  'long-press' | 'right-click';
+}
+```
+
+### `KeyboardHotkeyPayload`
+```ts
+{
+  key: string;                                // lowercased letter
+  modifiers: { alt: boolean; ctrl: boolean; meta: boolean; shift: boolean };
+  binding: DrawingKind | null;                // recommended-bindings table lookup
+  originalEvent: KeyboardEvent;               // call .preventDefault() to suppress beginCreate
 }
 ```
 
@@ -147,10 +262,11 @@ interface CartaEventMap {
   price: Price | null;                                // null on leave
   point: { x: Pixel; y: Pixel };                      // last known pixel coord, preserved on leave
   seriesData: ReadonlyMap<CrosshairSeriesKey, DataRecord | null>;
+  paneId: PaneId | null;                              // pane the pointer is over (null when outside any pane)
 }
 ```
 
-`seriesData` is keyed by the host's own `Series` instance reference (the same object passed to `chart.addSeries`). Iterate to render per-series legends.
+`seriesData` is keyed by the host's own `Series` instance reference (the same object passed to `chart.addSeries`). Iterate to render per-series legends. `paneId` is `MAIN_PANE_ID` for single-pane charts whenever the pointer is inside the plot rect; `null` over the time-axis gutter or pane separators.
 
 ### `TrackingChange`
 ```ts
@@ -240,6 +356,17 @@ interface Theme {
   crosshairLine:    number;
   crosshairTagBg:   number;
   crosshairTagText: number;
+
+  // Pane separators (Phase 14 Cycle A)
+  paneSeparator:    number;       // ≥ 3:1 contrast vs. background — separator is a drag handle
+
+  // Pane header strip (Phase 14 Cycle C)
+  paneHeaderBg:       number;     // strip fill (one shade off background)
+  paneHeaderText:     number;     // 4.5:1 vs. paneHeaderBg — title + chevron / gear / × glyphs
+  paneHeaderHoverBg:  number;     // hovered/pressed-button background tint (4 px rounded, 0.5 alpha)
+
+  // Drawings (Phase 13)
+  selection: number;              // selection accent — dashed bbox, anchor handle fill, body halo
 
   // Typography
   fontFamily: string;
@@ -364,16 +491,132 @@ interface ViewportOptions {
 ```ts
 interface PriceScaleOptions {
   margins?: { top: number; bottom: number };   // 0..1 fractions
-  mode?: 'linear';                              // only mode in v0
+  mode?: PriceScaleMode;
 }
+
+type PriceScaleMode =
+  | { kind: 'auto' }
+  | { kind: 'manual'; min: number; max: number }
+  | { kind: 'bounded'; min: number; max: number; pad?: number };  // pad fraction of (max-min), [0,1]
 
 interface PriceScaleFacade {
   setDomain(min: Price | number, max: Price | number): void;
   getDomain(): { min: Price; max: Price };
   isAutoScale(): boolean;
   setAutoScale(on: boolean): void;
+  setMode(mode: PriceScaleMode): void;       // single source of truth — setDomain/setAutoScale delegate
+  getMode(): PriceScaleMode;
 }
 ```
+
+`bounded` mode intersects the autoscale (or manual-drag) result with `[min, max]`, then pads by `pad * (max - min)` on each side. RSI / Stochastic / percent panes use this so the price axis stalls at the bound instead of running past `[0, 100]`.
+
+## Pane options (Phase 14)
+
+```ts
+interface PaneOptions {
+  id?: PaneId;                                       // omit → auto-generated
+  stretchFactor?: number;                            // > 0; flex distribution weight
+  minHeight?: number;                                // px; default 60
+  height?: number | null;                            // pinned height; null → flex (cleared on patch)
+  hidden?: boolean;
+  collapsed?: boolean;                               // header-only (24 px); plot clamps to 0
+  header?: PaneHeaderOptions | false;                // false = headerless (default)
+  priceFormatter?: PriceFormatter | null;            // null → fall back to chart.priceFormatter
+  priceScales?: {
+    right?: PriceScaleOptions;                       // applyOptions routes only `mode` for now
+    left?:  PriceScaleOptions;
+  };
+}
+
+interface PaneHeaderOptions {
+  title?: string;                                    // empty string hides title
+  visible?: boolean;                                 // false → strip not rendered
+}
+```
+
+The primary pane is implicitly headerless and cannot be hidden, collapsed, or removed — passing those on the primary pane warns and is ignored.
+
+## Series pane / scale routing
+
+Every series options interface extends `SeriesPaneRoutingOptions`:
+
+```ts
+interface SeriesPaneRoutingOptions {
+  paneId?:       PaneId;                             // default: MAIN_PANE_ID
+  priceScaleId?: string;                             // default: 'right'; '' = OVERLAY_SCALE_ID
+  scaleMargins?: { top: number; bottom: number };    // 0..1 fractions
+}
+```
+
+**Volume on main pane recipe:**
+```ts
+new HistogramSeries({
+  channel: 'volume',
+  priceScaleId: '',                                  // OVERLAY_SCALE_ID
+  scaleMargins: { top: 0.8, bottom: 0 },             // bottom 20 % of pane
+  participatesInAutoScale: false,
+});
+```
+
+## Drawing types (Phase 13)
+
+```ts
+type DrawingKind =
+  | 'trendline' | 'horizontalLine' | 'verticalLine' | 'rectangle' | 'fibRetracement'
+  | 'ray' | 'extendedLine' | 'horizontalRay' | 'parallelChannel'
+  | 'longPosition' | 'shortPosition'
+  | 'text' | 'callout' | 'arrow'
+  | 'dateRange' | 'priceRange' | 'priceDateRange'
+  | 'pitchfork' | 'gannFan' | 'ellipse'
+  | 'fibExtension' | 'fibTimeZones' | 'fibFan' | 'fibArcs'
+  | 'brush' | 'icon';
+
+interface DrawingAnchor {
+  time:   Time;
+  price:  Price;
+  paneId: PaneId;                                    // anchors live in DATA SPACE
+}
+
+interface DrawingsSnapshot {
+  schemaVersion: 1;
+  drawings: readonly Drawing[];
+}
+
+interface DrawingScope {
+  symbol: string;
+  chartId?: string;
+  intervalDuration?: number;
+}
+
+interface DrawingsStorageAdapter {
+  load(scope:  DrawingScope): Promise<DrawingsSnapshot | null>;
+  save(scope:  DrawingScope, snapshot: DrawingsSnapshot): Promise<void>;
+  list?: () => Promise<readonly DrawingScope[]>;
+  remove?: (scope: DrawingScope) => Promise<void>;
+}
+
+interface BeginCreateOptions {
+  style?:       DrawingStyle;
+  z?:           number;
+  meta?:        Readonly<Record<string, JsonValue>>;
+  levels?:      readonly FibLevel[];          // fibRetracement / fibExtension / fibArcs
+  showPrices?:  boolean;
+  showPercents?: boolean;
+  direction?:   'left' | 'right';             // horizontalRay default
+  text?:        string;                       // text / callout initial content
+  qty?:         number;                       // long/shortPosition (positive finite)
+  tickSize?:    number;                       // long/shortPosition; required for 'ticks' display
+  displayMode?: 'rr' | 'percent' | 'price' | 'ticks';
+  endTime?:     number;                       // long/shortPosition right edge
+  variant?:     'andrews' | 'schiff' | 'modifiedSchiff';   // pitchfork
+  glyph?:       IconGlyph;                    // icon ('flag' default; full set in DEFAULT_ICON_GLYPHS)
+  size?:        number;                       // icon size override (CSS px)
+  tint?:        number;                       // icon tint override
+}
+```
+
+`MagnetMode = 'off' | 'weak' | 'strong'` — `weak` snaps `anchor.price` to the nearest of `{high, low}` of the bar at the snapped time; `strong` snaps to `{open, high, low, close}`. Time always snaps to bar centre when magnet is non-off.
 
 ## Logger contract
 
