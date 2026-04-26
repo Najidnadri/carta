@@ -95,6 +95,13 @@ export class Renderer {
       autoDensity: true,
       autoStart: false,
       sharedTicker: false,
+      // Phase 13 Cycle C.3 — preserve the GL back buffer between frames so
+      // hosts (and the test harness) can `readPixels` / `canvas.toDataURL`
+      // / `app.renderer.extract.canvas` without a black-frame race. Adds
+      // ~one extra back-buffer worth of GPU memory; acceptable for a
+      // charting library where pixel capture is a common requirement
+      // (PNG export, visual-regression tests, third-party screenshot tools).
+      preserveDrawingBuffer: true,
     });
     const canvasStyle = app.canvas.style;
     canvasStyle.display = "block";

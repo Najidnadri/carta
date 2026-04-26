@@ -100,6 +100,7 @@ export type {
   LabelPlacement,
   LabelSpec,
   LabelSyncContext,
+  RightOfCxLabelSpec,
   RightOfXLabelSpec,
   TopOfXLabelSpec,
 } from "./core/drawings/LabelPool.js";
@@ -149,13 +150,19 @@ export {
   DEFAULT_FIB_FAN_LEVELS,
   DEFAULT_FIB_LEVELS,
   DEFAULT_FIB_TIME_ZONE_OFFSETS,
+  DEFAULT_ICON_GLYPHS,
   MAIN_PANE_ID,
   asDrawingId,
   asPaneId,
 } from "./core/drawings/types.js";
+export { buildIconAtlas, ICON_CELL_CSS_PX } from "./core/drawings/IconAtlas.js";
+export type { IconAtlas } from "./core/drawings/IconAtlas.js";
+export { simplifyRdp } from "./core/drawings/rdp.js";
+export type { SimplePoint } from "./core/drawings/rdp.js";
 export type {
   ArrowDrawing,
   BeginCreateOptions,
+  BrushDrawing,
   CalloutDrawing,
   DateRangeDrawing,
   DisplayMode,
@@ -188,6 +195,8 @@ export type {
   HorizontalLineDrawing,
   HorizontalRayDirection,
   HorizontalRayDrawing,
+  IconDrawing,
+  IconGlyph,
   JsonValue,
   LongPositionDrawing,
   PaneId,
@@ -205,6 +214,7 @@ export type {
   VerticalLineDrawing,
 } from "./core/drawings/types.js";
 export type {
+  BrushGeom,
   EllipseGeom,
   FibArcRingGeom,
   FibArcsGeom,
@@ -215,6 +225,7 @@ export type {
   FibTimeZonesGeom,
   GannFanGeom,
   GannRayGeom,
+  IconGeom,
   PitchforkGeom,
 } from "./core/drawings/project.js";
 export { computePitchforkCenterlineBase, GANN_FAN_SLOPES } from "./core/drawings/pitchfork.js";

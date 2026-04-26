@@ -32,6 +32,8 @@ import type {
   HorizontalLineDrawing,
   HorizontalRayDirection,
   HorizontalRayDrawing,
+  IconDrawing,
+  IconGlyph,
   JsonValue,
   LongPositionDrawing,
   PaneId,
@@ -48,7 +50,8 @@ import type {
   TrendlineDrawing,
   VerticalLineDrawing,
 } from "./types.js";
-import { asDrawingId, asPaneId, MAIN_PANE_ID } from "./types.js";
+import type { BrushDrawing } from "./types.js";
+import { asDrawingId, asPaneId, DEFAULT_ICON_GLYPHS, MAIN_PANE_ID } from "./types.js";
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -800,13 +803,91 @@ function parseFibArcs(raw: Record<string, unknown>): FibArcsDrawing | null {
   if (levels === null) {
     return null;
   }
+  // Cycle C.3 — opt-in ring labels. Default false to preserve C.2 behavior.
+  const showRingLabels = raw.showRingLabels === true;
   return Object.freeze({
     ...c,
     kind: "fibArcs" as const,
     anchors,
     levels,
+    showRingLabels,
     schemaVersion: 1 as const,
   });
+}
+
+// ─── Phase 13 Cycle C.3 — brush + icon parsers ─────────────────────────────
+
+function parsePointArray(raw: unknown): readonly DrawingAnchor[] | null {
+  if (!Array.isArray(raw)) {
+    return null;
+  }
+  const out: DrawingAnchor[] = [];
+  for (const r of raw) {
+    const a = parseAnchor(r);
+    if (a === null) {
+      return null;
+    }
+    out.push(a);
+  }
+  return Object.freeze(out);
+}
+
+function parseBrush(raw: Record<string, unknown>): BrushDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parsePairAnchors(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  const points = parsePointArray(raw.points);
+  if (points === null || points.length < 2) {
+    return null;
+  }
+  return Object.freeze({
+    ...c,
+    kind: "brush" as const,
+    anchors,
+    points,
+    schemaVersion: 1 as const,
+  });
+}
+
+const ICON_GLYPH_SET: ReadonlySet<string> = new Set<string>(DEFAULT_ICON_GLYPHS);
+
+function parseIconGlyph(raw: unknown): IconGlyph | null {
+  if (typeof raw !== "string" || !ICON_GLYPH_SET.has(raw)) {
+    return null;
+  }
+  return raw as IconGlyph;
+}
+
+function parseIcon(raw: Record<string, unknown>): IconDrawing | null {
+  const c = parseCommon(raw);
+  if (c === null) {
+    return null;
+  }
+  const anchors = parseSingleAnchor(raw.anchors);
+  if (anchors === null) {
+    return null;
+  }
+  const glyph = parseIconGlyph(raw.glyph);
+  if (glyph === null) {
+    return null;
+  }
+  const size = parsePositiveFiniteNumber(raw.size);
+  const tint = parseFiniteNumber(raw.tint);
+  const base = {
+    ...c,
+    kind: "icon" as const,
+    anchors,
+    glyph,
+    schemaVersion: 1 as const,
+  };
+  const withSize = size === null ? base : { ...base, size };
+  const withTint = tint === null ? withSize : { ...withSize, tint };
+  return Object.freeze(withTint);
 }
 
 const PARSERS: Readonly<Record<DrawingKind, (raw: Record<string, unknown>) => Drawing | null>> = {
@@ -834,6 +915,8 @@ const PARSERS: Readonly<Record<DrawingKind, (raw: Record<string, unknown>) => Dr
   fibTimeZones: parseFibTimeZones,
   fibFan: parseFibFan,
   fibArcs: parseFibArcs,
+  brush: parseBrush,
+  icon: parseIcon,
 };
 
 const KNOWN_KINDS: ReadonlySet<DrawingKind> = new Set([
@@ -861,6 +944,8 @@ const KNOWN_KINDS: ReadonlySet<DrawingKind> = new Set([
   "fibTimeZones",
   "fibFan",
   "fibArcs",
+  "brush",
+  "icon",
 ]);
 
 function isKnownKind(s: string): s is DrawingKind {

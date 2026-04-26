@@ -15,7 +15,7 @@
  * listener in `destroy()`.
  */
 
-import { Graphics, type Container, type FederatedPointerEvent } from "pixi.js";
+import { Graphics, Sprite, type Container, type FederatedPointerEvent } from "pixi.js";
 import type { EventBus } from "../infra/EventBus.js";
 import type { PlotRect, Renderer } from "../render/Renderer.js";
 import type { PriceScale } from "../price/PriceScale.js";
@@ -37,8 +37,10 @@ import {
   DEFAULT_FIB_FAN_LEVELS,
   DEFAULT_FIB_LEVELS,
   DEFAULT_FIB_TIME_ZONE_OFFSETS,
+  DEFAULT_ICON_GLYPHS,
   MAIN_PANE_ID,
   type BeginCreateOptions,
+  type BrushDrawing,
   type DisplayMode,
   type Drawing,
   type DrawingAnchor,
@@ -48,7 +50,11 @@ import {
   type DrawingsSnapshot,
   type DrawingsStorageAdapter,
   type DrawingStyle,
+  type IconDrawing,
+  type IconGlyph,
 } from "./types.js";
+import { buildIconAtlas, ICON_CELL_CSS_PX, type IconAtlas } from "./IconAtlas.js";
+import { simplifyRdp, type SimplePoint } from "./rdp.js";
 import {
   clampLongPosition,
   clampShortPosition,
@@ -111,6 +117,12 @@ interface DraggingState {
   /** Position-only: snapshot of `endTime` at drag start so the time-end puller can be diffed. */
   readonly startEndTime: number | null;
   /**
+   * Phase 13 Cycle C.3 — brush-only: snapshot of the variable-arity polyline
+   * at drag start.  Body-drag translates each point by the same Δt/Δp so the
+   * stroke moves rigidly.  `null` for non-brush drawings.
+   */
+  readonly startBrushPoints: readonly DrawingAnchor[] | null;
+  /**
    * Cycle B.3 — when body-drag is multi-select, snapshot the full Drawing
    * for every peer in the selection (excluding the primary drag.id and
    * any locked drawings).  Each frame translates from these snapshots so
@@ -127,6 +139,24 @@ interface CreatingState {
   readonly options: BeginCreateOptions;
   placedAnchors: DrawingAnchor[];
 }
+
+/**
+ * Phase 13 Cycle C.3 — brush capture state. Lives parallel to `creating`
+ * (the brush is in `creating.kind === 'brush'` mode while the user is mid-
+ * stroke). Points are captured in plot-local CSS px; commit unprojects to
+ * data-space anchors via the active TimeScale + PriceScale.
+ */
+interface BrushCaptureState {
+  readonly pointerId: number;
+  readonly creating: CreatingState;
+  rawPoints: SimplePoint[];
+  readonly startGlobalX: number;
+  readonly startGlobalY: number;
+}
+
+const BRUSH_RAW_CAP = 400;
+const BRUSH_COMMIT_EPSILON_CSS_PX = 1.5;
+const BRUSH_MID_STROKE_EPSILON_CSS_PX = 0.75;
 
 export interface DrawingsControllerDeps {
   readonly stage: Container;
@@ -173,6 +203,25 @@ let idCounter = 0;
 function fallbackId(): DrawingId {
   idCounter += 1;
   return asDrawingId(`drw-${String(Date.now())}-${String(idCounter)}`);
+}
+
+const ICON_GLYPH_SET: ReadonlySet<string> = new Set<string>(DEFAULT_ICON_GLYPHS);
+function readIconGlyph(options: BeginCreateOptions): IconGlyph {
+  const g = options.glyph;
+  if (typeof g === "string" && ICON_GLYPH_SET.has(g)) {
+    return g;
+  }
+  return "flag";
+}
+
+function brushDprBucket(dpr: number): number {
+  if (!Number.isFinite(dpr) || dpr <= 1) {
+    return 1;
+  }
+  if (dpr <= 1.5) {
+    return 1.5;
+  }
+  return 2;
 }
 function defaultNewId(): DrawingId {
   const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
@@ -228,6 +277,21 @@ export class DrawingsController {
   private readonly deps: DrawingsControllerDeps;
   private readonly drawings = new Map<DrawingId, Drawing>();
   private readonly graphicsByDrawing = new Map<DrawingId, Graphics>();
+  /**
+   * Phase 13 Cycle C.3 — parallel sprite registry for icon drawings. The
+   * pooled `Graphics` row stays empty (icon's draw fn is a no-op); the
+   * sprite carries the visual.  Lifecycle mirrors `graphicsByDrawing`:
+   * created on first render, destroyed in `removeInternal` / `destroy`.
+   */
+  private readonly spritesByDrawing = new Map<DrawingId, Sprite>();
+  /**
+   * Phase 13 Cycle C.3 — runtime-built sprite atlas. Lazy-created on the
+   * first icon render; rebuilt when the active DPR bucket changes (the
+   * existing `'size'` invalidation already triggers a re-render on DPR
+   * change so no new event subscription is needed). `null` until the first
+   * icon is seen so non-icon hosts don't pay the build cost.
+   */
+  private iconAtlas: IconAtlas | null = null;
   private readonly labelPools = new Map<DrawingId, LabelPool>();
   private readonly handleGraphicsPool: Graphics[] = [];
   private readonly handleCache = new HandleContextCache();
@@ -263,6 +327,13 @@ export class DrawingsController {
   private readonly textPools = new Map<DrawingId, DrawingTextPool>();
   private creating: CreatingState | null = null;
   private dragging: DraggingState | null = null;
+  /**
+   * Phase 13 Cycle C.3 — active brush capture, parallel to `dragging`. Set
+   * on `pointerdown` while `creating?.kind === 'brush'`; cleared on
+   * `pointerup`, `pointercancel`, `interval:change`, pinch-start, or
+   * `chart.destroy()`. Points are captured in plot-local CSS px.
+   */
+  private brushCapture: BrushCaptureState | null = null;
   private bulkLoadDepth = 0;
   /**
    * Cycle B.3 fix-up Q-A — set during `removeSelected()` so per-id
@@ -321,6 +392,27 @@ export class DrawingsController {
     }
     // Creating mode: every click while creating is a new anchor.
     if (this.creating !== null) {
+      // Phase 13 Cycle C.3 — brush short-circuits the click-to-anchor path
+      // and instead starts a pointer-stream capture. `pointermove` pushes
+      // raw points; `pointerup` runs RDP + commits.
+      //
+      // Do NOT claim a secondary pointer when a brush capture is already
+      // active for a different pointerId — the second finger is the user's
+      // attempt to bail out of the stroke and pinch-zoom.  Cancel the
+      // capture (no phantom 2-point brush) and return `false` so
+      // `ViewportController` picks the second pointer up; if the user keeps
+      // both fingers down, the next pointerdown will see the freed
+      // brush-pointer in viewport's tracking and pinch-mode kicks in
+      // naturally on the third event.  Either way: no orphan brush, no
+      // silent swallow.
+      if (this.creating.kind === "brush") {
+        if (this.brushCapture !== null && this.brushCapture.pointerId !== e.pointerId) {
+          this.cancelActiveBrush();
+          return false;
+        }
+        this.startBrushCapture(e.pointerId, e.global.x, e.global.y, local.x, local.y);
+        return true;
+      }
       this.acceptCreatePoint(local.x, local.y);
       return true;
     }
@@ -392,10 +484,20 @@ export class DrawingsController {
       ? suppressOverlappingSpecs(candidates, this.selectedId)
       : candidates;
 
+    // Phase 13 Cycle C.3 — ensure the icon atlas matches the active dpr
+    // bucket BEFORE we render any sprites this frame. If the bucket changed
+    // (DPR transition), rebuild the atlas and reassign every existing
+    // sprite's texture to the matching glyph in the new atlas.
+    this.ensureIconAtlasMatchesDpr(ctx.dpr);
+
     // Render pass.
     for (const entry of projected) {
       const g = this.ensureGraphicsFor(entry.drawing.id);
       redrawDrawing(g, entry.drawing, entry.geom, ctx.theme, ctx.dpr);
+      // Cycle C.3 — icon visuals are carried by a parallel Sprite.
+      if (entry.drawing.kind === "icon" && entry.geom.kind === "icon") {
+        this.syncIconSprite(entry.drawing, entry.geom, ctx);
+      }
       seen.add(entry.drawing.id);
       const labelSpecs = computeLabelSpecs(entry.drawing, entry.geom, formatter);
       if (labelSpecs !== null) {
@@ -425,6 +527,12 @@ export class DrawingsController {
     for (const [id, g] of this.graphicsByDrawing) {
       if (!seen.has(id)) {
         g.visible = false;
+      }
+    }
+    // Same for icon sprites — orphans get hidden until removeInternal cleans up.
+    for (const [id, sprite] of this.spritesByDrawing) {
+      if (!seen.has(id)) {
+        sprite.visible = false;
       }
     }
     for (const [id, pool] of this.labelPools) {
@@ -480,6 +588,18 @@ export class DrawingsController {
       g.destroy();
     }
     this.graphicsByDrawing.clear();
+    // Phase 13 Cycle C.3 — release sprites first (they reference atlas
+    // textures), then destroy the atlas to reclaim GPU memory.
+    for (const sprite of this.spritesByDrawing.values()) {
+      sprite.parent?.removeChild(sprite);
+      sprite.destroy({ texture: false, textureSource: false });
+    }
+    this.spritesByDrawing.clear();
+    if (this.iconAtlas !== null) {
+      this.iconAtlas.destroy();
+      this.iconAtlas = null;
+    }
+    this.brushCapture = null;
     for (const g of this.handleGraphicsPool) {
       g.parent?.removeChild(g);
       g.destroy();
@@ -663,6 +783,29 @@ export class DrawingsController {
           })),
         );
       },
+      cancelActiveBrush: (): void => { this.cancelActiveBrush(); },
+      getBrushCaptureState: (): { readonly pointerId: number; readonly pointCount: number } | null => {
+        const cap = this.brushCapture;
+        if (cap === null) {
+          return null;
+        }
+        return Object.freeze({
+          pointerId: cap.pointerId,
+          pointCount: cap.rawPoints.length,
+        });
+      },
+      spriteRegistrySize: (): number => this.spritesByDrawing.size,
+      iconAtlasInfo: (): { readonly dprBucket: number; readonly cellPx: number; readonly textureCount: number } | null => {
+        const a = this.iconAtlas;
+        if (a === null) {
+          return null;
+        }
+        return Object.freeze({
+          dprBucket: a.dprBucket,
+          cellPx: a.cellPx,
+          textureCount: a.textures.size,
+        });
+      },
     });
   }
 
@@ -675,10 +818,11 @@ export class DrawingsController {
   }
 
   private cancelCreate(): void {
-    if (this.creating === null) {
+    if (this.creating === null && this.brushCapture === null) {
       return;
     }
     this.creating = null;
+    this.brushCapture = null;
     this.deps.invalidate();
   }
 
@@ -1007,17 +1151,56 @@ export class DrawingsController {
           levels: creating.options.levels ?? DEFAULT_FIB_ARC_LEVELS,
         });
       }
+      // ─── Phase 13 Cycle C.3 ───
+      case "brush": {
+        // Brush is created via the capture FSM, not the click-to-anchor flow.
+        // Reaching this branch with `placedAnchors` would mean a misuse;
+        // bail and let the capture path materialize the drawing.
+        return null;
+      }
+      case "icon": {
+        if (a[0] === undefined) {
+          return null;
+        }
+        const glyph = readIconGlyph(creating.options);
+        const base = {
+          ...baseCommon,
+          kind: "icon" as const,
+          anchors: Object.freeze([a[0]] as const),
+          glyph,
+        };
+        const sizeOpt = creating.options.size;
+        const withSize =
+          sizeOpt !== undefined && Number.isFinite(sizeOpt) && sizeOpt > 0
+            ? { ...base, size: sizeOpt }
+            : base;
+        const tintOpt = creating.options.tint;
+        const withTint =
+          tintOpt !== undefined && Number.isFinite(tintOpt)
+            ? { ...withSize, tint: tintOpt }
+            : withSize;
+        return Object.freeze(withTint);
+      }
     }
   }
 
   private addInternal(drawing: Drawing): void {
-    if (this.drawings.has(drawing.id)) {
-      this.deps.logger.warn(`[carta] drawings.add: duplicate id ${String(drawing.id)} — ignored`);
+    // Phase 13 Cycle C.3 — auto-id when the host omits one (or passes an
+    // empty string). Prior cycles silently failed the second `add()` with a
+    // `duplicate id undefined` warn; now the controller injects a fresh
+    // UUID so the call succeeds. Hosts that need stable ids continue to
+    // supply them.
+    let toAdd = drawing;
+    if (typeof drawing.id !== "string" || drawing.id.length === 0) {
+      toAdd = Object.freeze({ ...drawing, id: this.newId() }) as Drawing;
+    }
+    if (this.drawings.has(toAdd.id)) {
+      this.deps.logger.warn(`[carta] drawings.add: duplicate id ${String(toAdd.id)} — ignored`);
       return;
     }
     const intervalMs = Number(this.deps.currentTimeScale().intervalDuration);
     const safeInterval = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 0;
-    const { drawing: normalized, warn } = normalizeBoundary(drawing, safeInterval);
+    const { drawing: normalized, warn } = normalizeBoundary(toAdd, safeInterval);
     if (normalized === null) {
       this.deps.logger.warn(`[carta] drawings.add: ${warn ?? "invalid drawing"} — dropped`);
       return;
@@ -1066,6 +1249,15 @@ export class DrawingsController {
       g.parent?.removeChild(g);
       g.destroy();
       this.graphicsByDrawing.delete(id);
+    }
+    // Phase 13 Cycle C.3 — destroy the icon sprite (if any). The texture is
+    // shared via the atlas so we explicitly skip texture/textureSource
+    // disposal on the sprite.
+    const sprite = this.spritesByDrawing.get(id);
+    if (sprite !== undefined) {
+      sprite.parent?.removeChild(sprite);
+      sprite.destroy({ texture: false, textureSource: false });
+      this.spritesByDrawing.delete(id);
     }
     const pool = this.labelPools.get(id);
     if (pool !== undefined) {
@@ -1345,6 +1537,8 @@ export class DrawingsController {
         peerStartStates.set(sid, peer);
       }
     }
+    const startBrushPoints =
+      opts.drawing.kind === "brush" ? opts.drawing.points : null;
     this.dragging = {
       id: opts.drawing.id,
       mode: opts.mode,
@@ -1356,6 +1550,7 @@ export class DrawingsController {
       startTime: time,
       startPrice: price,
       startEndTime,
+      startBrushPoints,
       peerStartStates,
       shiftConstrain: opts.shiftKey,
       committed: false,
@@ -1369,6 +1564,12 @@ export class DrawingsController {
     }
     const local = this.toLocal(e);
     if (local === null) {
+      return;
+    }
+    // Phase 13 Cycle C.3 — brush capture wins over hover hit-test while
+    // active. Only the pointer that started the stroke contributes points.
+    if (this.brushCapture !== null && this.brushCapture.pointerId === e.pointerId) {
+      this.continueBrushCapture(local.x, local.y);
       return;
     }
     if (this.dragging !== null && this.dragging.pointerId === e.pointerId) {
@@ -1438,6 +1639,55 @@ export class DrawingsController {
       this.drawings.set(drag.id, next);
       if (this.bulkLoadDepth === 0) {
         this.deps.eventBus.emit("drawings:updated", { drawing: next });
+      }
+      this.deps.invalidate();
+      return;
+    }
+    // Phase 13 Cycle C.3 — brush body-drag translates `points` AND `anchors`
+    // by the same Δt/Δp from drag start. Handle-drag is hidden (no handles)
+    // so only body mode reaches here. Use the brush start snapshot so deltas
+    // stay absolute relative to drag start.
+    if (orig.kind === "brush" && drag.mode === "body" && drag.startBrushPoints !== null) {
+      const dt = liveTime - drag.startTime;
+      const dp = livePrice - drag.startPrice;
+      let dtUse = dt;
+      let dpUse = dp;
+      if (drag.shiftConstrain) {
+        if (Math.abs(dt) >= Math.abs(dp)) {
+          dpUse = 0;
+        } else {
+          dtUse = 0;
+        }
+      }
+      const xform = (a: DrawingAnchor): DrawingAnchor => Object.freeze({
+        time: asTime(Number(a.time) + dtUse),
+        price: asPrice(Number(a.price) + dpUse),
+        paneId: a.paneId,
+      });
+      const startA = drag.startAnchors;
+      const start0 = startA[0];
+      const start1 = startA[1];
+      if (start0 === undefined || start1 === undefined) {
+        return;
+      }
+      const nextBrush: BrushDrawing = Object.freeze({
+        ...orig,
+        anchors: Object.freeze([xform(start0), xform(start1)] as const),
+        points: Object.freeze(drag.startBrushPoints.map(xform)),
+      });
+      this.drawings.set(drag.id, nextBrush);
+      if (this.bulkLoadDepth === 0) {
+        this.deps.eventBus.emit("drawings:updated", { drawing: nextBrush });
+      }
+      // Multi-select peers translate via the existing peer path below.
+      if (drag.peerStartStates.size > 0) {
+        for (const [sid, peerStart] of drag.peerStartStates) {
+          const peerNext = translateDrawing(peerStart, dtUse, dpUse);
+          this.drawings.set(sid, peerNext);
+          if (this.bulkLoadDepth === 0) {
+            this.deps.eventBus.emit("drawings:updated", { drawing: peerNext });
+          }
+        }
       }
       this.deps.invalidate();
       return;
@@ -1687,6 +1937,11 @@ export class DrawingsController {
     if (this.destroyed) {
       return;
     }
+    // Phase 13 Cycle C.3 — finalize brush stroke on the originating pointer.
+    if (this.brushCapture !== null && this.brushCapture.pointerId === e.pointerId) {
+      this.finishBrushCapture();
+      return;
+    }
     this.endDragForPointer(e.pointerId);
   };
 
@@ -1711,6 +1966,11 @@ export class DrawingsController {
   }
 
   private readonly onPointerCancel = (e: FederatedPointerEvent): void => {
+    // Phase 13 Cycle C.3 — discard brush capture on cancel.
+    if (this.brushCapture !== null && this.brushCapture.pointerId === e.pointerId) {
+      this.cancelActiveBrush();
+      return;
+    }
     const drag = this.dragging;
     if (drag !== null && drag.pointerId === e.pointerId) {
       // Restore original anchors (the most recent is in `dragging.startAnchors`).
@@ -1863,6 +2123,83 @@ export class DrawingsController {
     return g;
   }
 
+  /**
+   * Phase 13 Cycle C.3 — lazy atlas-rebuild on DPR-bucket change. The first
+   * icon render builds the atlas at the active bucket; subsequent renders
+   * compare and rebuild on mismatch. Old TextureSource is destroyed to
+   * reclaim GPU memory (Retina laptop docking/undocking 5x/day would
+   * otherwise leak 5 atlases).
+   */
+  private ensureIconAtlasMatchesDpr(dpr: number): IconAtlas | null {
+    // Only build / rebuild when at least one icon drawing exists. Saves the
+    // build cost for non-icon hosts.
+    let hasIcon = false;
+    for (const d of this.drawings.values()) {
+      if (d.kind === "icon") {
+        hasIcon = true;
+        break;
+      }
+    }
+    if (!hasIcon) {
+      return this.iconAtlas;
+    }
+    const targetBucket = brushDprBucket(dpr);
+    if (this.iconAtlas !== null && this.iconAtlas.dprBucket === targetBucket) {
+      return this.iconAtlas;
+    }
+    const oldAtlas = this.iconAtlas;
+    const next = buildIconAtlas(dpr);
+    this.iconAtlas = next;
+    // Reassign textures on every existing sprite to the new atlas's glyphs.
+    for (const [id, sprite] of this.spritesByDrawing) {
+      const drawing = this.drawings.get(id);
+      if (drawing?.kind !== "icon") {
+        continue;
+      }
+      const tex = next.textures.get(drawing.glyph);
+      if (tex !== undefined) {
+        sprite.texture = tex;
+      }
+    }
+    if (oldAtlas !== null) {
+      oldAtlas.destroy();
+    }
+    return next;
+  }
+
+  private syncIconSprite(
+    drawing: IconDrawing,
+    geom: { readonly anchor: { readonly x: number; readonly y: number }; readonly sizeCss: number },
+    ctx: DrawingsRenderContext,
+  ): void {
+    const atlas = this.iconAtlas;
+    if (atlas === null) {
+      return;
+    }
+    const tex = atlas.textures.get(drawing.glyph);
+    if (tex === undefined) {
+      return;
+    }
+    let sprite = this.spritesByDrawing.get(drawing.id);
+    if (sprite === undefined) {
+      sprite = new Sprite(tex);
+      sprite.anchor.set(0.5, 0.5);
+      sprite.eventMode = "none";
+      this.deps.renderer.drawingsLayer.addChild(sprite);
+      this.spritesByDrawing.set(drawing.id, sprite);
+    }
+    if (sprite.texture !== tex) {
+      sprite.texture = tex;
+    }
+    sprite.position.set(geom.anchor.x, geom.anchor.y);
+    // Atlas cell is in backing-px (= ICON_CELL_CSS_PX * dprBucket); scale so
+    // the rendered sprite reads at `geom.sizeCss` regardless of DPR bucket.
+    const scale = geom.sizeCss / ICON_CELL_CSS_PX;
+    sprite.scale.set(scale, scale);
+    sprite.tint = drawing.tint ?? ctx.theme.text;
+    sprite.visible = drawing.visible;
+  }
+
   private ensureLabelPool(id: DrawingId): LabelPool {
     let pool = this.labelPools.get(id);
     if (pool === undefined) {
@@ -1936,6 +2273,158 @@ export class DrawingsController {
       source: "long-press",
     });
     return true;
+  }
+
+  // ─── Phase 13 Cycle C.3 — brush capture FSM ─────────────────────────────
+
+  private startBrushCapture(
+    pointerId: number,
+    globalX: number,
+    globalY: number,
+    localX: number,
+    localY: number,
+  ): void {
+    const creating = this.creating;
+    if (creating?.kind !== "brush") {
+      return;
+    }
+    if (
+      !Number.isFinite(localX) ||
+      !Number.isFinite(localY) ||
+      !Number.isFinite(globalX) ||
+      !Number.isFinite(globalY)
+    ) {
+      return;
+    }
+    this.brushCapture = {
+      pointerId,
+      creating,
+      rawPoints: [{ x: localX, y: localY }],
+      startGlobalX: globalX,
+      startGlobalY: globalY,
+    };
+    this.deps.invalidate();
+  }
+
+  private continueBrushCapture(localX: number, localY: number): void {
+    const cap = this.brushCapture;
+    if (cap === null) {
+      return;
+    }
+    if (!Number.isFinite(localX) || !Number.isFinite(localY)) {
+      return;
+    }
+    cap.rawPoints.push({ x: localX, y: localY });
+    // Mid-stroke RDP collapse to keep memory + frame budget bounded.
+    if (cap.rawPoints.length >= BRUSH_RAW_CAP) {
+      const dprBucket = brushDprBucket(this.deps.currentDpr());
+      const eps = BRUSH_MID_STROKE_EPSILON_CSS_PX / dprBucket;
+      const collapsed = simplifyRdp(cap.rawPoints, eps);
+      cap.rawPoints = collapsed.slice();
+    }
+    this.deps.invalidate();
+  }
+
+  private finishBrushCapture(): void {
+    const cap = this.brushCapture;
+    if (cap === null) {
+      return;
+    }
+    this.brushCapture = null;
+    if (cap.rawPoints.length < 2) {
+      // Stroke too short to be a brush — drop silently and clear creating.
+      this.creating = null;
+      this.deps.invalidate();
+      return;
+    }
+    const ctx = this.makeProjectionContext();
+    if (ctx === null) {
+      this.creating = null;
+      this.deps.invalidate();
+      return;
+    }
+    const dprBucket = brushDprBucket(this.deps.currentDpr());
+    const eps = BRUSH_COMMIT_EPSILON_CSS_PX / dprBucket;
+    const simplified = simplifyRdp(cap.rawPoints, eps);
+    if (simplified.length < 2) {
+      this.creating = null;
+      this.deps.invalidate();
+      return;
+    }
+    // Unproject every kept point to a data-space anchor.
+    const points: DrawingAnchor[] = [];
+    let xMinIdx = 0;
+    let xMaxIdx = 0;
+    for (let i = 0; i < simplified.length; i++) {
+      const p = simplified[i];
+      if (p === undefined) {
+        continue;
+      }
+      const { time, price } = unprojectPoint(ctx, p.x, p.y);
+      if (!Number.isFinite(time) || !Number.isFinite(price)) {
+        continue;
+      }
+      points.push(Object.freeze({
+        time: asTime(time),
+        price: asPrice(price),
+        paneId: MAIN_PANE_ID,
+      }));
+      if (p.x < (simplified[xMinIdx]?.x ?? p.x)) {
+        xMinIdx = i;
+      }
+      if (p.x > (simplified[xMaxIdx]?.x ?? p.x)) {
+        xMaxIdx = i;
+      }
+    }
+    if (points.length < 2) {
+      this.creating = null;
+      this.deps.invalidate();
+      return;
+    }
+    const start = points[0];
+    const end = points[points.length - 1];
+    if (start === undefined || end === undefined) {
+      this.creating = null;
+      this.deps.invalidate();
+      return;
+    }
+    const id = this.newId();
+    const z = cap.creating.options.z ?? this.nextZ();
+    const style: DrawingStyle = cap.creating.options.style ?? Object.freeze({});
+    const meta = cap.creating.options.meta;
+    const baseCommonNoMeta = Object.freeze({
+      id,
+      style,
+      locked: false,
+      visible: true,
+      z,
+      schemaVersion: 1 as const,
+    });
+    const baseCommon = meta === undefined ? baseCommonNoMeta : Object.freeze({ ...baseCommonNoMeta, meta });
+    const drawing: BrushDrawing = Object.freeze({
+      ...baseCommon,
+      kind: "brush" as const,
+      anchors: Object.freeze([start, end] as const),
+      points: Object.freeze(points),
+    });
+    this.creating = null;
+    this.addInternal(drawing);
+    this.setSelected(drawing.id);
+  }
+
+  /**
+   * Phase 13 Cycle C.3 — cancel an active brush capture, discarding the
+   * partial stroke. Called from `interval:change` and `viewport.onPinchStart`
+   * so a second-finger pinch or interval hot-swap mid-stroke doesn't
+   * materialize an incomplete brush. Idempotent.
+   */
+  cancelActiveBrush(): void {
+    if (this.brushCapture === null) {
+      return;
+    }
+    this.brushCapture = null;
+    this.creating = null;
+    this.deps.invalidate();
   }
 
   /**
@@ -2095,11 +2584,17 @@ function requiredAnchorsFor(kind: DrawingKind): number {
     case "horizontalRay":
     case "text":
     case "fibTimeZones":
+    case "icon":
       return 1;
     case "parallelChannel":
     case "pitchfork":
     case "fibExtension":
       return 3;
+    case "brush":
+      // Brush is captured via the pointer-stream FSM, not click-to-anchor.
+      // The `acceptCreatePoint` path short-circuits before this is read; the
+      // sentinel value is unused but kept consistent with the contract.
+      return 0;
   }
 }
 
@@ -2128,6 +2623,7 @@ function withAnchors(orig: Drawing, anchors: readonly DrawingAnchor[]): Drawing 
     case "horizontalRay":
     case "text":
     case "fibTimeZones":
+    case "icon":
       if (anchors[0] === undefined) {
         return orig;
       }
@@ -2151,6 +2647,16 @@ function withAnchors(orig: Drawing, anchors: readonly DrawingAnchor[]): Drawing 
         ...orig,
         anchors: Object.freeze([anchors[0], anchors[1], anchors[2]] as const),
       });
+    case "brush": {
+      // Cycle C.3 — handle-drag is not exposed for brush (no handles).  When
+      // body-drag routes through here it passes the bbox 2-tuple unchanged;
+      // brush body-drag updates `points` via the dedicated translate path
+      // (`continueDragRaw`'s brush branch).
+      if (anchors[0] === undefined || anchors[1] === undefined) {
+        return orig;
+      }
+      return Object.freeze({ ...orig, anchors: Object.freeze([anchors[0], anchors[1]] as const) });
+    }
   }
 }
 
@@ -2169,6 +2675,16 @@ function translateDrawing(d: Drawing, dt: number, dp: number): Drawing {
       endTime: asTime(Number(d.endTime) + dt),
     });
     return next;
+  }
+  // Cycle C.3 — brush carries a separate `points` array on top of `anchors`;
+  // translate both so the polyline stays glued to its bars under pan/zoom
+  // transitions.
+  if (d.kind === "brush") {
+    return Object.freeze({
+      ...d,
+      anchors: Object.freeze([xform(d.anchors[0]), xform(d.anchors[1])] as const),
+      points: Object.freeze(d.points.map(xform)),
+    });
   }
   return withAnchors(d, d.anchors.map(xform));
 }
@@ -2205,6 +2721,7 @@ function cloneDrawingWithOffset(d: Drawing, intervalMs: number, newId: DrawingId
     case "horizontalRay":
     case "text":
     case "fibTimeZones":
+    case "icon":
       return Object.freeze({
         ...d,
         id: newId,
@@ -2252,6 +2769,13 @@ function cloneDrawingWithOffset(d: Drawing, intervalMs: number, newId: DrawingId
         ] as const),
         endTime: asTime(Number(d.endTime) + offset),
       });
+    case "brush":
+      return Object.freeze({
+        ...d,
+        id: newId,
+        anchors: Object.freeze([shift(d.anchors[0]), shift(d.anchors[1])] as const),
+        points: Object.freeze(d.points.map(shift)),
+      });
   }
 }
 
@@ -2297,6 +2821,24 @@ function computeLabelSpecs(
         text: `${(ray.level * 100).toFixed(1)}%`,
         x: end.x,
         y: end.y,
+      }));
+    }
+    return specs;
+  }
+  // Cycle C.3 — opt-in fib-arc ring labels via `showRingLabels`. Default off
+  // to preserve C.2-shipped TradingView-style label-free arcs.
+  if (drawing.kind === "fibArcs" && geom.kind === "fibArcs" && drawing.showRingLabels === true) {
+    const specs: LabelSpec[] = [];
+    for (const ring of geom.rings) {
+      if (!Number.isFinite(ring.r) || ring.r < 1 || ring.r > 4000) {
+        continue;
+      }
+      specs.push(Object.freeze({
+        placement: "right-of-cx" as const,
+        text: `${(ring.level * 100).toFixed(1)}%`,
+        cx: geom.cx,
+        cy: geom.cy,
+        r: ring.r,
       }));
     }
     return specs;
@@ -2504,6 +3046,8 @@ function computeTextSpecs(
     case "fibTimeZones":
     case "fibFan":
     case "fibArcs":
+    case "brush":
+    case "icon":
       // No text readouts for these kinds (fib has its own pool).
       return null;
   }
@@ -2650,11 +3194,21 @@ function firstAnchorScreenPoint(geom: ScreenGeom): { x: number; y: number } | nu
     case "horizontalRay":
     case "text":
     case "fibTimeZones":
+    case "icon":
       return { x: geom.anchor.x, y: geom.anchor.y };
     case "callout":
       return { x: geom.pin.x, y: geom.pin.y };
     case "longPosition":
     case "shortPosition":
       return { x: geom.entry.x, y: geom.entry.y };
+    case "brush": {
+      // First point if available; fall back to bbox start.
+      const first = geom.points[0];
+      if (first !== undefined) {
+        return { x: first.x, y: first.y };
+      }
+      const a = geom.anchors[0];
+      return { x: a.x, y: a.y };
+    }
   }
 }

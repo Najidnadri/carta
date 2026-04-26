@@ -40,6 +40,7 @@ import {
   LabelPool,
   type EndOfRayLabelSpec,
   type LabelSyncContext,
+  type RightOfCxLabelSpec,
   type RightOfXLabelSpec,
   type TopOfXLabelSpec,
 } from "./LabelPool.js";
@@ -116,6 +117,50 @@ describe("LabelPool", () => {
     }
     // Should fall to the left of x=395 (or clamp to 0).
     expect(e.position.x).toBeLessThan(395);
+    pool.destroy();
+  });
+
+  it("'right-of-cx' positions the label at (cx + r + offset, cy)", () => {
+    const parent = new Container();
+    const pool = new LabelPool(parent);
+    const spec: RightOfCxLabelSpec = {
+      placement: "right-of-cx",
+      text: "61.8%",
+      cx: 100,
+      cy: 200,
+      r: 50,
+    };
+    pool.sync([spec], ctx(400));
+    const e = pool.entryAt(0);
+    if (e === null) {
+      throw new Error("expected entry");
+    }
+    // Default placement = cx + r + 4 = 154; label width 5 chars × 6 + 8 padding = 38.
+    expect(e.position.x).toBeGreaterThan(150);
+    expect(e.position.x).toBeLessThan(160);
+    // Vertically centered on cy = 200 (label height ~15) → y close to 192.
+    expect(e.position.y).toBeLessThan(200);
+    expect(e.position.y).toBeGreaterThan(180);
+    pool.destroy();
+  });
+
+  it("'right-of-cx' clamps to plot edge when right placement overflows", () => {
+    const parent = new Container();
+    const pool = new LabelPool(parent);
+    const spec: RightOfCxLabelSpec = {
+      placement: "right-of-cx",
+      text: "100%",
+      cx: 380,
+      cy: 100,
+      r: 30,
+    };
+    pool.sync([spec], ctx(400));
+    const e = pool.entryAt(0);
+    if (e === null) {
+      throw new Error("expected entry");
+    }
+    // Default = 380 + 30 + 4 = 414, overflows 400. Should flip to left of cx − r.
+    expect(e.position.x).toBeLessThan(380 - 30);
     pool.destroy();
   });
 

@@ -279,7 +279,12 @@ export class TimeSeriesChart {
       // Phase 13 Cycle B.3 — pinch entry rolls back any in-flight drawing
       // drag (parity with `interval:change` rollback).  Mid-create FSM is
       // intentionally untouched: a half-placed trendline survives the pinch.
-      onPinchStart: (): void => { this.drawingsController.cancelActiveDrag(); },
+      onPinchStart: (): void => {
+        this.drawingsController.cancelActiveDrag();
+        // Phase 13 Cycle C.3 — pinch mid-stroke discards any partial brush
+        // capture so a 2-finger pinch rolls back to viewport zoom cleanly.
+        this.drawingsController.cancelActiveBrush();
+      },
     });
     this.priceAxisController = new PriceAxisController({
       axesLayer: renderer.axesLayer,
@@ -447,6 +452,8 @@ export class TimeSeriesChart {
     // Cancel any in-flight drawing drag — anchor times stored in the old bar
     // grid would drift if we let the drag ride on the new interval.
     this.drawingsController.cancelActiveDrag();
+    // Phase 13 Cycle C.3 — same rationale for an active brush capture.
+    this.drawingsController.cancelActiveBrush();
     this.invalidator.invalidate("viewport");
     this.invalidator.invalidate("data");
   }

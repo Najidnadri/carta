@@ -33,6 +33,8 @@
  *   Alt+Z → fibTimeZones
  *   Alt+J → fibFan
  *   Alt+C → fibArcs
+ *   Alt+Shift+B → brush         (Alt+B is callout)
+ *   Alt+I → icon
  *
  * Filters: `event.repeat`, IME composition, and keydowns delivered while an
  * `<input>`/`<textarea>`/`contenteditable` is focused. Hosts can `preventDefault`
@@ -94,6 +96,10 @@ export const RECOMMENDED_HOTKEY_BINDINGS: Readonly<Record<string, KeyboardHotkey
   z: "fibTimeZones",
   j: "fibFan",
   c: "fibArcs",
+  // Phase 13 Cycle C.3 — Alt+B is callout, so brush takes Alt+Shift+B; icon
+  // gets the previously-unused 'i' slot.
+  "shift+b": "brush",
+  i: "icon",
 });
 
 export interface InstallHotkeysOptions {

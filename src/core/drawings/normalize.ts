@@ -13,13 +13,23 @@
  */
 
 import { asTime } from "../../types.js";
-import type { Drawing, DrawingStyle, FibLevel, DisplayMode, PitchforkVariant } from "./types.js";
+import type {
+  BrushDrawing,
+  Drawing,
+  DrawingAnchor,
+  DrawingStyle,
+  FibLevel,
+  DisplayMode,
+  IconGlyph,
+  PitchforkVariant,
+} from "./types.js";
 import {
   DEFAULT_FIB_ARC_LEVELS,
   DEFAULT_FIB_EXTENSION_LEVELS,
   DEFAULT_FIB_FAN_LEVELS,
   DEFAULT_FIB_LEVELS,
   DEFAULT_FIB_TIME_ZONE_OFFSETS,
+  DEFAULT_ICON_GLYPHS,
 } from "./types.js";
 
 export interface NormalizeResult {
@@ -39,6 +49,12 @@ interface RawShape {
   tickSize?: number | null;
   text?: string | null;
   variant?: string | null;
+  // Phase 13 Cycle C.3 — icon glyph + size + tint.
+  glyph?: string | null;
+  size?: number | null;
+  tint?: number | null;
+  // Phase 13 Cycle C.3 — brush points array.
+  points?: readonly DrawingAnchor[] | null;
 }
 
 /**
@@ -70,6 +86,32 @@ function hasFiniteAnchors(d: Drawing): boolean {
   return true;
 }
 
+/**
+ * Phase 13 Cycle C.3 — additional finite check for brush `points` array.
+ * The 2-tuple `anchors` is already validated by `hasFiniteAnchors`; here we
+ * reject when any point in the variable-arity polyline is non-finite.
+ */
+function hasFiniteBrushPoints(d: BrushDrawing): boolean {
+  const points = (d as unknown as { points?: readonly { time?: unknown; price?: unknown }[] }).points;
+  if (!Array.isArray(points) || points.length < 2) {
+    return false;
+  }
+  for (const p of points) {
+    if (p === null || typeof p !== "object") {
+      return false;
+    }
+    const t = (p as { time?: unknown }).time;
+    const pr = (p as { price?: unknown }).price;
+    if (typeof t !== "number" || !Number.isFinite(t)) {
+      return false;
+    }
+    if (typeof pr !== "number" || !Number.isFinite(pr)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 const KINDS_REQUIRING_FINITE_ANCHORS: ReadonlySet<Drawing["kind"]> = new Set([
   // Cycle C.1 — closes the S-1 carry-over.
   "pitchfork",
@@ -80,7 +122,15 @@ const KINDS_REQUIRING_FINITE_ANCHORS: ReadonlySet<Drawing["kind"]> = new Set([
   "fibTimeZones",
   "fibFan",
   "fibArcs",
+  // Cycle C.3.
+  "brush",
+  "icon",
 ]);
+
+const ICON_GLYPH_SET: ReadonlySet<string> = new Set<string>(DEFAULT_ICON_GLYPHS);
+function isValidIconGlyph(s: unknown): s is IconGlyph {
+  return typeof s === "string" && ICON_GLYPH_SET.has(s);
+}
 
 function isValidPitchforkVariant(s: unknown): s is PitchforkVariant {
   return s === "andrews" || s === "schiff" || s === "modifiedSchiff";
@@ -105,6 +155,11 @@ export function normalizeDrawingDefaults(d: Drawing, intervalMs: number): Normal
   // would otherwise produce phantom (0,0)-anchored shapes (S-1 carry-over).
   if (KINDS_REQUIRING_FINITE_ANCHORS.has(d.kind) && !hasFiniteAnchors(d)) {
     return { drawing: null, warn: `${d.kind} non-finite anchor time/price` };
+  }
+  // Cycle C.3 — brush has a variable-arity `points` array on top of `anchors`.
+  // Reject when any point is non-finite or the polyline is too short.
+  if (d.kind === "brush" && !hasFiniteBrushPoints(d)) {
+    return { drawing: null, warn: `brush points < 2 or non-finite` };
   }
   const view = d as unknown as RawShape;
   const styleFill = view.style === undefined || view.style === null;
@@ -205,6 +260,24 @@ export function normalizeDrawingDefaults(d: Drawing, intervalMs: number): Normal
         style: baseStyle,
         text: textFill ? "" : d.text,
       }),
+      warn: null,
+    };
+  }
+
+  if (d.kind === "icon") {
+    const rawGlyph = (d as unknown as { glyph?: unknown }).glyph;
+    const glyphValid = isValidIconGlyph(rawGlyph);
+    if (!glyphValid) {
+      return {
+        drawing: null,
+        warn: `icon unknown glyph ${typeof rawGlyph === "string" ? rawGlyph : typeof rawGlyph} — dropped`,
+      };
+    }
+    if (!styleFill) {
+      return { drawing: d, warn: null };
+    }
+    return {
+      drawing: Object.freeze({ ...d, style: baseStyle }),
       warn: null,
     };
   }

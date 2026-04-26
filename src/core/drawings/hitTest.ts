@@ -7,6 +7,7 @@
 import type { Drawing } from "./types.js";
 import type {
   ArrowGeom,
+  BrushGeom,
   CalloutGeom,
   DateRangeGeom,
   EllipseGeom,
@@ -19,6 +20,7 @@ import type {
   GannFanGeom,
   HorizontalLineGeom,
   HorizontalRayGeom,
+  IconGeom,
   ParallelChannelGeom,
   PitchforkGeom,
   PositionGeom,
@@ -292,6 +294,14 @@ function hitHandle(
       const a = geom.anchor;
       return within(px, py, a.x, a.y, tol) ? 0 : null;
     }
+    case "brush": {
+      // Bbox-endpoint handles intentionally hidden in v1 — body-drag only.
+      return null;
+    }
+    case "icon": {
+      const a = geom.anchor;
+      return within(px, py, a.x, a.y, tol) ? 0 : null;
+    }
   }
 }
 
@@ -354,6 +364,10 @@ function hitGeom(
       return hitFibFan(geom, px, py, tol);
     case "fibArcs":
       return hitFibArcs(geom, px, py, tol);
+    case "brush":
+      return hitBrush(geom, px, py, tol);
+    case "icon":
+      return hitIcon(geom, px, py, tol);
   }
 }
 
@@ -786,6 +800,37 @@ function hitFibArcs(geom: FibArcsGeom, px: number, py: number, tol: number): "li
     if (Math.abs(d - ring.r) <= tol) {
       return "line";
     }
+  }
+  return null;
+}
+
+// ─── Phase 13 Cycle C.3 — brush + icon hit-tests ───────────────────────────
+
+function hitBrush(geom: BrushGeom, px: number, py: number, tol: number): "line" | null {
+  const bb = geom.bbox;
+  if (px < bb.xMin - tol || px > bb.xMax + tol || py < bb.yMin - tol || py > bb.yMax + tol) {
+    return null;
+  }
+  for (let i = 1; i < geom.points.length; i++) {
+    const a = geom.points[i - 1];
+    const b = geom.points[i];
+    if (a === undefined || b === undefined) {
+      continue;
+    }
+    if (pointToSegmentDistance(px, py, a.x, a.y, b.x, b.y) <= tol) {
+      return "line";
+    }
+  }
+  return null;
+}
+
+function hitIcon(geom: IconGeom, px: number, py: number, tol: number): "body" | null {
+  const half = geom.sizeCss / 2;
+  if (
+    Math.abs(px - geom.anchor.x) <= half + tol &&
+    Math.abs(py - geom.anchor.y) <= half + tol
+  ) {
+    return "body";
   }
   return null;
 }

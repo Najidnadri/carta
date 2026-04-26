@@ -23,7 +23,7 @@ const PADDING_X = 4;
 const PADDING_Y = 2;
 const LABEL_X_OFFSET = 4;
 
-export type LabelPlacement = "right-of-x" | "top-of-x" | "end-of-ray";
+export type LabelPlacement = "right-of-x" | "top-of-x" | "end-of-ray" | "right-of-cx";
 
 interface LabelSpecBase {
   readonly text: string;
@@ -53,7 +53,22 @@ export interface EndOfRayLabelSpec extends LabelSpecBase {
   readonly y: number;
 }
 
-export type LabelSpec = RightOfXLabelSpec | TopOfXLabelSpec | EndOfRayLabelSpec;
+/**
+ * Phase 13 Cycle C.3 — fib-arc ring label placement. Labels stack along the
+ * `+x` diameter axis at `(cx + r + offset, cy)` so the percentages read like
+ * a ring legend. Right-edge clamp keeps them inside the plot.
+ */
+export interface RightOfCxLabelSpec extends LabelSpecBase {
+  readonly placement: "right-of-cx";
+  /** Center x of the arc / ellipse. */
+  readonly cx: number;
+  /** Center y. */
+  readonly cy: number;
+  /** Ring radius in screen px. Label sits at `(cx + r + offset, cy)`. */
+  readonly r: number;
+}
+
+export type LabelSpec = RightOfXLabelSpec | TopOfXLabelSpec | EndOfRayLabelSpec | RightOfCxLabelSpec;
 
 interface LabelEntry {
   readonly container: Container;
@@ -301,6 +316,22 @@ function resolvePlacement(
         }
       }
       return { x: placedX, y: spec.y - h / 2 };
+    }
+    case "right-of-cx": {
+      // Default placement: `(cx + r + 4, cy)` (label centered on the +x ring
+      // intersection). On overflow, flip to the left of the diameter
+      // intersection at `(cx - r - 4 - w, cy)`, then last-resort clamp.
+      const rightX = spec.cx + spec.r + LABEL_X_OFFSET;
+      let placedX = rightX;
+      if (Number.isFinite(plotWidth) && rightX + w > plotWidth) {
+        const leftX = spec.cx - spec.r - LABEL_X_OFFSET - w;
+        if (leftX >= 0) {
+          placedX = leftX;
+        } else {
+          placedX = Math.max(0, plotWidth - w);
+        }
+      }
+      return { x: placedX, y: spec.cy - h / 2 };
     }
   }
 }

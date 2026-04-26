@@ -57,6 +57,10 @@ function makeChart(): {
         getDragState: () => null,
         cancelActiveDrag: noop,
         visibleHandlesFor: () => [],
+        cancelActiveBrush: noop,
+        getBrushCaptureState: () => null,
+        spriteRegistrySize: () => 0,
+        iconAtlasInfo: () => null,
       }),
     },
   };
@@ -162,6 +166,9 @@ describe("installHotkeys", () => {
       "fibTimeZones",
       "fibFan",
       "fibArcs",
+      // Cycle C.3
+      "brush",
+      "icon",
     ]));
   });
 

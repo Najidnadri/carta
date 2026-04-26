@@ -18,6 +18,7 @@ import type {
 } from "./types.js";
 import type {
   ArrowGeom,
+  BrushGeom,
   CalloutGeom,
   DateRangeGeom,
   EllipseGeom,
@@ -52,12 +53,43 @@ interface ResolvedStroke {
   readonly style: "solid" | "dashed" | "dotted";
 }
 
+/**
+ * Phase 13 Cycle C.3 — heuristic dark-theme detector. Compares the luminance
+ * of `theme.background` (RGB565-style numeric color) against a 0.3 threshold;
+ * the dark themes shipped (`background = 0x0e1116`) clear it, light themes
+ * (`background = 0xffffff`) do not. Used to bump default stroke alpha so fib
+ * connector / level / ray / ring lines read at trader-grade contrast on
+ * dark backgrounds without forcing every host to override `style.alpha`.
+ */
+export function isDarkTheme(theme: Theme): boolean {
+  const bg = theme.background;
+  if (typeof bg !== "number" || !Number.isFinite(bg)) {
+    return false;
+  }
+  const r = ((bg >> 16) & 0xff) / 255;
+  const g = ((bg >> 8) & 0xff) / 255;
+  const b = (bg & 0xff) / 255;
+  // Rec.709 relative luminance.
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return luminance < 0.3;
+}
+
+const DARK_THEME_DEFAULT_ALPHA_FLOOR = 0.85;
+
 function resolveStroke(stroke: DrawingStroke | undefined, theme: Theme, dpr: number): ResolvedStroke {
   const baseWidth = stroke?.width ?? 1;
   const dprBucket = dpr <= 1 ? 1 : dpr <= 1.5 ? 1.5 : 2;
+  // Cycle C.3 — when the host hasn't set an explicit alpha AND the theme is
+  // dark, raise the floor so connector / level / ray lines read at
+  // trader-grade contrast against the dark background. Light theme is
+  // unchanged (default 1).
+  let effectiveAlpha = stroke?.alpha ?? 1;
+  if (stroke?.alpha === undefined && isDarkTheme(theme)) {
+    effectiveAlpha = Math.max(effectiveAlpha, DARK_THEME_DEFAULT_ALPHA_FLOOR);
+  }
   return Object.freeze({
     color: stroke?.color ?? theme.line,
-    alpha: stroke?.alpha ?? 1,
+    alpha: effectiveAlpha,
     width: baseWidth * dprBucket,
     style: stroke?.style ?? "solid",
   });
@@ -446,17 +478,20 @@ function drawEllipse(g: Graphics, geom: EllipseGeom, drawing: Drawing, theme: Th
 function drawFibExtension(g: Graphics, geom: FibExtensionGeom, drawing: Drawing, theme: Theme, dpr: number): void {
   const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
   // Connector through the 3 anchors so users can see the impulse + extension legs.
+  // Cycle C.3 — connector multiplier raised from 0.55 → 0.75 so the dim
+  // legs read more clearly against dark themes (still subordinate to the
+  // full-alpha level lines).
   const a0 = geom.anchors[0];
   const a1 = geom.anchors[1];
   const a2 = geom.anchors[2];
   g.moveTo(a0.x, a0.y).lineTo(a1.x, a1.y).stroke({
     color: stroke.color,
-    alpha: stroke.alpha * 0.55,
+    alpha: stroke.alpha * 0.75,
     width: Math.max(1, stroke.width * 0.8),
   });
   g.moveTo(a1.x, a1.y).lineTo(a2.x, a2.y).stroke({
     color: stroke.color,
-    alpha: stroke.alpha * 0.55,
+    alpha: stroke.alpha * 0.75,
     width: Math.max(1, stroke.width * 0.8),
   });
   for (const lvl of geom.levels) {
@@ -501,6 +536,38 @@ function drawFibArcs(g: Graphics, geom: FibArcsGeom, drawing: Drawing, theme: Th
       width: stroke.width,
     });
   }
+}
+
+// ─── Phase 13 Cycle C.3 — brush + icon renderers ───────────────────────────
+
+function drawBrush(g: Graphics, geom: BrushGeom, drawing: Drawing, theme: Theme, dpr: number): void {
+  if (geom.points.length < 2) {
+    return;
+  }
+  const stroke = resolveStroke(drawing.style.stroke, theme, dpr);
+  // Build a single flat array and emit one `g.poly()` so the polyline
+  // batches as one path / one stroke fill — avoids the N-1-subpath cost of
+  // chained moveTo+lineTo.
+  const flat: number[] = [];
+  for (const p of geom.points) {
+    flat.push(p.x, p.y);
+  }
+  // `false` = open polyline (no closing segment back to the start).
+  g.poly(flat, false).stroke({
+    color: stroke.color,
+    alpha: stroke.alpha,
+    width: stroke.width,
+  });
+}
+
+/**
+ * Icon Graphics-layer draw is a no-op: the controller maintains a parallel
+ * `Sprite` per icon drawing in `spritesByDrawing`. This stub keeps the
+ * pooled Graphics row consistent (cleared, hidden) so other code paths
+ * that iterate `graphicsByDrawing` continue to work.
+ */
+function drawIcon(_g: Graphics): void {
+  /* sprite handles the visual; graphics row stays empty */
 }
 
 export function redrawDrawing(
@@ -586,6 +653,12 @@ export function redrawDrawing(
       return;
     case "fibArcs":
       drawFibArcs(g, geom, drawing, theme, dpr);
+      return;
+    case "brush":
+      drawBrush(g, geom, drawing, theme, dpr);
+      return;
+    case "icon":
+      drawIcon(g);
       return;
   }
 }
@@ -837,6 +910,19 @@ export function handleSpecsFor(
       return specs;
     }
     case "fibTimeZones": {
+      const a = geom.anchor;
+      if (inPlot(a.x, a.y)) {
+        specs.push(Object.freeze({ key: 0, x: a.x, y: a.y, variant: variantFor(0) }));
+      }
+      return specs;
+    }
+    case "brush": {
+      // Cycle C.3 — brush handles intentionally hidden in v1. Body-drag
+      // works via `hitGeom` → `'line'` part; intermediate-point editing is
+      // out of scope (delete + redraw).
+      return specs;
+    }
+    case "icon": {
       const a = geom.anchor;
       if (inPlot(a.x, a.y)) {
         specs.push(Object.freeze({ key: 0, x: a.x, y: a.y, variant: variantFor(0) }));

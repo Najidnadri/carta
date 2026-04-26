@@ -48,7 +48,10 @@ export type DrawingKind =
   | "fibExtension"
   | "fibTimeZones"
   | "fibFan"
-  | "fibArcs";
+  | "fibArcs"
+  // ─── Phase 13 Cycle C.3 — brush + icon ─────────────────────────────────
+  | "brush"
+  | "icon";
 
 export type HorizontalRayDirection = "left" | "right";
 
@@ -336,6 +339,73 @@ export interface FibArcsDrawing extends DrawingCommon {
   readonly kind: "fibArcs";
   readonly anchors: readonly [DrawingAnchor, DrawingAnchor];
   readonly levels: readonly FibLevel[];
+  /**
+   * Phase 13 Cycle C.3 — when `true`, render a percentage label per ring at
+   * the `+x` end of the diameter (`'right-of-cx'` placement). Default `false`
+   * to preserve the C.2-shipped TradingView-style label-free arcs.
+   */
+  readonly showRingLabels?: boolean;
+}
+
+// ─── Phase 13 Cycle C.3 — brush + icon ─────────────────────────────────────
+
+/**
+ * Brush / freehand stroke. Variable-arity: `points` carries the
+ * RDP-simplified polyline (≥ 2 points), while `anchors` is a 2-tuple bbox
+ * (start + end of the simplified polyline) so existing helpers that expect a
+ * fixed `anchors.length` keep working. Body-drag translates both arrays from
+ * a snapshot taken at drag-start; intermediate-point editing is out of scope
+ * for v1 (delete + redraw).
+ */
+export interface BrushDrawing extends DrawingCommon {
+  readonly kind: "brush";
+  readonly anchors: readonly [DrawingAnchor, DrawingAnchor];
+  readonly points: readonly DrawingAnchor[];
+}
+
+/**
+ * Icon glyph identifier — one of the 10 silhouettes shipped in `IconAtlas`.
+ * Hosts that need a richer set must wait for phase 16 (plugin architecture).
+ */
+export type IconGlyph =
+  | "arrowUp"
+  | "arrowDown"
+  | "flag"
+  | "target"
+  | "cross"
+  | "check"
+  | "star"
+  | "exclaim"
+  | "dollar"
+  | "comment";
+
+/** Default catalog — single row, deterministic order. Render-time atlas reads from this list. */
+export const DEFAULT_ICON_GLYPHS: readonly IconGlyph[] = Object.freeze([
+  "arrowUp",
+  "arrowDown",
+  "flag",
+  "target",
+  "cross",
+  "check",
+  "star",
+  "exclaim",
+  "dollar",
+  "comment",
+]);
+
+/**
+ * Icon stamp — single anchor in data space, rendered as a tinted sprite from
+ * the runtime-built atlas. `size` controls the rendered CSS-px size; default
+ * 32. `tint` overrides the default `theme.text` color.
+ */
+export interface IconDrawing extends DrawingCommon {
+  readonly kind: "icon";
+  readonly anchors: readonly [DrawingAnchor];
+  readonly glyph: IconGlyph;
+  /** Rendered CSS-px size (square). Defaults to 32. */
+  readonly size?: number;
+  /** Hex color (0xRRGGBB). Defaults to `theme.text`. */
+  readonly tint?: number;
 }
 
 export type Drawing =
@@ -362,7 +432,9 @@ export type Drawing =
   | FibExtensionDrawing
   | FibTimeZonesDrawing
   | FibFanDrawing
-  | FibArcsDrawing;
+  | FibArcsDrawing
+  | BrushDrawing
+  | IconDrawing;
 
 /** Default fib levels. Matches TradingView defaults. */
 export const DEFAULT_FIB_LEVELS: readonly FibLevel[] = Object.freeze([
@@ -506,4 +578,11 @@ export interface BeginCreateOptions {
   // ─── Phase 13 Cycle C.1 ───
   /** Pitchfork variant. Defaults to `'andrews'`. Ignored for non-pitchfork kinds. */
   readonly variant?: PitchforkVariant;
+  // ─── Phase 13 Cycle C.3 ───
+  /** Icon glyph. Required when `beginCreate('icon')`. Defaults to `'flag'`. */
+  readonly glyph?: IconGlyph;
+  /** Icon size override (CSS px). Defaults to 32. */
+  readonly size?: number;
+  /** Icon tint override. Defaults to `theme.text`. */
+  readonly tint?: number;
 }

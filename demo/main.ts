@@ -1206,6 +1206,9 @@ async function main(): Promise<void> {
     "fibTimeZones",
     "fibFan",
     "fibArcs",
+    // Phase 13 Cycle C.3
+    "brush",
+    "icon",
   ] as const;
   type DrawingKindName = typeof DRAWING_KINDS[number];
 
@@ -1215,6 +1218,39 @@ async function main(): Promise<void> {
   const readPitchforkVariant = (): "andrews" | "schiff" | "modifiedSchiff" => {
     const v = pitchforkVariantSelect?.value;
     return v === "schiff" || v === "modifiedSchiff" ? v : "andrews";
+  };
+
+  // Phase 13 Cycle C.3 — icon glyph selector. Read at toolbar-click time so
+  // the user can pick a glyph then place; mirrors the pitchfork-variant
+  // pattern. Returned glyph is one of the 10 default catalog entries; an
+  // unknown value falls back to `'flag'` (matches the controller's behavior).
+  const iconGlyphSelect = document.getElementById("icon-glyph") as HTMLSelectElement | null;
+  const VALID_GLYPHS = new Set([
+    "arrowUp",
+    "arrowDown",
+    "flag",
+    "target",
+    "cross",
+    "check",
+    "star",
+    "exclaim",
+    "dollar",
+    "comment",
+  ]);
+  type IconGlyphName =
+    | "arrowUp"
+    | "arrowDown"
+    | "flag"
+    | "target"
+    | "cross"
+    | "check"
+    | "star"
+    | "exclaim"
+    | "dollar"
+    | "comment";
+  const readIconGlyph = (): IconGlyphName => {
+    const v = iconGlyphSelect?.value ?? "flag";
+    return VALID_GLYPHS.has(v) ? (v as IconGlyphName) : "flag";
   };
 
   const updateDrawingToolButtons = (): void => {
@@ -1238,6 +1274,8 @@ async function main(): Promise<void> {
         chart.drawings.cancelCreate();
       } else if (k === "pitchfork") {
         chart.drawings.beginCreate("pitchfork", { variant: readPitchforkVariant() });
+      } else if (k === "icon") {
+        chart.drawings.beginCreate("icon", { glyph: readIconGlyph() });
       } else {
         chart.drawings.beginCreate(k);
       }
@@ -1735,11 +1773,89 @@ async function main(): Promise<void> {
       chart?.drawings.getDevHooks().cancelActiveDrag();
     },
     /**
+     * Phase 13 Cycle C.3 — force-cancel any active brush capture. Mirrors
+     * the `pinch-start` and `interval:change` cancel paths so tests can
+     * assert recovery state without driving real pointer events.
+     */
+    cancelActiveBrush: (): void => {
+      chart?.drawings.getDevHooks().cancelActiveBrush();
+    },
+    /** Read-only snapshot of the active brush capture, or `null`. */
+    getBrushCaptureState: (): { pointerId: number; pointCount: number } | null => {
+      const s = chart?.drawings.getDevHooks().getBrushCaptureState();
+      return s === undefined ? null : s as { pointerId: number; pointCount: number } | null;
+    },
+    /** Count of live icon sprites — used for leak / batch assertions. */
+    spriteRegistrySize: (): number => chart?.drawings.getDevHooks().spriteRegistrySize() ?? 0,
+    /** Icon atlas state — used for DPR-rebuild assertions. */
+    iconAtlasInfo: (): { dprBucket: number; cellPx: number; textureCount: number } | null => {
+      const info = chart?.drawings.getDevHooks().iconAtlasInfo();
+      return info === undefined ? null : info as { dprBucket: number; cellPx: number; textureCount: number } | null;
+    },
+    /**
      * Detect the WebGL renderer class so perf-canary verdicts can be tagged.
      * `'software-gl'` for SwiftShader / llvmpipe / Mesa software paths;
      * `'discrete-gpu'` / `'integrated-gpu'` for known patterns; `'unknown'`
      * otherwise.
      */
+    /**
+     * Phase 13 Cycle C.3 — visual stability digest. Reads the canvas's pixel
+     * data inside the given (x, y, w, h) rect via the Pixi v8 `extract`
+     * plugin and returns an FNV1a hex digest. Used by the MR-4 fib-arc
+     * DPR-snap regression: identical input across two consecutive renders
+     * must produce identical output. Demo-only; unstable surface.
+     */
+    canvasPixelDigest: (x: number, y: number, w: number, h: number): string | null => {
+      if (chart === null) {
+        return null;
+      }
+      const canvas = document.querySelector("canvas");
+      if (canvas === null) {
+        return null;
+      }
+      const width = Math.max(1, Math.floor(w));
+      const height = Math.max(1, Math.floor(h));
+      // Pixi inits without `preserveDrawingBuffer`, so a 2D drawImage of the
+      // canvas reads back zeros after the frame is presented. Use
+      // `gl.readPixels` directly — this works regardless of the buffer
+      // preserve flag, but reads from bottom-left so y must be flipped.
+      const gl =
+        canvas.getContext("webgl2", { preserveDrawingBuffer: false }) ??
+        canvas.getContext("webgl", { preserveDrawingBuffer: false });
+      if (gl === null) {
+        return null;
+      }
+      const ctxWidth = canvas.width;
+      const ctxHeight = canvas.height;
+      // Trigger a fresh render so the back buffer holds the current scene.
+      // `__cartaTest.requestRender` exists if available; fall back to a
+      // no-op (caller must have rAF'd already).
+      const pixels = new Uint8Array(width * height * 4);
+      const flippedY = Math.max(0, Math.min(ctxHeight - height, ctxHeight - Math.floor(y) - height));
+      try {
+        gl.readPixels(
+          Math.floor(x),
+          flippedY,
+          width,
+          height,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          pixels,
+        );
+      } catch {
+        return null;
+      }
+      // FNV1a 32-bit — sync, no crypto.subtle dependency.
+      let hash = 0x811c9dc5;
+      for (const byte of pixels) {
+        hash ^= byte;
+        hash = Math.imul(hash, 0x01000193);
+      }
+      // Suppress unused warning on ctxWidth (kept for future viewport-aware
+      // clamping if we add that as a follow-up).
+      void ctxWidth;
+      return (hash >>> 0).toString(16).padStart(8, "0");
+    },
     hardwareClass: (): "software-gl" | "discrete-gpu" | "integrated-gpu" | "unknown" => {
       const probe = document.createElement("canvas");
       const gl =

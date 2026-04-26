@@ -76,4 +76,27 @@ export interface DrawingsDevHooks {
    * no visible handles.
    */
   visibleHandlesFor(drawingId: DrawingId | string): readonly VisibleHandleInfo[];
+  /**
+   * Phase 13 Cycle C.3 — force-cancel any active brush capture (mirrors
+   * the `pinch-start` and `interval:change` cancel paths).  Idempotent;
+   * silently no-ops when no capture is active.
+   */
+  cancelActiveBrush(): void;
+  /**
+   * Phase 13 Cycle C.3 — read-only snapshot of the active brush capture.
+   * Returns `null` when no capture is active.  `pointCount` is the number
+   * of raw pointer points captured so far (post mid-stroke RDP collapses).
+   */
+  getBrushCaptureState(): { readonly pointerId: number; readonly pointCount: number } | null;
+  /**
+   * Phase 13 Cycle C.3 — count of live icon sprites currently registered
+   * on `drawingsLayer`.  Used by leak assertions after `chart.destroy()`
+   * or large add/remove churn.
+   */
+  spriteRegistrySize(): number;
+  /**
+   * Phase 13 Cycle C.3 — atlas state for visual-stability assertions.
+   * `null` when no atlas has been built yet (no icon ever placed).
+   */
+  iconAtlasInfo(): { readonly dprBucket: number; readonly cellPx: number; readonly textureCount: number } | null;
 }

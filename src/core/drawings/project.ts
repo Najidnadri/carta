@@ -14,6 +14,7 @@ import type { TimeScale } from "../time/TimeScale.js";
 import { asPixel } from "../../types.js";
 import type {
   ArrowDrawing,
+  BrushDrawing,
   CalloutDrawing,
   DateRangeDrawing,
   Drawing,
@@ -29,6 +30,7 @@ import type {
   GannFanDrawing,
   HorizontalLineDrawing,
   HorizontalRayDrawing,
+  IconDrawing,
   LongPositionDrawing,
   ParallelChannelDrawing,
   PitchforkDrawing,
@@ -326,6 +328,24 @@ export interface FibArcsGeom {
   readonly bbox: { readonly xMin: number; readonly xMax: number; readonly yMin: number; readonly yMax: number };
 }
 
+// ─── Phase 13 Cycle C.3 — brush + icon geoms ───────────────────────────────
+
+export interface BrushGeom {
+  readonly kind: "brush";
+  /** Bbox endpoints (`anchors[0]`/`anchors[1]` projected). Used for handle placement / hit-test prefilter only. */
+  readonly anchors: readonly [ScreenPoint, ScreenPoint];
+  /** RDP-simplified polyline projected per frame. Non-finite projections are dropped. */
+  readonly points: readonly ScreenPoint[];
+  readonly bbox: { readonly xMin: number; readonly xMax: number; readonly yMin: number; readonly yMax: number };
+}
+
+export interface IconGeom {
+  readonly kind: "icon";
+  readonly anchor: ScreenPoint;
+  /** Rendered CSS-px size (square). Carries through to hit-test bbox + sprite scale. */
+  readonly sizeCss: number;
+}
+
 export type ScreenGeom =
   | TrendlineGeom
   | HorizontalLineGeom
@@ -349,7 +369,9 @@ export type ScreenGeom =
   | FibExtensionGeom
   | FibTimeZonesGeom
   | FibFanGeom
-  | FibArcsGeom;
+  | FibArcsGeom
+  | BrushGeom
+  | IconGeom;
 
 export interface ProjectionContext {
   readonly timeScale: TimeScale;
@@ -1221,6 +1243,75 @@ function projectFibArcs(d: FibArcsDrawing, ctx: ProjectionContext): FibArcsGeom 
   });
 }
 
+// ─── Phase 13 Cycle C.3 — brush + icon projectors ──────────────────────────
+
+const DEFAULT_ICON_SIZE_CSS = 32;
+
+function projectBrush(d: BrushDrawing, ctx: ProjectionContext): BrushGeom {
+  const a0 = projectAnchor(ctx.timeScale, ctx.priceScale, Number(d.anchors[0].time), Number(d.anchors[0].price));
+  const a1 = projectAnchor(ctx.timeScale, ctx.priceScale, Number(d.anchors[1].time), Number(d.anchors[1].price));
+  const pts: ScreenPoint[] = [];
+  let xMin = Infinity;
+  let xMax = -Infinity;
+  let yMin = Infinity;
+  let yMax = -Infinity;
+  for (const p of d.points) {
+    const sp = projectAnchor(ctx.timeScale, ctx.priceScale, Number(p.time), Number(p.price));
+    if (!Number.isFinite(sp.x) || !Number.isFinite(sp.y)) {
+      continue;
+    }
+    pts.push(sp);
+    if (sp.x < xMin) {
+      xMin = sp.x;
+    }
+    if (sp.x > xMax) {
+      xMax = sp.x;
+    }
+    if (sp.y < yMin) {
+      yMin = sp.y;
+    }
+    if (sp.y > yMax) {
+      yMax = sp.y;
+    }
+  }
+  if (pts.length === 0) {
+    xMin = a0.x;
+    xMax = a1.x;
+    yMin = a0.y;
+    yMax = a1.y;
+  }
+  const finalXMin = Math.min(xMin, xMax);
+  const finalXMax = Math.max(xMin, xMax);
+  const finalYMin = Math.min(yMin, yMax);
+  const finalYMax = Math.max(yMin, yMax);
+  return Object.freeze({
+    kind: "brush" as const,
+    anchors: Object.freeze([a0, a1] as const),
+    points: Object.freeze(pts),
+    bbox: Object.freeze({
+      xMin: finalXMin,
+      xMax: finalXMax,
+      yMin: finalYMin,
+      yMax: finalYMax,
+    }),
+  });
+}
+
+function projectIcon(d: IconDrawing, ctx: ProjectionContext): IconGeom {
+  const anchor = projectAnchor(
+    ctx.timeScale,
+    ctx.priceScale,
+    Number(d.anchors[0].time),
+    Number(d.anchors[0].price),
+  );
+  const sizeCss = d.size !== undefined && Number.isFinite(d.size) && d.size > 0 ? d.size : DEFAULT_ICON_SIZE_CSS;
+  return Object.freeze({
+    kind: "icon" as const,
+    anchor,
+    sizeCss,
+  });
+}
+
 export function projectDrawing(d: Drawing, ctx: ProjectionContext): ScreenGeom {
   switch (d.kind) {
     case "trendline":
@@ -1270,6 +1361,10 @@ export function projectDrawing(d: Drawing, ctx: ProjectionContext): ScreenGeom {
       return projectFibFan(d, ctx);
     case "fibArcs":
       return projectFibArcs(d, ctx);
+    case "brush":
+      return projectBrush(d, ctx);
+    case "icon":
+      return projectIcon(d, ctx);
   }
 }
 
