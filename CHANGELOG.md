@@ -26,6 +26,101 @@
 
 ### Added
 
+- **Phase 15 Cycle A — declarative save / load + PNG export.** Ships the
+  trader-grade screenshot + layout-persistence pipeline. New
+  `chart.save(): ChartSaveState` is synchronous and JSON-stringifiable:
+  `schemaVersion: 1` with window, intervalDuration, sparse theme overrides
+  via the new `themeExplicitKeys` Set (the chart now records every key
+  passed to `applyOptions({theme})` so save emits only the host's
+  customizations, not the full preset), a discriminated 8-kind
+  `SeriesSaveEntry` union with `paneId`/`priceScaleId`/`scaleMargins`
+  baked into each series's options blob, pane heights /
+  collapsed / header / per-slot `PriceScaleMode`, drawings snapshot,
+  optional `primarySymbol` via host-supplied
+  `applyOptions({persistence:{getSymbol}})` callback, and
+  `ui.trackingMode`. `chart.load(state, opts?): Promise<void>` validates
+  the input through a zero-`as` type guard (`isChartSaveState` rejects
+  non-integer / negative / future `schemaVersion`, NaN windows,
+  non-positive intervals, unknown chart types, duplicate pane IDs as a
+  cross-field check, and non-positive `stretchFactor`/`minHeight` /
+  negative `heightOverride`), migrates through a chained-migrator scaffold
+  (`CartaSchemaError` on `>1` / unregistered step), cancels in-flight
+  pointer/drag/brush, then applies theme → interval (cache reset) →
+  window → panes (remove orphans → add missing → applyOptions →
+  `reorderPanes` final pass to restore saved order via the existing
+  `applyReorder` transaction) → drawings → series (drop-all + re-create
+  via the matching concrete constructor). The chart polls
+  `hasPendingDataRequest()` for a 50 ms quiet window or the host's
+  `fetchTimeoutMs` (default 5 s) before emitting `state:loaded` or
+  `state:partial-loaded{reason:'timeout'}`. `AbortController` plumbed
+  through `chart.destroy()` → in-flight load rejects with
+  `OperationCanceledError`. Newer-wins on concurrent loads. New
+  `chart.exportPNG(opts?): Promise<Blob>` renders off-screen via PixiJS
+  v8 `RenderTexture` + `app.renderer.extract.canvas` + `canvas.toBlob`
+  (also handles `OffscreenCanvas.convertToBlob`); defers up to
+  `deferTimeoutMs` (default 2 s) waiting for the new `'idle'` event after
+  `isGestureActive() === false`, rejects with `ExportError('EBUSY')` on
+  timeout. Pre-flight clamps the requested texels to
+  `MAX_TEXTURE_SIZE` (WebGL `gl.MAX_TEXTURE_SIZE` with `16384` WebGPU
+  fallback) and emits `export:size-clamped {requested, clamped, max}`.
+  Hides `crosshairLinesLayer` / `crosshairTagsLayer` /
+  `drawingsHandlesLayer` and calls the new
+  `DrawingsController.suspendTransients()` /
+  `resumeTransients(token)` so the rendered PNG carries no selection
+  halo / ghost preview / marquee / hover affordance. Default `scale: 2`
+  for retina; format `image/png` / `image/webp` / `image/jpeg`. Visible
+  canvas is **never** resized: `ConfigState.withSize` is transiently
+  mutated then restored, `renderer.resolution = 1` for the export pass
+  then restored, `reflushOriginal` repaints the stage at the original
+  dims before the export promise resolves (pixel-digest unchanged
+  pre/post verified). Destroy-mid-export rejects cleanly with
+  `ExportError('CANCELLED')` — pngExport.ts now checks `isDisposed` at
+  every Pixi boundary (before render / before extract / before+after
+  `toBlob`) and wraps every `finally` cleanup op in `try/catch` so a
+  destroyed renderer's null GL state never escapes as a raw `TypeError`.
+  New text-only `WatermarkLayer` (image variant deferred to cycle C).
+  `flush()` split into `computeLayoutAndPaint(reasons, present)` so the
+  export reuses the layout pipeline against the `RenderTexture` without
+  presenting to the live canvas. `maybeEmitIdle()` emits the new `'idle'`
+  event on the first clean frame after `isGestureActive()` transitions
+  false (idempotent / once-only safe — narrower than the originally
+  proposed `'flushed'` event). New public `chart.isGestureActive()`
+  ORs viewport active-pointer / kinetic / pane-resize-drag /
+  pane-header-drag / price-axis-drag (new `isDragging()` public flag) /
+  drawings interaction (new `isInteracting()` public flag). New abstract
+  `Series.getOptions(): Readonly<object>` with 1-line `{...this.opts}`
+  delegates on all 8 concrete series (Candlestick / OhlcBar / HeikinAshi
+  / Line / Area / Histogram / Baseline / MarkerOverlay). New
+  `CartaEventMap` entries: `idle`, `state:loaded`,
+  `state:partial-loaded`, `export:ready`, `export:deferred`,
+  `export:failed`, `export:size-clamped`. `TimeSeriesChartOptions` +
+  `ApplyOptions` gain a `persistence?: PersistenceOptions` field. Demo
+  ships three new buttons in a `#persistence-toolbar` fieldset (Save
+  layout / Load layout / Screenshot) plus a floating `#persistence-panel`
+  with a JSON textarea (`[data-testid="persistence-textarea"]`), inline
+  PNG preview (`[data-testid="screenshot-preview"]`, object-URL with
+  `URL.revokeObjectURL` on repeat), and a counts-and-bytes status line.
+  52 new vitest cases (998/999 passing, vs 946/947 pre-cycle-A); 36
+  validator negative-matrix cases (including cross-field duplicate-pane-id
+  and negative-height regressions); 14 migration scaffold cases. Cycle A
+  was test-carta-validated end-to-end across mobile 390×844 / tablet
+  820×1180 / laptop 1440×900: 75 PASS / 9 FAIL / 4 manual-review / 3
+  INDETERMINATE on the WSL2/SwiftShader software-GL host. Three P0 fixes
+  landed inline (pane order restoration on load, validator negative-height
+  + duplicate-pane-id cross-field, pngExport per-boundary `isDisposed`
+  + finally-swallow), re-run #1 returned all four P0s PASS with zero
+  regressions across smoke-tested ACs. Carry-overs to cycle B/C: Esc
+  closes panel (P2 demo polish), `LOAD-007` cross-symbol load
+  INDETERMINATE pending demo wiring of `persistence.getSymbol`,
+  software-GL perf canaries pending real-GPU re-bench. CSV export
+  (`exportCSV`), URL permalinks (`permalink` / `fromPermalink`), and the
+  storage-adapter library + image watermark loader stay deferred to
+  cycles B + C respectively. See
+  [plans/15-save-load-export.md](plans/15-save-load-export.md) and
+  research docs `feature-save-load-export.md`,
+  `phase-15-cycleA-implementation.md`,
+  `phase-15-cycleA-test-matrix.md`.
+
 - **Phase 12 — testing infrastructure (single cycle).** Closes the v0.1
   shipping gate. Adds Playwright e2e (`playwright.config.ts`, chromium-only
   with `--use-gl=swiftshader --enable-unsafe-swiftshader`, `retries:2` in CI,

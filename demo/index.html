@@ -435,6 +435,12 @@
         <button id="move-zscore-top" data-testid="move-zscore-top" type="button" title="Phase 14 Cycle B — pane.moveTo(1)" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:4px 10px;font-size:12px;">
           Z-score → top
         </button>
+        <fieldset id="persistence-toolbar" style="border:1px solid var(--button-border);border-radius:4px;padding:4px 6px;display:inline-flex;gap:4px;align-items:center;">
+          <legend style="font-size:10px;color:var(--muted);padding:0 4px;text-transform:uppercase;letter-spacing:0.06em;">Save / Export</legend>
+          <button id="layout-save" data-testid="layout-save" type="button" title="chart.save() — capture current layout to JSON">Save layout</button>
+          <button id="layout-load" data-testid="layout-load" type="button" title="chart.load(state) — restore saved layout">Load layout</button>
+          <button id="screenshot" data-testid="screenshot" type="button" title="chart.exportPNG() — render an off-screen PNG screenshot">Screenshot</button>
+        </fieldset>
         <div id="readout">
           <span>start <b id="readout-start">—</b></span>
           <span>end <b id="readout-end">—</b></span>
@@ -543,6 +549,21 @@
         <input id="style-fill-alpha" type="range" min="0" max="1" step="0.05" style="flex:1;" />
         <span id="style-fill-alpha-readout" style="min-width:34px;text-align:right;font-family:ui-monospace,monospace;color:var(--muted);">—</span>
       </label>
+    </aside>
+    <aside id="persistence-panel"
+           data-open="false"
+           aria-label="Persistence panel"
+           style="position:fixed;left:12px;bottom:12px;z-index:30;display:none;flex-direction:column;gap:6px;padding:10px;background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:6px;font:12px/1.3 system-ui,-apple-system,Segoe UI,sans-serif;min-width:300px;max-width:520px;max-height:60vh;overflow:auto;box-shadow:0 4px 12px rgba(0,0,0,0.25);">
+      <header style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);font-size:10px;" id="persistence-title">Persistence</span>
+        <button id="persistence-close" type="button" title="Close" style="background:transparent;color:var(--muted);border:0;padding:0 4px;cursor:pointer;font-size:14px;">×</button>
+      </header>
+      <textarea id="persistence-textarea" data-testid="persistence-textarea" aria-label="ChartSaveState JSON" style="width:100%;min-height:180px;font-family:ui-monospace,monospace;font-size:11px;background:var(--bg);color:var(--fg);border:1px solid var(--button-border);border-radius:3px;padding:6px;resize:vertical;"></textarea>
+      <div id="persistence-status" style="color:var(--muted);font-size:10px;min-height:14px;">—</div>
+      <div id="screenshot-preview-row" style="display:none;flex-direction:column;gap:4px;">
+        <span style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;">Preview</span>
+        <img id="screenshot-preview" data-testid="screenshot-preview" alt="Exported PNG preview" style="max-width:480px;max-height:240px;border:1px solid var(--button-border);border-radius:3px;background:#0008;" />
+      </div>
     </aside>
     <script type="module" src="./main.ts"></script>
   </body>

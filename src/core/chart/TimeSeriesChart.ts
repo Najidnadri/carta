@@ -4,7 +4,7 @@ import { CrosshairController } from "../interaction/CrosshairController.js";
 import { DataStore } from "../data/DataStore.js";
 import { DrawingsController, type DrawingsFacade } from "../drawings/DrawingsController.js";
 import { MAIN_PANE_ID, asPaneId, type PaneId } from "../drawings/types.js";
-import { DarkTheme } from "../infra/themes.js";
+import { DarkTheme, LightTheme } from "../infra/themes.js";
 import { DebouncedEmitter } from "../infra/DebouncedEmitter.js";
 import { EventBus } from "../infra/EventBus.js";
 import { InvalidationQueue, type DirtyReason } from "../infra/InvalidationQueue.js";
@@ -36,6 +36,15 @@ import { TimeAxis, type TimeAxisOptions } from "../time/TimeAxis.js";
 import type { TickInfo } from "../time/TimeAxis.js";
 import { TimeScale } from "../time/TimeScale.js";
 import { ViewportController } from "../viewport/ViewportController.js";
+import { saveChart, type SaveContext } from "../persistence/save.js";
+import { loadChart, type LoadContext } from "../persistence/load.js";
+import { exportChartPng, type ExportContext } from "../persistence/pngExport.js";
+import {
+  OperationCanceledError,
+  type ChartSaveState,
+  type LoadOptions,
+  type PngExportOptions,
+} from "../persistence/types.js";
 import {
   asInterval,
   asPixel,
@@ -58,6 +67,7 @@ import {
   type MagnetMode,
   type MissingRangesQuery,
   type OhlcRecord,
+  type PersistenceOptions,
   type Price,
   type PriceAxisOptions,
   type PriceDomain,
@@ -85,6 +95,14 @@ interface ResolvedOptions {
   readonly autoResize: boolean;
   readonly devicePixelRatio: number;
   readonly theme: Theme;
+  /**
+   * Phase 15 Cycle A — raw theme overrides passed at construction. The
+   * chart populates `themeExplicitKeys` from this set so `chart.save()`
+   * emits only the keys the host actually customized (not every key
+   * inherited from the dark/light preset).
+   */
+  readonly themeOverrides: Partial<Theme>;
+  readonly persistence: PersistenceOptions;
   readonly logger: Logger;
   readonly timeAxis: TimeAxisOptions | undefined;
   readonly viewport: ViewportOptions | undefined;
@@ -203,12 +221,43 @@ export class TimeSeriesChart {
   private dprMediaListener: ((e: MediaQueryListEvent) => void) | null = null;
   private readonly mediaMatcher: ((query: string) => MediaQueryList) | null;
   private readonly dprProbe: () => number;
+  /**
+   * Phase 15 Cycle A — set of theme keys the host has explicitly set
+   * (either at construction via `options.theme` or via `applyOptions`).
+   * `chart.save()` emits only these keys as theme overrides, so the
+   * resulting save state is small and an unchanged theme round-trips as
+   * `{ name }` alone.
+   */
+  private readonly themeExplicitKeys = new Set<keyof Theme>();
+  private persistenceOptions: PersistenceOptions = {};
+  /**
+   * Phase 15 Cycle A — `wasGestureActive` snapshot drives the `'idle'`
+   * event emission inside `flush()`. The event fires once on the first
+   * clean frame after a gesture ends; subscribing permanently is fine but
+   * advised against — `chart.once('idle', ...)` is the canonical pattern
+   * (used by `chart.exportPNG()` for defer-on-gesture).
+   */
+  private wasGestureActive = false;
+  /**
+   * Phase 15 Cycle A — active load operation. Set when `chart.load()`
+   * starts; cleared on resolve/reject. `chart.destroy()` aborts the
+   * controller so the load promise rejects with `OperationCanceledError`.
+   * Only one load can be in flight at a time — a second concurrent call
+   * aborts the first (newer wins).
+   */
+  private activeLoadController: AbortController | null = null;
 
   private constructor(opts: ResolvedOptions, renderer: Renderer, config: ConfigState) {
     this.opts = opts;
     this.renderer = renderer;
     this.config = config;
     this.currentResolution = opts.devicePixelRatio;
+    // Seed the explicit-key set from the raw construction overrides so the
+    // first `chart.save()` correctly captures keys the host pinned.
+    for (const k of Object.keys(opts.themeOverrides) as (keyof Theme)[]) {
+      this.themeExplicitKeys.add(k);
+    }
+    this.persistenceOptions = opts.persistence;
     if (opts.dprListenerHooks !== undefined) {
       this.mediaMatcher = opts.dprListenerHooks.matchMedia;
       this.dprProbe = opts.dprListenerHooks.devicePixelRatio;
@@ -430,6 +479,8 @@ export class TimeSeriesChart {
       autoResize: options.autoResize ?? true,
       devicePixelRatio: resolveDpr(rawDpr),
       theme,
+      themeOverrides: options.theme ?? {},
+      persistence: options.persistence ?? {},
       logger,
       timeAxis: options.timeAxis,
       viewport: options.viewport,
@@ -1591,6 +1642,14 @@ export class TimeSeriesChart {
     }
     if (options.theme !== undefined) {
       const nextTheme: Theme = { ...this.config.snapshot.theme, ...options.theme };
+      // Phase 15 Cycle A — record every explicitly-set theme key so save()
+      // can later emit only the host's customizations. This call sequence
+      // is intentionally insertion-only — applyOptions never erases a
+      // previously-set key, since "I changed my mind" still counts as
+      // "the host has opinions about this key".
+      for (const k of Object.keys(options.theme) as (keyof Theme)[]) {
+        this.themeExplicitKeys.add(k);
+      }
       const nextConfig = this.config.withTheme(nextTheme);
       if (nextConfig !== this.config) {
         this.config = nextConfig;
@@ -1602,6 +1661,9 @@ export class TimeSeriesChart {
         // the freshly themed surface.
         this.paneHeaderController.cancelDrag();
       }
+    }
+    if (options.persistence !== undefined) {
+      this.persistenceOptions = options.persistence;
     }
     if (changed) {
       this.invalidator.invalidate("theme");
@@ -1882,6 +1944,13 @@ export class TimeSeriesChart {
       return;
     }
     this.disposed = true;
+    // Phase 15 Cycle A — abort any in-flight load. The load promise
+    // resolves to `OperationCanceledError` via the AbortController signal
+    // path inside loadChart.
+    if (this.activeLoadController !== null) {
+      this.activeLoadController.abort();
+      this.activeLoadController = null;
+    }
     this.dataRequestDebouncer.cancel();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
@@ -1934,6 +2003,31 @@ export class TimeSeriesChart {
   }
 
   private flush(reasons: ReadonlySet<DirtyReason>): void {
+    if (this.disposed) {
+      return;
+    }
+    this.computeLayoutAndPaint(reasons, true);
+    this.maybeEmitIdle();
+    this.maybeEmitWindowChange(reasons);
+  }
+
+  /**
+   * Phase 15 Cycle A — split out from `flush()` so the export pipeline
+   * can reuse the layout + paint pass against a `RenderTexture` target
+   * without `this.renderer.render()` presenting to the live canvas.
+   *
+   * When `present === false`, the method walks every painter (panes,
+   * series, drawings, axes, crosshair) and leaves the stage's Graphics
+   * buffers in the painted state but does NOT call
+   * `this.renderer.render()`. The caller is responsible for invoking
+   * `app.renderer.render({ container, target, clear })` against the
+   * texture, then restoring the prior config + calling `flush()` again
+   * to repaint the live canvas at the original dims.
+   */
+  private computeLayoutAndPaint(
+    reasons: ReadonlySet<DirtyReason>,
+    present: boolean,
+  ): void {
     if (this.disposed) {
       return;
     }
@@ -2007,7 +2101,9 @@ export class TimeSeriesChart {
         priceFormatter: this.priceFormatter,
         inTrackingMode: this.trackingActive,
       });
-      this.renderer.render();
+      if (present) {
+        this.renderer.render();
+      }
       return;
     }
 
@@ -2117,8 +2213,42 @@ export class TimeSeriesChart {
         inTrackingMode: this.trackingActive,
       });
     }
-    this.renderer.render();
-    this.maybeEmitWindowChange(reasons);
+    if (present) {
+      this.renderer.render();
+    }
+  }
+
+  /**
+   * Phase 15 Cycle A — public coarse gesture flag. ORs every pointer /
+   * kinetic / drag flag the chart owns. Used by `chart.exportPNG()` to
+   * defer the off-screen render until the chart is at rest. Always false
+   * after `chart.destroy()`.
+   */
+  isGestureActive(): boolean {
+    if (this.disposed) {
+      return false;
+    }
+    return (
+      this.viewport.activePointerCount() > 0 ||
+      this.viewport.isKineticActive() ||
+      this.paneResizeController.isDragging() ||
+      this.paneHeaderController.isDragging() ||
+      this.priceAxisController.isDragging() ||
+      this.drawingsController.isInteracting()
+    );
+  }
+
+  /**
+   * Phase 15 Cycle A — emit `'idle'` once per gesture-to-rest transition.
+   * Called at the tail of every `flush()`. Stores the post-flush gesture
+   * state so the next flush can detect the transition.
+   */
+  private maybeEmitIdle(): void {
+    const nowActive = this.isGestureActive();
+    if (this.wasGestureActive && !nowActive) {
+      this.emitter.emit("idle", { timestamp: Date.now() });
+    }
+    this.wasGestureActive = nowActive;
   }
 
   /** Pane-aware `priceScalesByPane` snapshot — primary pane's right scale only. */
@@ -2243,6 +2373,363 @@ export class TimeSeriesChart {
   /** Test-only: whether `data:request` is currently awaiting its trailing edge. */
   hasPendingDataRequest(): boolean {
     return this.dataRequestDebouncer.hasPending();
+  }
+
+  // ─── Phase 15 Cycle A — save / load / export ─────────────────────────────
+
+  /**
+   * Snapshot the chart's declarative state. Synchronous, JSON-stringifiable.
+   * Hosts persist the result via `localStorage` / `IndexedDB` / their own
+   * adapter; `chart.load(state)` restores it. Drawings, pane heights,
+   * theme overrides, and series options all round-trip; data records do
+   * NOT — the host supplies those via `data:request` after load.
+   */
+  save(): ChartSaveState {
+    const snap = this.config.snapshot;
+    const ctx: SaveContext = {
+      window: { startTime: snap.startTime, endTime: snap.endTime },
+      intervalDuration: snap.intervalDuration,
+      theme: snap.theme,
+      themeExplicitKeys: this.themeExplicitKeys,
+      series: this.series,
+      seriesPaneById: this.seriesPaneById,
+      seriesScaleById: this.seriesScaleById,
+      panes: this.panesList,
+      drawings: this.drawingsFacade.getSnapshot(),
+      logger: this.opts.logger,
+      persistence: this.persistenceOptions,
+      trackingActive: this.trackingActive,
+    };
+    return saveChart(ctx);
+  }
+
+  /**
+   * Restore a previously-saved chart state. Async — resolves when pending
+   * `data:request`s settle (or `fetchTimeoutMs` elapses, default 5_000).
+   *
+   * Throws synchronously on schema mismatch (`CartaSchemaError`). Rejects
+   * with `OperationCanceledError` if the chart is destroyed mid-load.
+   *
+   * @param state Unknown — validated via type guard before mutation.
+   * @param opts Optional. `signal` is honored; `fetchTimeoutMs` overrides
+   *             the default; `preserveWindow: true` keeps the current
+   *             viewport (drawings/series/theme are still applied).
+   */
+  async load(state: unknown, opts: LoadOptions = {}): Promise<void> {
+    if (this.disposed) {
+      throw new OperationCanceledError("chart disposed");
+    }
+    // Replace any in-flight load — newer wins (state change is more
+    // semantically important than the prior in-flight one).
+    if (this.activeLoadController !== null) {
+      this.activeLoadController.abort();
+    }
+    const controller = new AbortController();
+    this.activeLoadController = controller;
+    const externalSignal = opts.signal;
+    if (externalSignal !== undefined) {
+      if (externalSignal.aborted) {
+        controller.abort();
+      } else {
+        externalSignal.addEventListener("abort", () => { controller.abort(); }, { once: true });
+      }
+    }
+    const ctx: LoadContext = this.buildLoadContext();
+    try {
+      await loadChart(ctx, state, { ...opts, signal: controller.signal });
+    } finally {
+      if (this.activeLoadController === controller) {
+        this.activeLoadController = null;
+      }
+    }
+  }
+
+  /**
+   * Render the chart to a PNG (or webp/jpeg) Blob via PixiJS v8
+   * RenderTexture. Off-screen — the live canvas is never resized,
+   * presented, or otherwise disturbed.
+   *
+   * Defers up to `deferTimeoutMs` (default 2 s) waiting for the chart
+   * to settle if a gesture is in flight; rejects with `ExportError('EBUSY')`
+   * on timeout. The visible crosshair, tracking dot, selection handles,
+   * hover affordances, and drawing-tool ghost preview are temporarily
+   * suspended so the resulting image is data-only WYSIWYG.
+   */
+  async exportPNG(opts: PngExportOptions = {}): Promise<Blob> {
+    if (this.disposed) {
+      throw new OperationCanceledError("chart disposed");
+    }
+    const ctx = this.buildExportContext();
+    return exportChartPng(ctx, opts);
+  }
+
+  /**
+   * Phase 15 Cycle A — internal helper that cancels every in-flight
+   * pointer/drag/brush gesture before a state-mutating load. Mirrors
+   * the cleanup chain in `setInterval` + `applyOptions({theme})`.
+   */
+  private cancelInflightInteractions(): void {
+    this.viewport.stopKinetic();
+    this.paneResizeController.cancelDrag();
+    this.paneHeaderController.cancelDrag();
+    this.drawingsController.cancelActiveDrag();
+    this.drawingsController.cancelActiveBrush();
+  }
+
+  private buildLoadContext(): LoadContext {
+    return {
+      logger: this.opts.logger,
+      setInterval: (iv): void => { this.setInterval(iv); },
+      setWindow: (win): void => { this.setWindow(win); },
+      applyTheme: (name, overrides): void => {
+        this.applyThemeForLoad(name, overrides);
+      },
+      cancelInflightInteractions: (): void => { this.cancelInflightInteractions(); },
+      drawings: this.drawingsFacade,
+      addPane: (paneOpts): void => {
+        const headerOpt = paneOpts.header;
+        const addOpts: PaneOptions = {
+          ...(paneOpts.id !== undefined ? { id: paneOpts.id } : {}),
+          ...(paneOpts.stretchFactor !== undefined ? { stretchFactor: paneOpts.stretchFactor } : {}),
+          ...(paneOpts.minHeight !== undefined ? { minHeight: paneOpts.minHeight } : {}),
+          ...(paneOpts.height !== undefined ? { height: paneOpts.height } : {}),
+          ...(paneOpts.hidden !== undefined ? { hidden: paneOpts.hidden } : {}),
+          ...(paneOpts.collapsed !== undefined ? { collapsed: paneOpts.collapsed } : {}),
+          ...(headerOpt !== undefined && headerOpt !== false
+            ? { header: headerOpt }
+            : {}),
+          ...(paneOpts.priceScales !== undefined
+            ? { priceScales: paneOpts.priceScales }
+            : {}),
+        };
+        this.addPane(addOpts);
+      },
+      removePane: (id): void => { this.removePane(id); },
+      applyPaneOptions: (id, patch): void => {
+        const pane = this.panesById.get(id);
+        if (pane === undefined) {
+          return;
+        }
+        const patchOut: Partial<PaneOptions> = {
+          ...(patch.stretchFactor !== undefined ? { stretchFactor: patch.stretchFactor } : {}),
+          ...(patch.minHeight !== undefined ? { minHeight: patch.minHeight } : {}),
+          ...(patch.height !== undefined ? { height: patch.height } : {}),
+          ...(patch.hidden !== undefined ? { hidden: patch.hidden } : {}),
+          ...(patch.collapsed !== undefined ? { collapsed: patch.collapsed } : {}),
+          ...(patch.header !== undefined ? { header: patch.header } : {}),
+          ...(patch.priceScales !== undefined ? { priceScales: patch.priceScales } : {}),
+        };
+        pane.applyOptions(patchOut);
+      },
+      listPaneIds: (): readonly PaneId[] => this.panesList.map((p) => p.id),
+      reorderPanes: (orderedIds): void => {
+        // Build the target order. The primary pane is pinned at index 0 even
+        // if the save lists it elsewhere; non-primary panes are moved to
+        // their saved positions.
+        const seen = new Set<PaneId>();
+        const targetOrder: PaneId[] = [MAIN_PANE_ID];
+        seen.add(MAIN_PANE_ID);
+        for (const id of orderedIds) {
+          if (id === MAIN_PANE_ID || seen.has(id)) {
+            continue;
+          }
+          if (!this.panesById.has(id)) {
+            continue;
+          }
+          targetOrder.push(id);
+          seen.add(id);
+        }
+        // Append any live panes not mentioned in the save in their current
+        // order so we don't accidentally drop them. (Load-side `removePane`
+        // already pruned non-saved non-primary panes earlier.)
+        for (const pane of this.panesList) {
+          if (!seen.has(pane.id)) {
+            targetOrder.push(pane.id);
+            seen.add(pane.id);
+          }
+        }
+        // No-op when already in order.
+        let alreadyOrdered = true;
+        for (let i = 0; i < this.panesList.length; i += 1) {
+          if (this.panesList[i]?.id !== targetOrder[i]) {
+            alreadyOrdered = false;
+            break;
+          }
+        }
+        if (alreadyOrdered) {
+          return;
+        }
+        // Reuse the existing internal reorder transaction so `pane:reorder`
+        // event + paneRoot z-order stay in sync with logical order.
+        let moved: PaneId = targetOrder[1] ?? MAIN_PANE_ID;
+        let fromIndex = 0;
+        let toIndex = 0;
+        for (let i = 1; i < targetOrder.length; i += 1) {
+          const id = targetOrder[i];
+          if (id === undefined) {
+            continue;
+          }
+          const live = this.panesList.findIndex((p) => p.id === id);
+          if (live !== i) {
+            moved = id;
+            fromIndex = live;
+            toIndex = i;
+            break;
+          }
+        }
+        this.applyReorder(targetOrder, moved, fromIndex, toIndex);
+      },
+      removeAllSeries: (): void => {
+        const survivors = [...this.series];
+        for (const s of survivors) {
+          this.removeSeries(s);
+        }
+      },
+      addSeries: (s): void => {
+        this.addSeries(s);
+      },
+      hasPendingDataRequest: (): boolean => this.hasPendingDataRequest(),
+      isDisposed: (): boolean => this.disposed,
+      scheduleFlush: (): void => {
+        this.invalidator.invalidate("viewport");
+        this.invalidator.invalidate("data");
+        this.invalidator.invalidate("layout");
+      },
+      emit: (event, payload): void => { this.emitter.emit(event, payload); },
+      emitPartial: (event, payload): void => { this.emitter.emit(event, payload); },
+    };
+  }
+
+  private buildExportContext(): ExportContext {
+    return {
+      canvasWidth: this.config.snapshot.width,
+      canvasHeight: this.config.snapshot.height,
+      themeText: this.config.snapshot.theme.text,
+      themeBackground: this.config.snapshot.theme.background,
+      stage: this.renderer.app.stage,
+      pixiRenderer: this.renderer.app.renderer as unknown as ExportContext["pixiRenderer"],
+      hideTransientLayers: (): (() => void) => this.hideTransientLayersForExport(),
+      suspendDrawings: () => this.drawingsController.suspendTransients(),
+      resumeDrawings: (token): void => { this.drawingsController.resumeTransients(token); },
+      computeLayoutAndPaint: (cssW, cssH): void => {
+        const prevConfig = this.config;
+        this.config = this.config.withSize(cssW, cssH);
+        try {
+          this.computeLayoutAndPaint(this.allFullPaintReasons(), false);
+        } finally {
+          this.config = prevConfig;
+        }
+      },
+      reflushOriginal: (): void => {
+        this.computeLayoutAndPaint(this.allFullPaintReasons(), true);
+      },
+      emit: (event, payload): void => {
+        // Payloads are typed at the emitter boundary; `emit` here is the
+        // narrow public API surface defined by ExportContext. The cast
+        // is internal-only — `CartaEventMap` keys match the four event
+        // names enumerated in pngExport.ts.
+        switch (event) {
+          case "export:ready":
+            this.emitter.emit(event, payload as CartaEventMap["export:ready"]);
+            break;
+          case "export:deferred":
+            this.emitter.emit(event, payload as CartaEventMap["export:deferred"]);
+            break;
+          case "export:failed":
+            this.emitter.emit(event, payload as CartaEventMap["export:failed"]);
+            break;
+          case "export:size-clamped":
+            this.emitter.emit(event, payload as CartaEventMap["export:size-clamped"]);
+            break;
+        }
+      },
+      isGestureActive: (): boolean => this.isGestureActive(),
+      onIdleOnce: (handler): (() => void) => {
+        this.emitter.once("idle", handler);
+        return (): void => { this.emitter.off("idle", handler); };
+      },
+      isDisposed: (): boolean => this.disposed,
+      logger: this.opts.logger,
+    };
+  }
+
+  /**
+   * Phase 15 Cycle A — visibility-flag swap applied before each
+   * `chart.exportPNG()` off-screen render. Hides crosshair, tracking dot,
+   * selection handles, pane-resize separator hover indicator. Returns
+   * a restore function.
+   */
+  private hideTransientLayersForExport(): () => void {
+    const stage = this.renderer.stage;
+    void stage;
+    const layers = [
+      this.renderer.crosshairLinesLayer,
+      this.renderer.crosshairTagsLayer,
+      this.renderer.drawingsHandlesLayer,
+    ];
+    const prev = layers.map((l) => l.visible);
+    for (const l of layers) {
+      l.visible = false;
+    }
+    return (): void => {
+      for (let i = 0; i < layers.length; i += 1) {
+        const target = layers[i];
+        if (target !== undefined) {
+          target.visible = prev[i] ?? true;
+        }
+      }
+    };
+  }
+
+  /**
+   * Phase 15 Cycle A — DirtyReason superset that forces every painter
+   * (panes, series, drawings, axes, crosshair) to re-run. Used by the
+   * export pipeline + reflushOriginal.
+   */
+  private allFullPaintReasons(): ReadonlySet<DirtyReason> {
+    return new Set<DirtyReason>([
+      "size",
+      "layout",
+      "viewport",
+      "data",
+      "drawings",
+      "theme",
+    ]);
+  }
+
+  /**
+   * Phase 15 Cycle A — apply a theme by name + overrides during load.
+   * Distinct from `applyOptions({theme})` because it must (1) resolve
+   * the named preset (light/dark) before merging overrides and (2)
+   * reset `themeExplicitKeys` to exactly the overrides set, since the
+   * save-state IS the explicit set.
+   */
+  private applyThemeForLoad(
+    name: "light" | "dark" | "custom",
+    overrides: Partial<Theme> | undefined,
+  ): void {
+    // Lazy import to avoid a cycle; the two preset references are
+    // hoisted from the construction path so the chart class already
+    // depends on them.
+    const preset =
+      name === "light"
+        ? LightTheme
+        : name === "dark"
+          ? DarkTheme
+          : this.config.snapshot.theme;
+    const merged: Theme = { ...preset, ...(overrides ?? {}) };
+    this.themeExplicitKeys.clear();
+    if (overrides !== undefined) {
+      for (const k of Object.keys(overrides) as (keyof Theme)[]) {
+        this.themeExplicitKeys.add(k);
+      }
+    }
+    const nextConfig = this.config.withTheme(merged);
+    if (nextConfig !== this.config) {
+      this.config = nextConfig;
+      this.paneHeaderController.cancelDrag();
+      this.invalidator.invalidate("theme");
+    }
   }
 
   /**

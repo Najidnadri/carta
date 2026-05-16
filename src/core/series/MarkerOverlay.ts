@@ -127,6 +127,10 @@ export class MarkerOverlay extends Series {
     this.requestInvalidate();
   }
 
+  getOptions(): Readonly<MarkerOverlayOptions> {
+    return { ...this.opts };
+  }
+
   /** Markers never contribute to auto-scale. */
   priceRangeInWindow(_startTime: Time, _endTime: Time): PriceRange | null {
     return null;

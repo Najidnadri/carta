@@ -62,6 +62,10 @@ export class HeikinAshiSeries extends Series {
     this.requestInvalidate();
   }
 
+  getOptions(): Readonly<HeikinAshiSeriesOptions> {
+    return { ...this.opts };
+  }
+
   setQueryContext(query: SeriesQueryContext): void {
     super.setQueryContext(query);
     this.invalidateCache();

@@ -72,6 +72,10 @@ export class LineSeries extends Series {
     this.requestInvalidate();
   }
 
+  getOptions(): Readonly<LineSeriesOptions> {
+    return { ...this.opts };
+  }
+
   priceRangeInWindow(startTime: Time, endTime: Time): PriceRange | null {
     if (this.query === null) {
       return null;

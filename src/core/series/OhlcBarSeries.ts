@@ -54,6 +54,10 @@ export class OhlcBarSeries extends Series {
     this.requestInvalidate();
   }
 
+  getOptions(): Readonly<OhlcBarSeriesOptions> {
+    return { ...this.opts };
+  }
+
   priceRangeInWindow(startTime: Time, endTime: Time): PriceRange | null {
     if (this.query === null) {
       return null;

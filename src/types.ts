@@ -335,6 +335,84 @@ export interface PaneReorderPayload {
   readonly toIndex: number;
 }
 
+/**
+ * Phase 15 Cycle A — emitted on the first clean `flush()` after a gesture
+ * (pan / pinch / pane-resize drag / pane-header drag / price-axis drag /
+ * drawings drag-or-brush-capture) ends. Used by `chart.exportPNG()` to
+ * defer the off-screen render until the chart's transient interaction
+ * state has settled. Hosts SHOULD use `chart.once('idle', ...)`; subscribing
+ * permanently fires once per gesture end, which is usually undesirable.
+ */
+export interface IdlePayload {
+  readonly timestamp: number;
+}
+
+/**
+ * Phase 15 Cycle A — emitted at the end of a successful `chart.load(state)`
+ * when every channel's `data:request` settled (or the host supplied data)
+ * within `fetchTimeoutMs`. Carries the loaded schemaVersion so multi-version
+ * hosts can branch on it.
+ */
+export interface StateLoadedPayload {
+  readonly schemaVersion: number;
+}
+
+/**
+ * Phase 15 Cycle A — emitted at the end of `chart.load(state)` when the
+ * `fetchTimeoutMs` elapsed before pending `data:request`s settled. The
+ * chart is still in a usable state — visible bars are whatever the host
+ * supplied during the timeout window — but some panes may render empty.
+ */
+export interface StatePartialLoadedPayload {
+  readonly schemaVersion: number;
+  readonly reason: "timeout";
+}
+
+/**
+ * Phase 15 Cycle A — emitted on a successful `chart.exportPNG()` completion.
+ * `bytes` is the resulting Blob's size; `width` / `height` are the actual
+ * texel dimensions of the rendered image (post-MAX_TEXTURE_SIZE clamp).
+ */
+export interface ExportReadyPayload {
+  readonly width: number;
+  readonly height: number;
+  readonly bytes: number;
+}
+
+/**
+ * Phase 15 Cycle A — emitted when `chart.exportPNG()` cannot run immediately
+ * because the chart is mid-gesture or an in-flight `chart.load()` is mutating
+ * state. The promise stays pending until the chart settles or rejects with
+ * `EBUSY` after `deferTimeoutMs`.
+ */
+export interface ExportDeferredPayload {
+  readonly reason: "gesture" | "load-in-flight";
+}
+
+/**
+ * Phase 15 Cycle A — emitted when `chart.exportPNG()` rejects. `code:
+ * 'EBUSY'` is the post-deferral timeout; `'CANCELLED'` is the
+ * `chart.destroy()` path; `'GENERIC'` covers internal failures (extract,
+ * toBlob nulling, etc.).
+ */
+export interface ExportFailedPayload {
+  readonly code: "EBUSY" | "CANCELLED" | "GENERIC";
+  readonly message: string;
+}
+
+/**
+ * Phase 15 Cycle A — emitted when the requested export dimensions exceed
+ * the GPU's `MAX_TEXTURE_SIZE` (16384 fallback on WebGPU contexts where
+ * the GL parameter isn't reachable). The export proceeds at the clamped
+ * dimensions; this event surfaces the resolution loss to hosts that want
+ * to warn the user.
+ */
+export interface ExportSizeClampedPayload {
+  readonly requested: { readonly w: number; readonly h: number };
+  readonly clamped: { readonly w: number; readonly h: number };
+  readonly max: number;
+}
+
 export interface CartaEventMap extends Record<string, unknown> {
   readonly "window:change": ChartWindow;
   readonly "interval:change": IntervalChange;
@@ -356,6 +434,13 @@ export interface CartaEventMap extends Record<string, unknown> {
   readonly "drawing:edit": DrawingEditPayload;
   readonly "drawing:contextmenu": DrawingContextMenuPayload;
   readonly "keyboard:hotkey": KeyboardHotkeyPayload;
+  readonly idle: IdlePayload;
+  readonly "state:loaded": StateLoadedPayload;
+  readonly "state:partial-loaded": StatePartialLoadedPayload;
+  readonly "export:ready": ExportReadyPayload;
+  readonly "export:deferred": ExportDeferredPayload;
+  readonly "export:failed": ExportFailedPayload;
+  readonly "export:size-clamped": ExportSizeClampedPayload;
 }
 
 export type EventKey = keyof CartaEventMap;
@@ -539,6 +624,21 @@ export interface ViewportOptions {
   readonly kinetic?: KineticOptions;
 }
 
+/**
+ * Phase 15 Cycle A — persistence-related callbacks supplied by the host at
+ * construction / via `applyOptions`. Carta has no built-in concept of
+ * "symbol" (the chart only knows about channels) — `getSymbol` lets a host
+ * stamp a human-readable symbol per channel into the saved state so a
+ * permalink / save-file can be deserialized into the right market.
+ *
+ * If `getSymbol` is omitted, `chart.save()` simply leaves the
+ * `primarySymbol` field unset. Throwing handlers do NOT corrupt save —
+ * the field is omitted with a one-shot `logger.warn`.
+ */
+export interface PersistenceOptions {
+  readonly getSymbol?: (channelId: string) => string | undefined;
+}
+
 // ─── Public options ────────────────────────────────────────────────────────
 export interface TimeSeriesChartOptions {
   readonly container: HTMLElement;
@@ -556,11 +656,13 @@ export interface TimeSeriesChartOptions {
   readonly priceAxis?: PriceAxisOptions;
   readonly priceFormatter?: PriceFormatter;
   readonly data?: DataOptions;
+  readonly persistence?: PersistenceOptions;
 }
 
 export interface ApplyOptions {
   readonly theme?: Partial<Theme>;
   readonly priceFormatter?: PriceFormatter;
+  readonly persistence?: PersistenceOptions;
 }
 
 // ─── Series options ────────────────────────────────────────────────────────

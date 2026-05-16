@@ -185,6 +185,10 @@ export class BaselineSeries extends Series {
     this.requestInvalidate();
   }
 
+  getOptions(): Readonly<BaselineSeriesOptions> {
+    return { ...this.opts };
+  }
+
   priceRangeInWindow(startTime: Time, endTime: Time): PriceRange | null {
     if (this.query === null) {
       return null;

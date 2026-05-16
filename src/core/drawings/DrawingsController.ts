@@ -100,6 +100,20 @@ import type {
   VisibleHandleInfo,
 } from "./devHooks.js";
 
+/**
+ * Phase 15 Cycle A — opaque snapshot returned by
+ * `DrawingsController.suspendTransients` and consumed by `resumeTransients`.
+ * Hosts treat it as a token; the field shape is internal but the type is
+ * exported so the callsite (`pngExport.ts`) can store it without `any`.
+ */
+export interface TransientSuspendToken {
+  readonly selectedIds: readonly DrawingId[];
+  readonly primarySelectedId: DrawingId | null;
+  readonly hoveredId: DrawingId | null;
+  readonly hoveredHandle: HandleKey | null;
+  readonly cursorLocal: { readonly x: number; readonly y: number } | null;
+}
+
 const SOFT_DRAWING_LIMIT = 500;
 const DRAG_THRESHOLD_PX = 6;
 /**
@@ -3306,6 +3320,66 @@ export class DrawingsController {
       }
     }
     return z + 1;
+  }
+
+  /**
+   * Phase 15 Cycle A — true when any in-flight drawing interaction
+   * (create / drag / brush capture / marquee select) is alive. Combined
+   * with viewport + pane gesture flags by `chart.isGestureActive()`.
+   */
+  isInteracting(): boolean {
+    return (
+      this.dragging !== null ||
+      this.brushCapture !== null ||
+      this.creating !== null ||
+      this.marqueeState !== null
+    );
+  }
+
+  /**
+   * Phase 15 Cycle A — clear every transient render-time piece of state
+   * (selection halos, hover highlights, ghost preview, marquee, brush
+   * capture) so the next render paints the layer with only the committed
+   * shapes. Used by `chart.exportPNG()` to produce a screenshot free of
+   * crosshair / handle / hover noise.
+   *
+   * Returns a token that must be passed back to `resumeTransients` to
+   * restore the saved state. The DOM text editor (if open) is suspended
+   * in-place — its element is hidden but not unmounted, so the user's
+   * unfinished text survives the export round-trip.
+   */
+  suspendTransients(): TransientSuspendToken {
+    const token: TransientSuspendToken = {
+      selectedIds: Array.from(this.selectedIds),
+      primarySelectedId: this.primarySelectedId,
+      hoveredId: this.hoveredId,
+      hoveredHandle: this.hoveredHandle,
+      cursorLocal: this.cursorLocal,
+    };
+    this.selectedIds.clear();
+    this.primarySelectedId = null;
+    this.hoveredId = null;
+    this.hoveredHandle = null;
+    this.cursorLocal = null;
+    return token;
+  }
+
+  /**
+   * Phase 15 Cycle A — restore state captured by `suspendTransients`.
+   * Idempotent for an already-disposed controller (silent no-op).
+   */
+  resumeTransients(token: TransientSuspendToken): void {
+    if (this.destroyed) {
+      return;
+    }
+    this.selectedIds.clear();
+    for (const id of token.selectedIds) {
+      this.selectedIds.add(id);
+    }
+    this.primarySelectedId = token.primarySelectedId;
+    this.hoveredId = token.hoveredId;
+    this.hoveredHandle = token.hoveredHandle;
+    this.cursorLocal = token.cursorLocal;
   }
 
   private takeSnapshotInternal(): DrawingsSnapshot {

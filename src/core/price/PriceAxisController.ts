@@ -161,6 +161,15 @@ export class PriceAxisController {
     this.hit.on("pointerdown", this.onPointerDown);
   }
 
+  /**
+   * Phase 15 Cycle A — public flag used by `chart.isGestureActive()`. True
+   * between `pointerdown` on the strip and the matching `pointerup` /
+   * `pointercancel`.
+   */
+  isDragging(): boolean {
+    return this.drag !== null;
+  }
+
   /** Refresh hit-rect after a resize. Caller passes the current plot rect. */
   syncHitArea(): void {
     if (this.disposed) {

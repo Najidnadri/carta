@@ -130,6 +130,16 @@ export abstract class Series implements PriceRangeProvider {
   abstract applyOptions(patch: object): void;
 
   /**
+   * Phase 15 Cycle A — snapshot of the series' current options. Used by
+   * `chart.save()` to serialize a series into a `SeriesSaveEntry` whose
+   * `options` field round-trips through the concrete series'
+   * constructor. Implementations return a shallow clone of their internal
+   * `this.opts` so post-call mutation by the caller doesn't corrupt the
+   * series' state.
+   */
+  abstract getOptions(): Readonly<object>;
+
+  /**
    * Shallow-merge `patch` into `current` while pinning fields that must not
    * change after construction (`channel`, and `priceReference.channel` for
    * marker overlays). Returns a new options object — the caller assigns it

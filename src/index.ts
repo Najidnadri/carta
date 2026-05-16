@@ -249,3 +249,26 @@ export type {
   PitchforkGeom,
 } from "./core/drawings/project.js";
 export { computePitchforkCenterlineBase, GANN_FAN_SLOPES } from "./core/drawings/pitchfork.js";
+export {
+  CARTA_SCHEMA_VERSION,
+  CartaSchemaError,
+  ExportError,
+  OperationCanceledError,
+  SERIES_KINDS,
+} from "./core/persistence/types.js";
+export type {
+  ChartSaveState,
+  LoadOptions,
+  PaneSaveEntry,
+  PngExportOptions,
+  SeriesKind,
+  SeriesSaveEntry,
+  WatermarkConfig,
+} from "./core/persistence/types.js";
+export { migrate } from "./core/persistence/migrate.js";
+export {
+  isChartSaveState,
+  isPaneSaveEntry,
+  isSeriesSaveEntry,
+  isWatermarkConfig,
+} from "./core/persistence/validate.js";

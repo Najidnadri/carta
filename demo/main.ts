@@ -1143,6 +1143,117 @@ async function main(): Promise<void> {
   document.getElementById("reset-view")?.addEventListener("click", () => {
     chart?.setWindow(initialWindowInput);
   });
+
+  // ─── Phase 15 Cycle A — save / load / screenshot wiring ──────────────────
+  const persistencePanel = document.getElementById("persistence-panel");
+  const persistenceTextarea = document.getElementById("persistence-textarea") as HTMLTextAreaElement | null;
+  const persistenceStatus = document.getElementById("persistence-status");
+  const persistenceTitle = document.getElementById("persistence-title");
+  const screenshotPreviewRow = document.getElementById("screenshot-preview-row");
+  const screenshotPreview = document.getElementById("screenshot-preview") as HTMLImageElement | null;
+  const persistenceClose = document.getElementById("persistence-close");
+  let lastScreenshotUrl: string | null = null;
+
+  const openPersistencePanel = (title: string): void => {
+    if (persistencePanel === null || persistenceTitle === null) {
+      return;
+    }
+    persistenceTitle.textContent = title;
+    persistencePanel.style.display = "flex";
+    persistencePanel.setAttribute("data-open", "true");
+  };
+  const closePersistencePanel = (): void => {
+    if (persistencePanel === null) {
+      return;
+    }
+    persistencePanel.style.display = "none";
+    persistencePanel.setAttribute("data-open", "false");
+  };
+  persistenceClose?.addEventListener("click", closePersistencePanel);
+
+  const setPersistenceStatus = (msg: string): void => {
+    if (persistenceStatus !== null) {
+      persistenceStatus.textContent = msg;
+    }
+  };
+
+  document.getElementById("layout-save")?.addEventListener("click", () => {
+    if (chart === null || persistenceTextarea === null) {
+      return;
+    }
+    try {
+      const state = chart.save();
+      const json = JSON.stringify(state, null, 2);
+      persistenceTextarea.value = json;
+      openPersistencePanel("Saved layout (JSON)");
+      if (screenshotPreviewRow !== null) {
+        screenshotPreviewRow.style.display = "none";
+      }
+      setPersistenceStatus(`✓ saved · ${String(json.length)} bytes · ${String(state.series.length)} series · ${String(state.panes?.length ?? 0)} panes · ${String(state.drawings?.drawings.length ?? 0)} drawings`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setPersistenceStatus(`✗ save failed: ${msg}`);
+    }
+  });
+
+  document.getElementById("layout-load")?.addEventListener("click", () => {
+    if (chart === null || persistenceTextarea === null) {
+      return;
+    }
+    const raw = persistenceTextarea.value.trim();
+    if (raw.length === 0) {
+      setPersistenceStatus("✗ load: textarea is empty — paste a saved-state JSON first");
+      openPersistencePanel("Load layout");
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setPersistenceStatus(`✗ load: JSON parse failed: ${msg}`);
+      return;
+    }
+    openPersistencePanel("Loading layout…");
+    setPersistenceStatus("⏳ load in progress");
+    void chart
+      .load(parsed)
+      .then(() => {
+        setPersistenceStatus(`✓ loaded`);
+      })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        setPersistenceStatus(`✗ load failed: ${msg}`);
+      });
+  });
+
+  document.getElementById("screenshot")?.addEventListener("click", () => {
+    if (chart === null) {
+      return;
+    }
+    openPersistencePanel("Capturing screenshot…");
+    setPersistenceStatus("⏳ exportPNG in progress");
+    void chart
+      .exportPNG()
+      .then((blob) => {
+        if (lastScreenshotUrl !== null) {
+          URL.revokeObjectURL(lastScreenshotUrl);
+        }
+        lastScreenshotUrl = URL.createObjectURL(blob);
+        if (screenshotPreview !== null && screenshotPreviewRow !== null) {
+          screenshotPreview.src = lastScreenshotUrl;
+          screenshotPreviewRow.style.display = "flex";
+        }
+        if (persistenceTextarea !== null) {
+          persistenceTextarea.value = "";
+        }
+        setPersistenceStatus(`✓ screenshot · ${String(blob.size)} bytes · ${blob.type}`);
+      })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        setPersistenceStatus(`✗ screenshot failed: ${msg}`);
+      });
+  });
   const loadSyntheticData = (): void => {
     if (chart === null) {
       return;
