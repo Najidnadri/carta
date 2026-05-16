@@ -2922,7 +2922,7 @@ export class DrawingsController {
       return this.iconAtlas;
     }
     const targetBucket = brushDprBucket(dpr);
-    if (this.iconAtlas !== null && this.iconAtlas.dprBucket === targetBucket) {
+    if (this.iconAtlas?.dprBucket === targetBucket) {
       return this.iconAtlas;
     }
     const oldAtlas = this.iconAtlas;

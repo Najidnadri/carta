@@ -1,6 +1,6 @@
 ---
 name: masterplan-continue
-description: Drive the next phase of the Carta charting library's master plan end-to-end — read the master plan, confirm scope with the user, create a phase plan, implement it, guard patterns with ESLint, design worst-case test scenarios, run Playwright visual/interaction tests across mobile/tablet/laptop viewports, and update trackers. Use this skill whenever the user says anything like "continue with the masterplan", "let's move on to the next phase", "resume the plan", "work on the next phase of Carta", "pick up where we left off on the chart library", "progress the plan", or any phrasing that implies advancing the master plan in `plans/master-plan.md`. Trigger aggressively — this workflow is carta-specific and the user expects the full orchestrated loop (plan → approve → implement → test), not a quick edit.
+description: Drive the next phase of the Carta charting library's master plan end-to-end — read the master plan, confirm scope with the user, create a phase plan, implement it, guard patterns with oxlint (type-aware), design worst-case test scenarios, run Playwright visual/interaction tests across mobile/tablet/laptop viewports, and update trackers. Use this skill whenever the user says anything like "continue with the masterplan", "let's move on to the next phase", "resume the plan", "work on the next phase of Carta", "pick up where we left off on the chart library", "progress the plan", or any phrasing that implies advancing the master plan in `plans/master-plan.md`. Trigger aggressively — this workflow is carta-specific and the user expects the full orchestrated loop (plan → approve → implement → test), not a quick edit.
 ---
 
 # Carta master-plan continuation
@@ -92,11 +92,11 @@ Now you can edit. Work in small, verifiable chunks. A few rules specific to Cart
 
 When you finish each chunk, run the relevant typecheck or vitest spec locally before moving on. Don't batch all the testing to the end.
 
-### Step 7 — ESLint guard
+### Step 7 — Lint guard (oxlint type-aware)
 
-Run `pnpm lint`. If it fails:
-- Fix the actual issue, not the rule. (Disabling a rule inline is a last resort and must be justified in the plan's "key decisions".)
-- If the lint config itself is missing a rule that would have caught the issue, flag it to the user and offer to add the rule.
+Run `pnpm lint`. This invokes `oxlint --type-aware`, which covers both syntactic rules and the full type-aware rule set (via `oxlint-tsgolint`) — the same surface the old ESLint pass enforced. If it fails:
+- Fix the actual issue, not the rule. Disabling inline (`// oxlint-disable-next-line <rule>`) is a last resort and must be justified in the plan's "key decisions".
+- If the lint config itself is missing a rule that would have caught the issue, flag it to the user and offer to add the rule to `.oxlintrc.json`.
 
 Run `pnpm typecheck` as well — TypeScript errors count as lint failures for our purposes.
 
@@ -147,7 +147,7 @@ Then summarize for the user: what changed, what's still outstanding in this phas
 - Research: [.research/pixijs-charting-guide.md](../../../.research/pixijs-charting-guide.md), [.research/advanced-features.md](../../../.research/advanced-features.md)
 - PixiJS docs: https://pixijs.com/llms.txt
 - Package manager: **pnpm** (never npm)
-- Lint: `pnpm lint`
+- Lint: `pnpm lint` (runs `oxlint --type-aware`; config in `.oxlintrc.json`)
 - Typecheck: `pnpm typecheck`
 - Tests: `pnpm test`
 - Dev server: `pnpm dev`

@@ -524,12 +524,12 @@ function parsePositionLike(
 
 function parseLongPosition(raw: Record<string, unknown>): LongPositionDrawing | null {
   const result = parsePositionLike(raw, "longPosition");
-  return result !== null && result.kind === "longPosition" ? result : null;
+  return result?.kind === "longPosition" ? result : null;
 }
 
 function parseShortPosition(raw: Record<string, unknown>): ShortPositionDrawing | null {
   const result = parsePositionLike(raw, "shortPosition");
-  return result !== null && result.kind === "shortPosition" ? result : null;
+  return result?.kind === "shortPosition" ? result : null;
 }
 
 function parseTextDrawing(raw: Record<string, unknown>): TextDrawing | null {

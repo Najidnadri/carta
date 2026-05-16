@@ -13,7 +13,6 @@ vi.mock("pixi.js", async () => {
     get width(): number {
       return this.text.length * 6;
     }
-    // eslint-disable-next-line @typescript-eslint/class-literal-property-style
     get height(): number {
       return 11;
     }

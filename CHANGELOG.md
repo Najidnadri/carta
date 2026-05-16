@@ -1,5 +1,29 @@
 ## [Unreleased]
 
+### Changed
+
+- **Tooling — replace ESLint with oxlint (type-aware).** Deletes
+  `eslint.config.js`, drops `@eslint/js`, `eslint`, `globals`,
+  `typescript-eslint`, `@typescript-eslint/eslint-plugin`, and
+  `@typescript-eslint/parser`; adds `oxlint` and `oxlint-tsgolint`. New
+  `.oxlintrc.json` ports every prior rule 1:1 — syntactic rules via the
+  built-in `eslint` / `typescript` plugins, type-aware rules via tsgolint —
+  with the same severities, options, and `**/*.test.ts` / `e2e/**`
+  overrides. All 7 default rule categories (`correctness`, `suspicious`,
+  `perf`, `pedantic`, `style`, `nursery`, `restriction`) are set to `off`
+  so only the curated allow-list fires; matches the prior ESLint surface
+  byte-for-byte (expanding categories is a separate, scoped decision).
+  `pnpm lint` rewired to `oxlint --type-aware`; runtime drops from ~6 s to
+  ~1 s on 148 files. New `e2e/tsconfig.json` shim (extends
+  `../tsconfig.e2e.json`) so tsgolint — which auto-discovers the nearest
+  `tsconfig.json` per file and does not honour `--tsconfig` — can resolve
+  the e2e program. Fixes 3 real `prefer-optional-chain` violations the old
+  ESLint pass had silently missed (`drawings/parsers.ts:527`, `:532`,
+  `DrawingsController.ts:2925`) and removes 3 stale
+  `// eslint-disable-next-line` comments from tests. The
+  `masterplan-continue` skill's frontmatter, Step 7 ("Lint guard (oxlint
+  type-aware)"), and Quick Reference are updated to match.
+
 ### Added
 
 - **Phase 12 — testing infrastructure (single cycle).** Closes the v0.1
@@ -30,8 +54,6 @@
   `tsc -p tsconfig.e2e.json` so the e2e tree stays type-clean. ESLint config
   gains an `e2e/**` override (relaxed `unsafe-*` rules; e2e cannot escape the
   full strict-typed-checked baseline).
-
-### Changed
 
 - `vitest` bumped to 4.1.5 (peer-aligned with `@vitest/coverage-v8` 4.1.5).
   No behavioral change.
