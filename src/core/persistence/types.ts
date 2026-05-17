@@ -92,8 +92,12 @@ export interface PaneSaveEntry {
 }
 
 /**
- * Text-or-image watermark configuration. Cycle A supports the text form
- * only; `image` is reserved for cycle C (`Assets.load` integration).
+ * Watermark configuration for `chart.exportPNG`. Cycle A landed the text
+ * branch; cycle C added the image branch (loaded via PixiJS `Assets.load`).
+ *
+ * If both `text` and `image` are supplied, the image branch wins —
+ * traders who paste a logo URL almost always mean it as the primary mark
+ * and text as a fallback.
  */
 export interface WatermarkConfig {
   readonly text?: string;
@@ -102,8 +106,17 @@ export interface WatermarkConfig {
   readonly opacity?: number;
   readonly fontSize?: number;
   readonly fontFamily?: string;
-  /** Cycle C — reserved. */
-  readonly image?: string;
+  /**
+   * Cycle C — image watermark. `url` is the only required field; sizing
+   * defaults to a fit-inside-25%-of-canvas box, preserving intrinsic
+   * aspect ratio.
+   */
+  readonly image?: {
+    readonly url: string;
+    readonly scale?: number;
+    readonly maxWidth?: number;
+    readonly maxHeight?: number;
+  };
 }
 
 /**
@@ -192,8 +205,8 @@ export class CartaSchemaError extends Error {
  */
 export class ExportError extends Error {
   override readonly name = "ExportError";
-  readonly code: "EBUSY" | "CANCELLED" | "GENERIC";
-  constructor(code: "EBUSY" | "CANCELLED" | "GENERIC", message: string) {
+  readonly code: "EBUSY" | "CANCELLED" | "GENERIC" | "WATERMARK_FAILED";
+  constructor(code: "EBUSY" | "CANCELLED" | "GENERIC" | "WATERMARK_FAILED", message: string) {
     super(message);
     this.code = code;
   }
@@ -207,5 +220,66 @@ export class OperationCanceledError extends Error {
   override readonly name = "OperationCanceledError";
   constructor(message = "operation canceled") {
     super(message);
+  }
+}
+
+// ─── Phase 15 Cycle B — CSV export + URL permalink ─────────────────────────
+
+/** Time-format mode for `chart.exportCSV()`. */
+export type CsvTimeFormat = "iso" | "epoch-ms";
+
+/**
+ * Options accepted by `chart.exportCSV(opts?)`. All fields are optional and
+ * have Excel-friendly defaults: comma delimiter, period decimal, CRLF line
+ * endings, UTF-8 BOM, ISO time format, precision 2.
+ *
+ * `channelId` defaults to the chart's primary channel (the first OHLC-kind
+ * series or, failing that, the first registered series). `range` defaults to
+ * the chart's current visible window. Marker channels throw synchronously
+ * with `ExportError('GENERIC', ...)` — CSV is OHLC/point only.
+ */
+export interface CsvExportOptions {
+  readonly channelId?: string;
+  readonly range?: { readonly startTime: number; readonly endTime: number };
+  readonly timeFormat?: CsvTimeFormat;
+  readonly decimal?: "." | ",";
+  readonly delimiter?: "," | ";" | "\t";
+  readonly precision?: number;
+  readonly includeBOM?: boolean;
+  readonly lineEnding?: "\r\n" | "\n";
+}
+
+/** Tier discriminator for `chart.permalink({tier})`. `'auto'` is the default. */
+export type PermalinkTier = "minimal" | "full";
+
+/**
+ * Options accepted by `chart.permalink(opts?)`. When `tier` is omitted (or
+ * `'auto'`), Carta picks `'minimal'` for "shareable control protocol" states
+ * (≤ 1 series, no drawings, no extra panes, theme is a preset, no overrides)
+ * and `'full'` otherwise — the trader who hits Share with 30 drawings gets a
+ * Tier 2 link instead of silently losing them.
+ *
+ * `maxEncodedLength` caps the encoded fragment length; encoder throws
+ * `PermalinkTooLargeError` past the limit. Default 8192 matches the RFC-7230
+ * URL-length guidance.
+ */
+export interface PermalinkOptions {
+  readonly tier?: PermalinkTier | "auto";
+  readonly maxEncodedLength?: number;
+}
+
+/**
+ * Thrown by `chart.permalink()` when the encoded Tier 2 fragment exceeds the
+ * configured limit. Surfaces the actual length + the limit so hosts can
+ * decide whether to retry with a trimmed state or warn the user.
+ */
+export class PermalinkTooLargeError extends Error {
+  override readonly name = "PermalinkTooLargeError";
+  readonly encodedLength: number;
+  readonly limit: number;
+  constructor(encodedLength: number, limit: number, message?: string) {
+    super(message ?? `permalink ${encodedLength} chars exceeds limit ${limit}`);
+    this.encodedLength = encodedLength;
+    this.limit = limit;
   }
 }

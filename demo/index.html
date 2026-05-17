@@ -435,11 +435,26 @@
         <button id="move-zscore-top" data-testid="move-zscore-top" type="button" title="Phase 14 Cycle B — pane.moveTo(1)" style="background:var(--button-bg);color:var(--fg);border:1px solid var(--button-border);border-radius:4px;padding:4px 10px;font-size:12px;">
           Z-score → top
         </button>
-        <fieldset id="persistence-toolbar" style="border:1px solid var(--button-border);border-radius:4px;padding:4px 6px;display:inline-flex;gap:4px;align-items:center;">
+        <fieldset id="persistence-toolbar" style="border:1px solid var(--button-border);border-radius:4px;padding:4px 6px;display:inline-flex;flex-wrap:wrap;gap:4px;row-gap:6px;align-items:center;">
           <legend style="font-size:10px;color:var(--muted);padding:0 4px;text-transform:uppercase;letter-spacing:0.06em;">Save / Export</legend>
           <button id="layout-save" data-testid="layout-save" type="button" title="chart.save() — capture current layout to JSON">Save layout</button>
           <button id="layout-load" data-testid="layout-load" type="button" title="chart.load(state) — restore saved layout">Load layout</button>
           <button id="screenshot" data-testid="screenshot" type="button" title="chart.exportPNG() — render an off-screen PNG screenshot">Screenshot</button>
+          <button id="export-csv" data-testid="export-csv" type="button" title="chart.exportCSV() — encode visible bars as CSV">Export CSV</button>
+          <button id="permalink" data-testid="permalink" type="button" title="chart.permalink() — encode state as a shareable URL fragment">Permalink</button>
+          <button id="permalink-load" data-testid="permalink-load" type="button" title="TimeSeriesChart.fromPermalink() — load chart from fragment in textarea">Permalink load</button>
+        </fieldset>
+        <fieldset id="catalog-fieldset" style="border:1px solid var(--button-border);border-radius:4px;padding:4px 6px;display:inline-flex;flex-wrap:wrap;gap:4px;row-gap:6px;align-items:center;">
+          <legend style="font-size:10px;color:var(--muted);padding:0 4px;text-transform:uppercase;letter-spacing:0.06em;">Catalog (IndexedDB)</legend>
+          <select id="catalog-select" data-testid="catalog-select" title="Saved layouts (IndexedDB)" style="background:var(--bg);color:var(--fg);border:1px solid var(--button-border);border-radius:3px;padding:3px 6px;font-size:12px;min-width:160px;">
+            <option value="">(none)</option>
+          </select>
+          <button id="catalog-save-new" data-testid="catalog-save-new" type="button" title="Save current layout as a new entry">Save as new</button>
+          <button id="catalog-overwrite" data-testid="catalog-overwrite" type="button" title="Overwrite the selected entry">Overwrite</button>
+          <button id="catalog-load" data-testid="catalog-load" type="button" title="Load the selected entry">Load</button>
+          <button id="catalog-rename" data-testid="catalog-rename" type="button" title="Rename the selected entry">Rename</button>
+          <button id="catalog-delete" data-testid="catalog-delete" type="button" title="Delete the selected entry">Delete</button>
+          <img id="catalog-thumb" data-testid="catalog-thumb" alt="Selected layout thumbnail" style="display:none;max-width:120px;max-height:60px;border:1px solid var(--button-border);border-radius:3px;background:#0006;" />
         </fieldset>
         <div id="readout">
           <span>start <b id="readout-start">—</b></span>

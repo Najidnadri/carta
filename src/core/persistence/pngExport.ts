@@ -22,7 +22,10 @@ import type { Container, Renderer as PixiRenderer } from "pixi.js";
 import {
   ExportError,
   type PngExportOptions,
+  type WatermarkConfig,
 } from "./types.js";
+import { WatermarkLayer } from "./WatermarkLayer.js";
+import { ImageWatermarkLayer } from "./ImageWatermarkLayer.js";
 import type { TransientSuspendToken } from "../drawings/DrawingsController.js";
 
 const DEFAULT_SCALE = 2;
@@ -55,6 +58,8 @@ export interface ExportContext {
   /** Suspend drawings transient state (selection halo, ghost, hover). */
   suspendDrawings(): TransientSuspendToken;
   resumeDrawings(token: TransientSuspendToken): void;
+  /** Cycle C — mount a watermark layer on the stage; returns an unmount callback. */
+  mountWatermarkChild(child: Container): () => void;
   /** Run chart layout + paint into the stage at the supplied CSS dims. */
   computeLayoutAndPaint(cssWidth: number, cssHeight: number): void;
   /** Re-flush the chart onto the live canvas at the original dims. */
@@ -244,6 +249,8 @@ export async function exportChartPng(
   const prevResolution = ctx.pixiRenderer.resolution;
   let rt: RenderTexture | null = null;
   let blob: Blob;
+  let watermarkLayer: WatermarkLayer | ImageWatermarkLayer | null = null;
+  let unmountWatermark: (() => void) | null = null;
   try {
     if (ctx.isDisposed()) {
       throw new ExportError("CANCELLED", "chart disposed before render");
@@ -256,6 +263,16 @@ export async function exportChartPng(
     ctx.computeLayoutAndPaint(w, h);
     if (ctx.isDisposed()) {
       throw new ExportError("CANCELLED", "chart disposed during layout");
+    }
+    if (opts.watermark !== undefined) {
+      const built = await buildWatermark(opts.watermark, w, h, ctx.themeText);
+      if (built !== null) {
+        watermarkLayer = built;
+        unmountWatermark = ctx.mountWatermarkChild(built);
+      }
+    }
+    if (ctx.isDisposed()) {
+      throw new ExportError("CANCELLED", "chart disposed during watermark mount");
     }
     ctx.pixiRenderer.render({
       container: ctx.stage,
@@ -289,14 +306,27 @@ export async function exportChartPng(
       throw cancelled;
     }
     const message = err instanceof Error ? err.message : "unknown export failure";
-    const code = err instanceof ExportError ? err.code : "GENERIC";
+    // Map a CORS-tainted watermark image's `SecurityError` at extract-time
+    // to WATERMARK_FAILED so the host sees a specific code.
+    let code: "EBUSY" | "CANCELLED" | "GENERIC" | "WATERMARK_FAILED" =
+      err instanceof ExportError ? err.code : "GENERIC";
+    if (code === "GENERIC" && watermarkLayer !== null && (err as { name?: string } | null)?.name === "SecurityError") {
+      code = "WATERMARK_FAILED";
+    }
     ctx.emit("export:failed", { code, message });
-    throw err;
+    if (err instanceof ExportError) { throw err; }
+    throw new ExportError(code, message);
   } finally {
     // Cleanup must not itself throw — wrap each op. After `chart.destroy()`,
     // the renderer's GL state is null and `RenderTexture.destroy` /
     // `ctx.pixiRenderer.*` reads will throw. Swallow silently — the host
     // is already in the destroy path.
+    if (unmountWatermark !== null) {
+      try { unmountWatermark(); } catch { /* ignore */ }
+    }
+    if (watermarkLayer !== null) {
+      try { watermarkLayer.destroy(); } catch { /* ignore */ }
+    }
     if (rt !== null) {
       try {
         rt.destroy(true);
@@ -331,6 +361,43 @@ export async function exportChartPng(
   }
   ctx.emit("export:ready", { width: w, height: h, bytes: blob.size });
   return blob;
+}
+
+async function buildWatermark(
+  config: WatermarkConfig,
+  canvasWidth: number,
+  canvasHeight: number,
+  themeText: number,
+): Promise<WatermarkLayer | ImageWatermarkLayer | null> {
+  // Image branch wins when both are supplied.
+  if (config.image !== undefined) {
+    const layer = new ImageWatermarkLayer();
+    const imgOpts = config.image;
+    try {
+      await layer.load(imgOpts.url, canvasWidth, canvasHeight, {
+        ...(config.position !== undefined ? { position: config.position } : {}),
+        ...(config.opacity !== undefined ? { opacity: config.opacity } : {}),
+        ...(imgOpts.scale !== undefined ? { scale: imgOpts.scale } : {}),
+        ...(imgOpts.maxWidth !== undefined ? { maxWidth: imgOpts.maxWidth } : {}),
+        ...(imgOpts.maxHeight !== undefined ? { maxHeight: imgOpts.maxHeight } : {}),
+      });
+    } catch (err: unknown) {
+      try { layer.destroy(); } catch { /* ignore */ }
+      // Wrap PixiJS internal failure modes in a host-friendly message so
+      // the trader sees "what went wrong" not "Cannot read property X of
+      // null". Common causes: 404 (Loader rejects), DNS fail (Loader
+      // rejects), CORS-no-CORS-headers (browser rejects Image.decode for
+      // some origins), decode failure (corrupt body).
+      const raw = err instanceof Error ? err.message : String(err);
+      const friendly = `watermark image failed to load from "${imgOpts.url}" — check the URL is reachable and serves CORS headers if cross-origin (raw: ${raw})`;
+      throw new ExportError("WATERMARK_FAILED", friendly);
+    }
+    return layer;
+  }
+  if (typeof config.text === "string" && config.text.length > 0) {
+    return new WatermarkLayer(config, canvasWidth, canvasHeight, themeText);
+  }
+  return null;
 }
 
 void (null as unknown as PixiRenderer);

@@ -16,6 +16,11 @@ import {
   MarkerOverlay,
   OhlcBarSeries,
   TimeSeriesChart,
+  indexedDbAdapter,
+  type ChartId,
+  type ChartMetadata,
+  type ChartSaveState,
+  type ChartStorageAdapter,
   type KeyboardHotkeyPayload,
   type MagnetMode,
   type BaselineMode,
@@ -1227,6 +1232,140 @@ async function main(): Promise<void> {
       });
   });
 
+  // ─── Phase 15 Cycle B — Esc closes panel + click-outside dismiss ────────
+  const isPanelOpen = (): boolean =>
+    persistencePanel?.getAttribute("data-open") === "true";
+  document.addEventListener("keydown", (ev: KeyboardEvent) => {
+    if (ev.key === "Escape" && isPanelOpen()) {
+      closePersistencePanel();
+    }
+  });
+  document.addEventListener("pointerdown", (ev: PointerEvent) => {
+    if (!isPanelOpen() || persistencePanel === null) {
+      return;
+    }
+    const target = ev.target;
+    if (!(target instanceof Node)) {
+      return;
+    }
+    if (persistencePanel.contains(target)) {
+      return;
+    }
+    // Click on a toolbar button that operates on the panel must not dismiss
+    // it. Toolbar buttons inside `#persistence-toolbar` re-open the panel
+    // every click, so suppressing the close here is the cleaner choice.
+    const toolbar = document.getElementById("persistence-toolbar");
+    if (toolbar?.contains(target) === true) {
+      return;
+    }
+    closePersistencePanel();
+  });
+
+  document.getElementById("export-csv")?.addEventListener("click", () => {
+    if (chart === null || persistenceTextarea === null) {
+      return;
+    }
+    try {
+      const csv = chart.exportCSV();
+      persistenceTextarea.value = csv;
+      openPersistencePanel("Exported CSV");
+      if (screenshotPreviewRow !== null) {
+        screenshotPreviewRow.style.display = "none";
+      }
+      // Row count = lines minus header. Strip BOM for the count display.
+      const stripped = csv.startsWith("﻿") ? csv.slice(1) : csv;
+      const lines = stripped.split(/\r\n|\n/);
+      const rowCount = Math.max(0, lines.length - 1);
+      setPersistenceStatus(
+        `✓ csv · ${String(rowCount)} rows · ${String(csv.length)} bytes`,
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setPersistenceStatus(`✗ export-csv failed: ${msg}`);
+      openPersistencePanel("Export CSV failed");
+    }
+  });
+
+  document.getElementById("permalink")?.addEventListener("click", () => {
+    if (chart === null || persistenceTextarea === null) {
+      return;
+    }
+    try {
+      const fragment = chart.permalink();
+      persistenceTextarea.value = fragment;
+      openPersistencePanel("Permalink");
+      if (screenshotPreviewRow !== null) {
+        screenshotPreviewRow.style.display = "none";
+      }
+      const tier = fragment.startsWith("#z=") ? "full" : "minimal";
+      setPersistenceStatus(
+        `✓ permalink · tier=${tier} · ${String(fragment.length)} chars`,
+      );
+      // Copy to clipboard when allowed; failure is silent — the user can
+      // still copy from the textarea manually.
+      const clip = navigator.clipboard as { writeText?: (s: string) => Promise<void> } | undefined;
+      if (clip?.writeText !== undefined) {
+        void clip.writeText(fragment);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setPersistenceStatus(`✗ permalink failed: ${msg}`);
+      openPersistencePanel("Permalink failed");
+    }
+  });
+
+  document.getElementById("permalink-load")?.addEventListener("click", () => {
+    if (chart === null || persistenceTextarea === null) {
+      return;
+    }
+    const raw = persistenceTextarea.value.trim();
+    if (raw.length === 0) {
+      setPersistenceStatus("✗ permalink load: textarea is empty");
+      openPersistencePanel("Permalink load");
+      return;
+    }
+    let partial: Partial<ChartSaveState>;
+    try {
+      partial = TimeSeriesChart.fromPermalink(raw);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setPersistenceStatus(`✗ permalink decode: ${msg}`);
+      return;
+    }
+    openPersistencePanel("Loading permalink…");
+    setPersistenceStatus("⏳ load in progress");
+    // `fromPermalink` returns a Partial<ChartSaveState>; Tier 2 results
+    // round-trip through chart.load (which re-validates). Tier 1 partials
+    // would fail `isChartSaveState` because they lack required fields like
+    // `series` and `savedAt` — for Tier 1, we fall back to setting just
+    // window + interval + theme on the existing chart.
+    if (partial.series !== undefined) {
+      void chart
+        .load(partial)
+        .then(() => {
+          setPersistenceStatus(`✓ permalink loaded`);
+        })
+        .catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          setPersistenceStatus(`✗ permalink load failed: ${msg}`);
+        });
+      return;
+    }
+    // Tier 1 — minimal control protocol. Apply the fields we have.
+    try {
+      if (partial.intervalDuration !== undefined) {
+        chart.setInterval(partial.intervalDuration);
+      }
+      if (partial.window !== undefined) {
+        chart.setWindow(partial.window);
+      }
+      setPersistenceStatus("✓ permalink loaded (tier 1, window+interval applied)");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setPersistenceStatus(`✗ permalink tier-1 apply failed: ${msg}`);
+    }
+  });
+
   document.getElementById("screenshot")?.addEventListener("click", () => {
     if (chart === null) {
       return;
@@ -1254,6 +1393,239 @@ async function main(): Promise<void> {
         setPersistenceStatus(`✗ screenshot failed: ${msg}`);
       });
   });
+
+  // ─── Phase 15 Cycle C — chart catalog (IndexedDB) ─────────────────────────
+  // Reference impl using `indexedDbAdapter`. A real host would expose the
+  // adapter choice (and templates) via app settings; the demo just wires
+  // the default backend so a trader can save / load / rename / delete
+  // named layouts and verify the round-trip across page reloads.
+  const catalogSelect = document.getElementById("catalog-select") as HTMLSelectElement | null;
+  const catalogThumb = document.getElementById("catalog-thumb") as HTMLImageElement | null;
+  let catalogAdapter: ChartStorageAdapter | null = null;
+  let activeChartId: ChartId | null = null;
+  let lastCatalogThumbUrl: string | null = null;
+
+  try {
+    catalogAdapter = indexedDbAdapter({ dbName: "carta-demo-catalog" });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    setPersistenceStatus(`✗ catalog: ${msg}`);
+    catalogAdapter = null;
+  }
+
+  const formatRelative = (iso: string): string => {
+    const ms = Date.now() - new Date(iso).getTime();
+    if (!Number.isFinite(ms) || ms < 0) { return iso; }
+    const sec = Math.floor(ms / 1000);
+    if (sec < 60) { return `${String(sec)}s ago`; }
+    const min = Math.floor(sec / 60);
+    if (min < 60) { return `${String(min)}m ago`; }
+    const hr = Math.floor(min / 60);
+    if (hr < 24) { return `${String(hr)}h ago`; }
+    return new Date(iso).toLocaleDateString();
+  };
+
+  const renderCatalog = async (): Promise<void> => {
+    if (catalogSelect === null || catalogAdapter === null) {
+      return;
+    }
+    let metas: readonly ChartMetadata[] = [];
+    try {
+      metas = await catalogAdapter.listCharts();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setPersistenceStatus(`✗ catalog list: ${msg}`);
+      return;
+    }
+    // Clear except the "(none)" placeholder.
+    while (catalogSelect.options.length > 1) {
+      catalogSelect.remove(1);
+    }
+    for (const m of metas) {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.textContent = `${m.name} · ${formatRelative(m.modifiedAt)} · ${String(Math.round(m.bytes / 1024))} KB`;
+      catalogSelect.appendChild(opt);
+    }
+    if (activeChartId !== null && metas.some((m) => m.id === activeChartId)) {
+      catalogSelect.value = activeChartId;
+    } else {
+      catalogSelect.value = "";
+      activeChartId = null;
+    }
+    updateCatalogThumb();
+  };
+
+  const updateCatalogThumb = (): void => {
+    if (catalogThumb === null || catalogSelect === null || catalogAdapter === null) {
+      return;
+    }
+    const id = catalogSelect.value;
+    if (id.length === 0) {
+      catalogThumb.style.display = "none";
+      catalogThumb.removeAttribute("src");
+      if (lastCatalogThumbUrl !== null) {
+        URL.revokeObjectURL(lastCatalogThumbUrl);
+        lastCatalogThumbUrl = null;
+      }
+      return;
+    }
+    void catalogAdapter.getChart(id as ChartId).then((row) => {
+      if (row === null) { return; }
+      const url = row.meta.thumbnailUrl;
+      if (typeof url === "string" && url.length > 0) {
+        catalogThumb.src = url;
+        catalogThumb.style.display = "inline-block";
+      } else {
+        catalogThumb.style.display = "none";
+        catalogThumb.removeAttribute("src");
+      }
+    });
+  };
+
+  catalogSelect?.addEventListener("change", () => {
+    activeChartId = (catalogSelect.value.length > 0 ? catalogSelect.value : null) as ChartId | null;
+    updateCatalogThumb();
+  });
+
+  const captureThumbnail = async (): Promise<Blob | undefined> => {
+    if (chart === null) { return undefined; }
+    try {
+      // `scale: 1` keeps the encoded bitmap at the requested CSS dims
+      // (240×120). The cycle-A default `scale: 2` is retina-grade for
+      // full screenshots; thumbnails want bytes, not texels.
+      return await chart.exportPNG({ width: 240, height: 120, scale: 1, format: "image/webp", quality: 0.7 });
+    } catch {
+      // Defer-on-gesture or pipeline failure — save without thumbnail.
+      return undefined;
+    }
+  };
+
+  document.getElementById("catalog-save-new")?.addEventListener("click", () => {
+    if (chart === null || catalogAdapter === null) { return; }
+    const name = globalThis.prompt("Name this layout:", `layout-${new Date().toISOString().slice(11, 19)}`);
+    if (name === null || name.trim().length === 0) { return; }
+    void (async () => {
+      try {
+        const state = chart.save();
+        const thumb = await captureThumbnail();
+        const meta = await catalogAdapter.saveChart({
+          name: name.trim(),
+          state,
+          ...(thumb !== undefined ? { thumbnail: thumb } : {}),
+        });
+        activeChartId = meta.id;
+        await renderCatalog();
+        setPersistenceStatus(`✓ catalog: saved "${meta.name}" (${String(Math.round(meta.bytes / 1024))} KB)`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setPersistenceStatus(`✗ catalog save: ${msg}`);
+      }
+    })();
+  });
+
+  document.getElementById("catalog-overwrite")?.addEventListener("click", () => {
+    if (chart === null || catalogAdapter === null) { return; }
+    if (activeChartId === null) {
+      setPersistenceStatus("✗ catalog overwrite: select a layout first (or use Save as new)");
+      return;
+    }
+    const selectedName: string = (() => {
+      if (catalogSelect === null) { return "layout"; }
+      const opt = catalogSelect.options[catalogSelect.selectedIndex];
+      if (opt === undefined) { return "layout"; }
+      const text = opt.textContent;
+      if (typeof text !== "string") { return "layout"; }
+      return text.split(" · ")[0] ?? "layout";
+    })();
+    void (async () => {
+      try {
+        const state = chart.save();
+        const thumb = await captureThumbnail();
+        const meta = await catalogAdapter.saveChart({
+          id: activeChartId,
+          name: selectedName,
+          state,
+          ...(thumb !== undefined ? { thumbnail: thumb } : {}),
+        });
+        await renderCatalog();
+        setPersistenceStatus(`✓ catalog: overwrote "${meta.name}"`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setPersistenceStatus(`✗ catalog overwrite: ${msg}`);
+      }
+    })();
+  });
+
+  document.getElementById("catalog-load")?.addEventListener("click", () => {
+    if (chart === null || catalogAdapter === null || activeChartId === null) {
+      setPersistenceStatus("✗ catalog load: select a layout first");
+      return;
+    }
+    const idAtClick = activeChartId;
+    void (async () => {
+      try {
+        const row = await catalogAdapter.getChart(idAtClick);
+        if (row === null) {
+          setPersistenceStatus("✗ catalog load: row missing (already deleted?)");
+          await renderCatalog();
+          return;
+        }
+        setPersistenceStatus("⏳ catalog load in progress");
+        await chart.load(row.state);
+        setPersistenceStatus(`✓ catalog: loaded "${row.meta.name}"`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setPersistenceStatus(`✗ catalog load: ${msg}`);
+      }
+    })();
+  });
+
+  document.getElementById("catalog-rename")?.addEventListener("click", () => {
+    if (catalogAdapter === null || activeChartId === null) {
+      setPersistenceStatus("✗ catalog rename: select a layout first");
+      return;
+    }
+    const next = globalThis.prompt("New name:");
+    if (next === null || next.trim().length === 0) { return; }
+    const idAtClick = activeChartId;
+    void (async () => {
+      try {
+        const meta = await catalogAdapter.renameChart(idAtClick, next.trim());
+        await renderCatalog();
+        setPersistenceStatus(`✓ catalog: renamed to "${meta.name}"`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setPersistenceStatus(`✗ catalog rename: ${msg}`);
+      }
+    })();
+  });
+
+  document.getElementById("catalog-delete")?.addEventListener("click", () => {
+    if (catalogAdapter === null || activeChartId === null) {
+      setPersistenceStatus("✗ catalog delete: select a layout first");
+      return;
+    }
+    const ok = globalThis.confirm("Delete this layout? This cannot be undone.");
+    if (!ok) { return; }
+    const idAtClick = activeChartId;
+    void (async () => {
+      try {
+        await catalogAdapter.removeChart(idAtClick);
+        activeChartId = null;
+        await renderCatalog();
+        setPersistenceStatus("✓ catalog: deleted");
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setPersistenceStatus(`✗ catalog delete: ${msg}`);
+      }
+    })();
+  });
+
+  // Initial population.
+  if (catalogAdapter !== null) {
+    void renderCatalog();
+  }
   const loadSyntheticData = (): void => {
     if (chart === null) {
       return;

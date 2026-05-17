@@ -413,6 +413,19 @@ export interface ExportSizeClampedPayload {
   readonly max: number;
 }
 
+/**
+ * Phase 15 Cycle B — emitted by `chart.exportCSV()` when the requested
+ * range straddles cache gaps. The returned CSV contains only the rows that
+ * are cached; phantom rows are not synthesized. Hosts that want a complete
+ * series should `chart.load`-then-wait or pre-warm the cache before export.
+ */
+export interface ExportPartialDataPayload {
+  readonly channelId: string;
+  readonly intervalDuration: Interval;
+  readonly range: { readonly startTime: Time; readonly endTime: Time };
+  readonly gaps: readonly Range[];
+}
+
 export interface CartaEventMap extends Record<string, unknown> {
   readonly "window:change": ChartWindow;
   readonly "interval:change": IntervalChange;
@@ -441,6 +454,7 @@ export interface CartaEventMap extends Record<string, unknown> {
   readonly "export:deferred": ExportDeferredPayload;
   readonly "export:failed": ExportFailedPayload;
   readonly "export:size-clamped": ExportSizeClampedPayload;
+  readonly "export:partial-data": ExportPartialDataPayload;
 }
 
 export type EventKey = keyof CartaEventMap;

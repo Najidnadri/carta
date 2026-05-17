@@ -157,8 +157,23 @@ export function isWatermarkConfig(x: unknown): x is WatermarkConfig {
   if (!isStringOrUndefined(x["fontFamily"])) {
     return false;
   }
-  if (!isStringOrUndefined(x["image"])) {
-    return false;
+  if (x["image"] !== undefined) {
+    if (!isRecord(x["image"])) {
+      return false;
+    }
+    const img = x["image"];
+    if (typeof img["url"] !== "string") {
+      return false;
+    }
+    if (!isOptional(img["scale"], isFiniteNumber)) {
+      return false;
+    }
+    if (!isOptional(img["maxWidth"], isFiniteNumber)) {
+      return false;
+    }
+    if (!isOptional(img["maxHeight"], isFiniteNumber)) {
+      return false;
+    }
   }
   return true;
 }

@@ -36,13 +36,21 @@ import { TimeAxis, type TimeAxisOptions } from "../time/TimeAxis.js";
 import type { TickInfo } from "../time/TimeAxis.js";
 import { TimeScale } from "../time/TimeScale.js";
 import { ViewportController } from "../viewport/ViewportController.js";
-import { saveChart, type SaveContext } from "../persistence/save.js";
+import { pickPrimaryChannelId, saveChart, type SaveContext } from "../persistence/save.js";
 import { loadChart, type LoadContext } from "../persistence/load.js";
 import { exportChartPng, type ExportContext } from "../persistence/pngExport.js";
+import { exportCsv, type CsvExportContext } from "../persistence/csv.js";
+import {
+  decodePermalink,
+  encodePermalink,
+  type PermalinkContext,
+} from "../persistence/permalink.js";
 import {
   OperationCanceledError,
   type ChartSaveState,
+  type CsvExportOptions,
   type LoadOptions,
+  type PermalinkOptions,
   type PngExportOptions,
 } from "../persistence/types.js";
 import {
@@ -2464,6 +2472,74 @@ export class TimeSeriesChart {
   }
 
   /**
+   * Phase 15 Cycle B — encode visible bars on one channel as Excel-friendly
+   * CSV. UTF-8 BOM + CRLF + period decimal + comma delimiter by default.
+   * Throws `ExportError('GENERIC', ...)` synchronously on unknown channel,
+   * marker channel, or invalid locale knobs — fail-loud so the trader sees
+   * the bug at click-time, not when Excel opens a malformed file.
+   *
+   * Emits `'export:partial-data'` once when the requested range straddles
+   * cache gaps. Phantom rows are not synthesized — the cache is the source
+   * of truth and a half-empty CSV is more honest than a fabricated one.
+   */
+  exportCSV(opts: CsvExportOptions = {}): string {
+    if (this.disposed) {
+      throw new OperationCanceledError("chart disposed");
+    }
+    const snap = this.config.snapshot;
+    const ctx: CsvExportContext = {
+      window: { startTime: snap.startTime, endTime: snap.endTime },
+      intervalDuration: snap.intervalDuration,
+      defaultChannelId: pickPrimaryChannelId(this.series),
+      getChannel: (id): Channel | undefined => this.dataStore.getChannel(id),
+      recordsInRange: (id, iv, start, end): readonly DataRecord[] =>
+        this.dataStore.recordsInRange(id, iv, start, end),
+      missingRanges: (id, iv, start, end): readonly Range[] =>
+        this.dataStore.missingRanges(id, iv, start, end),
+      emitPartialData: (payload): void => {
+        this.emitter.emit("export:partial-data", payload);
+      },
+    };
+    return exportCsv(ctx, opts);
+  }
+
+  /**
+   * Phase 15 Cycle B — encode the chart's declarative state as a URL
+   * fragment. The default `'auto'` tier picks Tier 1 (compact
+   * `URLSearchParams` shape, ≤ 200 chars) for "shareable control protocol"
+   * states and Tier 2 (lz-string-compressed full save state) whenever
+   * lossy info exists (drawings, ≥ 2 series, custom theme, etc.).
+   *
+   * Pure function — never touches `location` / `history`. Throws
+   * `PermalinkTooLargeError` when the encoded fragment exceeds the
+   * configured limit (default 8192 chars).
+   */
+  permalink(opts: PermalinkOptions = {}): string {
+    if (this.disposed) {
+      throw new OperationCanceledError("chart disposed");
+    }
+    const ctx: PermalinkContext = {
+      buildSaveState: (): ChartSaveState => this.save(),
+    };
+    return encodePermalink(ctx, opts);
+  }
+
+  /**
+   * Phase 15 Cycle B — decode a permalink fragment into a partial save
+   * state ready for `chart.load(state)`. Accepts bare fragments
+   * (`#z=...` / `c=1&...`), full URLs (`https://x.y#z=...`), and query-
+   * style envelopes (`?c=1&...`). Tier 2 fragments are migrated and
+   * validated through the same pipeline as `chart.load`.
+   *
+   * Throws `CartaSchemaError` on any input that doesn't decode cleanly —
+   * fail-loud is intentional, a silently-empty partial state would mean
+   * trader's pasted URL drops their drawings without warning.
+   */
+  static fromPermalink(fragment: string): Partial<ChartSaveState> {
+    return decodePermalink(fragment);
+  }
+
+  /**
    * Phase 15 Cycle A — internal helper that cancels every in-flight
    * pointer/drag/brush gesture before a state-mutating load. Mirrors
    * the cleanup chain in `setInterval` + `applyOptions({theme})`.
@@ -2611,6 +2687,13 @@ export class TimeSeriesChart {
       hideTransientLayers: (): (() => void) => this.hideTransientLayersForExport(),
       suspendDrawings: () => this.drawingsController.suspendTransients(),
       resumeDrawings: (token): void => { this.drawingsController.resumeTransients(token); },
+      mountWatermarkChild: (child): (() => void) => {
+        const stage = this.renderer.app.stage;
+        stage.addChild(child);
+        return (): void => {
+          try { stage.removeChild(child); } catch { /* already removed */ }
+        };
+      },
       computeLayoutAndPaint: (cssW, cssH): void => {
         const prevConfig = this.config;
         this.config = this.config.withSize(cssW, cssH);

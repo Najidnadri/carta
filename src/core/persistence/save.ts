@@ -186,7 +186,7 @@ function buildThemeOverrides(
   return out;
 }
 
-function pickPrimaryChannelId(series: readonly Series[]): string {
+export function pickPrimaryChannelId(series: readonly Series[]): string {
   for (const s of series) {
     if (s.kind === "ohlc") {
       return s.channel;

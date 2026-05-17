@@ -254,12 +254,17 @@ export {
   CartaSchemaError,
   ExportError,
   OperationCanceledError,
+  PermalinkTooLargeError,
   SERIES_KINDS,
 } from "./core/persistence/types.js";
 export type {
   ChartSaveState,
+  CsvExportOptions,
+  CsvTimeFormat,
   LoadOptions,
   PaneSaveEntry,
+  PermalinkOptions,
+  PermalinkTier,
   PngExportOptions,
   SeriesKind,
   SeriesSaveEntry,
@@ -272,3 +277,30 @@ export {
   isSeriesSaveEntry,
   isWatermarkConfig,
 } from "./core/persistence/validate.js";
+export { decodePermalink, encodePermalink } from "./core/persistence/permalink.js";
+export type { PermalinkContext } from "./core/persistence/permalink.js";
+export { ImageWatermarkLayer } from "./core/persistence/ImageWatermarkLayer.js";
+export type {
+  ImageWatermarkOptions,
+  ImageWatermarkPosition,
+} from "./core/persistence/ImageWatermarkLayer.js";
+export {
+  CartaStorageError,
+  isQuotaError,
+  mintId,
+} from "./core/persistence/adapters/types.js";
+export type {
+  CartaStorageErrorCode,
+  ChartId,
+  ChartMetadata,
+  ChartStorageAdapter,
+  ChartTemplateMetadata,
+  SaveChartInput,
+  SaveTemplateInput,
+  TemplateId,
+} from "./core/persistence/adapters/types.js";
+export { localStorageAdapter } from "./core/persistence/adapters/localStorage.js";
+export type { LocalStorageAdapterOptions } from "./core/persistence/adapters/localStorage.js";
+export { indexedDbAdapter } from "./core/persistence/adapters/indexedDb.js";
+export type { IndexedDbAdapterOptions } from "./core/persistence/adapters/indexedDb.js";
+export { reqAsPromise, txAsPromise } from "./core/persistence/adapters/idbPromise.js";
